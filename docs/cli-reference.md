@@ -1125,7 +1125,7 @@ fn mcp disable <name> [--scope global|project]
 fn mcp import <claude-desktop.json> [--scope global|project] [--yes]
 fn mcp export [--scope global|project|effective] [--output <file>] [--json]
 fn mcp validate [--scope global|project|effective] [--json]
-fn mcp serve [--project <name>]
+fn mcp serve [--project <name>] [--allow-destructive]
 ```
 
 Scope semantics:
@@ -1141,7 +1141,7 @@ Secret handling:
 - `fn mcp import` accepts Claude Desktop-style `{ "mcpServers": { ... } }` JSON, creates Fusion secrets for imported plaintext env/header values, and writes only secret references.
 - `list`, `export`, and `validate` print descriptors/summaries, never decrypted secret values.
 
-`fn mcp serve` is the inverse of the rest of this command group: instead of configuring MCP servers Fusion connects out to, it runs Fusion itself as a local stdio MCP server for an operator's own MCP client (Claude Desktop, Claude Code). It exposes a curated, fixed task/agent/workflow tool allow-list — no release/publish/version-tag tooling, no `*_delete` tools, no raw secret values. See ["Fusion as an MCP server"](./mcp.md#fusion-as-an-mcp-server-fn-mcp-serve) for the full tool list, safety boundaries, and a Claude Desktop/Code config example.
+`fn mcp serve` is the inverse of the rest of this command group: instead of configuring MCP servers Fusion connects out to, it runs Fusion itself as a local stdio MCP server for an operator's own MCP client (Claude Desktop, Claude Code). It exposes a curated, fixed task/agent/workflow tool allow-list — no release/publish/version-tag tooling, no raw secret values. Pass `--allow-destructive` (off by default) to additionally register `fn_task_delete`, `fn_agent_delete`, and `fn_workflow_delete`; every destructive invocation logs an audit line to stderr. See ["Fusion as an MCP server"](./mcp.md#fusion-as-an-mcp-server-fn-mcp-serve) for the full tool list, the destructive-tier documentation, safety boundaries, and a Claude Desktop/Code config example.
 
 | Option | Description |
 |---|---|
@@ -1158,6 +1158,7 @@ Secret handling:
 | `--create-secret-header NAME=VALUE` | Create a Fusion secret for a header and store only the reference. |
 | `--output <file>` | Write `fn mcp export` output to a file instead of stdout. |
 | `--json` | Print machine-readable output for list/export/validate where supported. |
+| `--allow-destructive` | `fn mcp serve` only. Off by default; registers `fn_task_delete`/`fn_agent_delete`/`fn_workflow_delete` when present. |
 | `--yes` | Skip confirmation during import. |
 
 ---

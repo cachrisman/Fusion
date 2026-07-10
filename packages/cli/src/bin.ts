@@ -412,8 +412,11 @@ PR:
                                       Export Fusion MCP JSON with secret references only
   fn mcp validate [--scope <global|project|effective>] [--json]
                                       Validate MCP definitions without revealing secrets
-  fn mcp serve [--project <name>]      Run Fusion as a local stdio MCP server for operator MCP clients
-                                      (Claude Desktop / Claude Code); curated task/agent/workflow tools only
+  fn mcp serve [--project <name>] [--allow-destructive]
+                                      Run Fusion as a local stdio MCP server for operator MCP clients
+                                      (Claude Desktop / Claude Code); curated task/agent/workflow tools only.
+                                      --allow-destructive opts into fn_task_delete/fn_agent_delete/
+                                      fn_workflow_delete (off by default)
 
   fn git status              Show current branch, commit, dirty state, ahead/behind
   fn git push                Push current branch
@@ -1783,9 +1786,18 @@ async function main() {
           case "test":
             await runMcpValidate({ projectName, scope, json: args.includes("--json") });
             break;
-          case "serve":
-            await runMcpServe({ projectName });
+          case "serve": {
+            /*
+            FNXC:McpServer 2026-07-10-22:10:
+            --allow-destructive is off by default (FUSI-002) — an operator
+            must explicitly opt in for `fn mcp serve` to register
+            fn_task_delete/fn_agent_delete/fn_workflow_delete. Any other/
+            malformed flag value leaves the destructive tier absent.
+            */
+            const allowDestructive = args.includes("--allow-destructive");
+            await runMcpServe({ projectName, allowDestructive });
             break;
+          }
           default:
             console.error(`Unknown subcommand: mcp ${subcommand || ""}`);
             console.log("Try: fn mcp list | add | edit | remove | enable | disable | import | export | validate | serve");

@@ -637,7 +637,15 @@ TaskStore/SQLite handles even more consequential than a one-shot CLI command.
 stdout is reserved for the MCP protocol channel; every operator-facing
 diagnostic in this function goes to stderr only.
 */
-export async function runMcpServe(opts: { projectName?: string } = {}): Promise<void> {
+/*
+FNXC:McpServer 2026-07-10-22:10:
+FUSI-002: `allowDestructive` (from `fn mcp serve --allow-destructive`) is
+threaded straight into `buildMcpServer(...)` and defaults to `false` when
+omitted, matching the CLI parse default in bin.ts. This does not change the
+FN-7739 close-on-every-exit-path discipline below — the flag only affects
+which tools the resulting McpServer registers.
+*/
+export async function runMcpServe(opts: { projectName?: string; allowDestructive?: boolean } = {}): Promise<void> {
   const { buildMcpServer } = await import("../mcp-server/server.js");
   const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
 
@@ -669,14 +677,18 @@ export async function runMcpServe(opts: { projectName?: string } = {}): Promise<
     context = await loadContext(opts.projectName, true);
     const project = ensureProject(context);
 
-    mcpServer = buildMcpServer({ cwd: project.projectPath, store: project.store, version: process.env.npm_package_version });
+    const allowDestructive = opts.allowDestructive === true;
+    mcpServer = buildMcpServer({ cwd: project.projectPath, store: project.store, version: process.env.npm_package_version, allowDestructive });
     mcpServer.server.server.onclose = () => {
       void shutdown(0);
     };
 
     const transport = new StdioServerTransport();
     await mcpServer.connect(transport);
-    console.error(`[fn mcp serve] Fusion MCP operator server listening on stdio (project: ${project.projectName})`);
+    console.error(
+      `[fn mcp serve] Fusion MCP operator server listening on stdio (project: ${project.projectName})` +
+        (allowDestructive ? " [destructive tools ENABLED: fn_task_delete, fn_agent_delete, fn_workflow_delete]" : ""),
+    );
   } catch (error) {
     console.error("[fn mcp serve] failed to start", error instanceof Error ? error.message : error);
     await shutdown(1);

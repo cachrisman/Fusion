@@ -278,7 +278,10 @@ See [Settings Reference](./settings-reference.md) for the `mcpServers` settings 
 
 <!--
 FNXC:McpDocs 2026-07-10-21:00:
-Every other section on this page documents Fusion as an MCP *client* (configuring/forwarding external MCP servers). This section documents the inversion: `fn mcp serve` makes Fusion itself an MCP *server*, over local stdio only. Keep the curated tool list and safety boundaries below in sync with packages/cli/src/mcp-server/tools.ts (MCP_TOOL_REGISTRY) — that module is the single source of truth.
+Every other section on this page documents Fusion as an MCP *client* (configuring/forwarding external MCP servers). This section documents the inversion: `fn mcp serve` makes Fusion itself an MCP *server*, over local stdio only. Keep the curated tool list and safety boundaries below in sync with packages/cli/src/mcp-server/tools.ts (MCP_TOOL_REGISTRY, DESTRUCTIVE_TOOL_TIER, buildMcpToolRegistry) — that module is the single source of truth.
+
+FNXC:McpDocs 2026-07-10-22:10:
+FUSI-002 adds the off-by-default `--allow-destructive` flag and the first destructive tool tier (`fn_task_delete`, `fn_agent_delete`, `fn_workflow_delete`). Keep the "Destructive tools" section in sync with `DESTRUCTIVE_TOOL_TIER` in tools.ts, and keep the flag's off-by-default default in sync with `BuildMcpServerOptions.allowDestructive` in server.ts.
 -->
 
 Every other command on this page configures Fusion as an MCP **client**. `fn mcp serve` is the inverse: it starts Fusion as a local stdio MCP **server**, so an operator's own MCP client (Claude Desktop, Claude Code, or any other MCP-compatible client) can connect to Fusion and drive the board directly — creating and inspecting tasks, delegating work to agents, and managing workflows — without going through the dashboard UI.
@@ -286,13 +289,14 @@ Every other command on this page configures Fusion as an MCP **client**. `fn mcp
 ### Running it
 
 ```bash
-fn mcp serve [--project <name>]
+fn mcp serve [--project <name>] [--allow-destructive]
 ```
 
 - Resolves the target project the same way every other `fn` command does: `--project <name>` (registered project name or ID), or CWD auto-detection when omitted.
-- Communicates over **stdio only**. stdout is reserved for the MCP JSON-RPC protocol channel; all operator-facing diagnostics (startup confirmation, errors) are written to stderr.
+- Communicates over **stdio only**. stdout is reserved for the MCP JSON-RPC protocol channel; all operator-facing diagnostics (startup confirmation, errors, destructive-tool audit lines) are written to stderr.
 - Runs until the connected MCP client disconnects, or until it receives `SIGINT`/`SIGTERM`. On every exit path — clean shutdown, signal, or a startup error — it closes both the MCP server and the underlying `TaskStore`/SQLite handles before exiting (the same close-on-every-exit-path discipline the `fn mcp add/list/...` commands already follow).
 - Never routes through the HTTP dashboard: every tool call dispatches directly to the same `@fusion/core` / `@fusion/engine` domain operations the pi-extension `fn_*` tools use.
+- `--allow-destructive` is **off by default**. Omit it (or pass any other/malformed value) and the server exposes exactly the v1 tool set below, with zero `*_delete` tools — identical to running `fn mcp serve` before this flag existed. Pass `--allow-destructive` to opt into the destructive tool tier (see below). This is a boolean presence flag, not `--allow-destructive=true/false`.
 
 ### The v1 tool allow-list
 
@@ -319,17 +323,29 @@ fn mcp serve [--project <name>]
 - `fn_workflow_update` — update a custom workflow definition
 - `fn_workflow_select` — assign a workflow to a task (`task_id` is required — there is no ambient task context on this server)
 
+### Destructive tools (`--allow-destructive`, off by default)
+
+Starting `fn mcp serve --allow-destructive` adds exactly three additional tools on top of the v1 set above. **These are irreversible board mutations** — there is no undo from inside the MCP session:
+
+- `fn_task_delete` — soft-deletes a task from active board views (the task row and artifacts are preserved; use `allowResurrection`/`removeLineageReferences` exactly as the pi-extension `fn_task_delete` tool does). Dispatches to the same `TaskStore.deleteTask(...)` operation.
+- `fn_agent_delete` — deletes a non-ephemeral agent. Subject to the **same** `resolveAgentProvisioningPolicy` gate (`allow` / `require-approval` / `deny`) the pi-extension `fn_agent_delete` handler uses — a `deny` or `require-approval` policy decision is honored exactly as it is elsewhere; the agent is never deleted on those branches. Dispatches to `AgentStore.deleteAgent(...)`.
+- `fn_workflow_delete` — deletes a custom workflow definition. Built-in workflows (`builtin:*`) remain protected — the store's rejection is surfaced, never bypassed. Any tasks pinned to the deleted workflow are re-homed to the default workflow's entry column.
+
+Each destructive tool's `description` begins with the literal marker `DESTRUCTIVE:` so it is unmistakable in any MCP client's tool listing. Every destructive invocation — success or failure — writes an ids/counts/outcomes-only audit line to **stderr** (never stdout): tool name, resource id, and outcome (`deleted` / `denied` / `pending_approval` / `error`). No prose and no secret values are ever included in that line.
+
 ### Safety boundaries
 
 These are enforced by the tool registry itself, not just by caller discipline:
 
 - **No release/publish/version-tag tooling.** Releasing is an operator-only action performed outside the task loop (see [Contributing](./contributing.md)); `fn mcp serve` never exposes `pnpm release`, `changeset publish`, `pnpm publish`, or git tagging.
-- **No `*_delete` tools in v1.** Deleting tasks, agents, or workflows is out of scope for this server's first version. A future destructive tool would need to be gated behind an explicit `--allow-destructive` flag — none exists today.
+- **`*_delete` tools are opt-in only.** The v1 base set (no `--allow-destructive`) ships zero `*_delete` tools, exactly as it did before this flag existed. `--allow-destructive` adds exactly the three tools documented above — no more, no fewer — and is off by default.
 - **No raw secret values.** Every tool result is passed through a redaction pass before being returned; secret-shaped fields (tokens, API keys, passwords, authorization headers) are never surfaced in a tool response. Secret management (`fn mcp add/edit --env/--header`, the Secrets view) is intentionally outside this server's allow-list entirely.
 
 ### Trust model
 
 `fn mcp serve` runs as a local stdio subprocess launched directly by the operator's own MCP client, under the operator's own OS user privileges. Every tool call is treated as an already-authenticated operator action — the same privileged-caller shape (`{ id: "user", role: "user", isPrivileged: true }`) the pi extension's `fn_agent_create` already uses. There is no additional network-facing authentication boundary, and none is needed: this is a local process talking to a local client over stdin/stdout, the same trust boundary as any other CLI command you run yourself. Do not put this server behind a network transport (HTTP/SSE) without re-deriving this trust model first.
+
+`--allow-destructive` is not an additional authentication boundary either — it is an explicit operator confirmation that this particular `fn mcp serve` invocation should register delete-capable tools. Since every call is already treated as a privileged operator action, `fn_agent_delete`'s provisioning-policy check will typically resolve to `allow`; the `deny`/`require-approval` branches remain reachable (and are honored) whenever project settings configure a non-default `agentProvisioning` policy.
 
 ### Claude Desktop / Claude Code configuration
 
@@ -346,4 +362,17 @@ Add an entry to your MCP client's server configuration pointing at the `fn` bina
 }
 ```
 
-Omit `--project` (and its argument) to have Fusion auto-detect the project from the working directory the client launches the process in. Expected outcome: the client lists the fifteen curated Fusion tools above and can call them directly to manage the board.
+Add `"--allow-destructive"` to `args` to also opt into the destructive tool tier:
+
+```json
+{
+  "mcpServers": {
+    "fusion": {
+      "command": "fn",
+      "args": ["mcp", "serve", "--project", "my-project", "--allow-destructive"]
+    }
+  }
+}
+```
+
+Omit `--project` (and its argument) to have Fusion auto-detect the project from the working directory the client launches the process in. Expected outcome (no `--allow-destructive`): the client lists the fifteen curated Fusion tools above and can call them directly to manage the board. Expected outcome (with `--allow-destructive`): the client lists those fifteen tools **plus** `fn_task_delete`, `fn_agent_delete`, and `fn_workflow_delete` — eighteen tools total.

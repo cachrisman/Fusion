@@ -16,7 +16,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z, type ZodTypeAny } from "zod";
 import type { TaskStore } from "@fusion/core";
-import { MCP_TOOL_REGISTRY, type McpJsonSchema, type McpToolRuntimeContext } from "./tools.js";
+import { buildMcpToolRegistry, type McpJsonSchema, type McpToolRuntimeContext } from "./tools.js";
 
 /**
  * Converts one of this registry's plain JSON-Schema tool inputs into the raw
@@ -66,6 +66,19 @@ export interface BuildMcpServerOptions {
   store: TaskStore;
   /** Server version string; defaults to "0.0.0" when omitted (tests). */
   version?: string;
+  /*
+  FNXC:McpServer 2026-07-10-21:00:
+  Off-by-default destructive-tool opt-in (FUSI-002). `fn mcp serve` runs as a
+  local stdio subprocess launched directly by the operator with the
+  operator's own OS privileges (see the trust-model note in tools.ts) — the
+  gate here is not an authentication boundary, it is a deliberate "did the
+  operator explicitly ask for delete tools" confirmation so a client that
+  merely connects to the curated v1 read/safe-mutation surface can never
+  invoke fn_task_delete / fn_agent_delete / fn_workflow_delete by accident.
+  Defaults to `false` so every existing `fn mcp serve` invocation keeps the
+  FUSI-001 delete-free tool set.
+  */
+  allowDestructive?: boolean;
 }
 
 export interface FusionMcpServer {
@@ -77,22 +90,28 @@ export interface FusionMcpServer {
 }
 
 /**
- * Constructs an `McpServer` and registers every tool in the curated
- * {@link MCP_TOOL_REGISTRY}. Does not create or own a transport — callers
- * (e.g. `runMcpServe` in packages/cli/src/commands/mcp.ts, or a test) decide
- * how to connect it. This keeps the seam open for a future non-stdio
- * transport without touching tool registration.
+ * Constructs an `McpServer` and registers every tool {@link buildMcpToolRegistry}
+ * returns for the resolved `allowDestructive` flag. Does not create or own a
+ * transport — callers (e.g. `runMcpServe` in packages/cli/src/commands/mcp.ts,
+ * or a test) decide how to connect it. This keeps the seam open for a future
+ * non-stdio transport without touching tool registration.
  */
 export function buildMcpServer(options: BuildMcpServerOptions): FusionMcpServer {
-  const { cwd, store, version } = options;
+  const { cwd, store, version, allowDestructive = false } = options;
   const server = new McpServer(
     { name: "fusion", version: version ?? "0.0.0" },
-    { capabilities: { tools: {} }, instructions: "Fusion operator MCP server — curated read + safe-mutation task/agent/workflow controls." },
+    {
+      capabilities: { tools: {} },
+      instructions: allowDestructive
+        ? "Fusion operator MCP server — curated read + safe-mutation task/agent/workflow controls, PLUS destructive delete tools (--allow-destructive is enabled)."
+        : "Fusion operator MCP server — curated read + safe-mutation task/agent/workflow controls.",
+    },
   );
 
-  const runtimeCtx: McpToolRuntimeContext = { cwd };
+  const runtimeCtx: McpToolRuntimeContext = { cwd, allowDestructive };
+  const registry = buildMcpToolRegistry(runtimeCtx);
 
-  for (const tool of MCP_TOOL_REGISTRY) {
+  for (const tool of registry) {
     const inputShape = jsonSchemaToZodShape(tool.inputSchema);
     server.registerTool(
       tool.name,

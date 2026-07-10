@@ -35,12 +35,24 @@
  * caller discipline): no release/publish/version-tag/`changeset publish`
  * tool is ever declared here (see AGENTS.md "Releasing" — release is
  * operator-only, outside the task loop, and specifically outside this
- * server); no `*_delete` tool exists in v1; no tool result may surface a raw
- * secret value (redacted via {@link redactSecretsDeep} before being
- * serialized into any tool response). If a genuinely destructive tool is
- * ever added, it MUST be gated behind an explicit `--allow-destructive` CLI
- * flag threaded through `McpToolRuntimeContext` — no destructive tool is
- * wired in v1.
+ * server); no tool result may surface a raw secret value (redacted via
+ * {@link redactSecretsDeep} before being serialized into any tool response).
+ *
+ * FNXC:McpServer 2026-07-10-22:10:
+ * FUSI-002 adds the first destructive tier: `fn_task_delete`,
+ * `fn_agent_delete`, `fn_workflow_delete` — see {@link DESTRUCTIVE_TOOL_TIER}
+ * below. `buildMcpToolRegistry` is the SINGLE place the base v1 set is
+ * combined with that tier, and it only ever appends the tier when the
+ * caller-supplied `McpToolRuntimeContext.allowDestructive === true` (wired
+ * end-to-end from the `fn mcp serve --allow-destructive` CLI flag — see
+ * packages/cli/src/bin.ts and packages/cli/src/commands/mcp.ts). Off by
+ * default: omitting the flag reproduces the exact FUSI-001 v1 tool set with
+ * zero `*_delete` tools. `fn_agent_delete` reuses the SAME
+ * `resolveAgentProvisioningPolicy` gate (`deny`/`require-approval`/`allow`)
+ * the pi-extension `fn_agent_delete` handler uses — never bypassed. Every
+ * destructive invocation writes an ids/counts/outcomes-only audit line to
+ * **stderr** (never stdout — stdout is the MCP protocol channel) via
+ * {@link auditDestructiveInvocation}.
  */
 import {
   TaskStore,
@@ -57,6 +69,7 @@ import {
   type ColumnId,
   type TaskPriority,
 } from "@fusion/core";
+import { workflowDeleteParams } from "@fusion/engine";
 import {
   createWorkflowAuthoringTools,
   workflowListParams,
@@ -80,6 +93,15 @@ import {
 export interface McpToolRuntimeContext {
   /** Resolved project root directory (contains `.fusion/`). */
   cwd: string;
+  /*
+  FNXC:McpServer 2026-07-10-22:10:
+  Off-by-default destructive-tool gate (FUSI-002), wired end-to-end from
+  `fn mcp serve --allow-destructive`. Every destructive tool handler MUST
+  read this field — never a module-level/global flag — so the gate stays
+  provably scoped to one `buildMcpServer(...)` call. Defaults to `false`
+  wherever a caller constructs a context directly (e.g. tests).
+  */
+  allowDestructive?: boolean;
 }
 
 /** MCP `content` block — mirrors the SDK's `CallToolResult.content` shape. */
@@ -671,12 +693,18 @@ Workflow tools bind directly to @fusion/engine's createWorkflowAuthoringTools
 — the exact same factory the pi extension's fn_workflow_* tools use
 (packages/cli/src/extension.ts) — so IR validation and store-side behavior
 stay centralized in one place rather than being re-implemented here.
-fn_workflow_delete is intentionally NOT wired even though the factory
-produces it: v1 excludes every *_delete tool. `stripApprovalFlags: true`
-mirrors the pi extension's prompt-injectable-lane treatment since an
-external MCP client is likewise untrusted input for IR authoring.
+`stripApprovalFlags: true` mirrors the pi extension's prompt-injectable-lane
+treatment since an external MCP client is likewise untrusted input for IR
+authoring.
+
+FNXC:McpServer 2026-07-10-22:10:
+`fn_workflow_delete` (FUSI-002) reuses this SAME `bindWorkflowTool` binding
+— the factory already produces a `createWorkflowDeleteTool` entry that
+protects built-in workflows and re-homes occupants, so the destructive tier
+below does not re-implement any of that; it only gates registration of the
+name behind `allowDestructive` and adds a stderr audit line.
 */
-function bindWorkflowTool(name: "fn_workflow_list" | "fn_workflow_get" | "fn_workflow_create" | "fn_workflow_update" | "fn_workflow_select", description: string, inputSchema: McpJsonSchema): McpToolDefinition {
+function bindWorkflowTool(name: "fn_workflow_list" | "fn_workflow_get" | "fn_workflow_create" | "fn_workflow_update" | "fn_workflow_select" | "fn_workflow_delete", description: string, inputSchema: McpJsonSchema): McpToolDefinition {
   return {
     name,
     description,
@@ -741,12 +769,23 @@ const fnWorkflowSelect = bindWorkflowTool(
   jsonSchemaOf(workflowSelectParams),
 );
 
+const fnWorkflowDelete = bindWorkflowTool(
+  "fn_workflow_delete",
+  "DESTRUCTIVE: delete a custom Fusion workflow definition. Built-in workflows are protected. " +
+    "Any tasks using the deleted workflow have their selection cleared and are re-homed to the default " +
+    "workflow's entry column. Only registered when `fn mcp serve` is started with --allow-destructive.",
+  jsonSchemaOf(workflowDeleteParams),
+);
+
 /**
- * The curated v1 allow-list — the ONLY tools `fn mcp serve` exposes. Order
- * mirrors the task/agent/workflow grouping documented in docs/mcp.md.
+ * The curated v1 allow-list — the base set `fn mcp serve` ALWAYS exposes
+ * (with or without --allow-destructive). Order mirrors the task/agent/workflow
+ * grouping documented in docs/mcp.md.
  *
- * Deliberately absent: any `*_delete` tool, any release/publish/version-tag
- * tool, and any tool that could return raw secret material.
+ * Deliberately absent: any release/publish/version-tag tool, and any tool
+ * that could return raw secret material. `*_delete` tools live in
+ * {@link DESTRUCTIVE_TOOL_TIER} instead, appended only via
+ * {@link buildMcpToolRegistry} when the operator opts in.
  */
 export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnTaskCreate,
@@ -765,3 +804,168 @@ export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnWorkflowUpdate,
   fnWorkflowSelect,
 ];
+
+// ── Destructive tools (opt-in via --allow-destructive) ─────────────────────
+
+/*
+FNXC:McpServer 2026-07-10-22:10:
+Operator audit line for every destructive invocation. Written to STDERR ONLY
+— stdout is the MCP protocol transport channel and must never carry
+diagnostic output (mirrors the FUSI-001 `fn mcp serve` stderr-only logging
+convention in packages/cli/src/commands/mcp.ts). Payload is ids/counts/
+outcomes-only (tool name, resource id, outcome) per the AGENTS.md run-audit
+convention — never prose, never a raw secret value.
+*/
+function auditDestructiveInvocation(entry: { tool: string; resourceId: string; outcome: string }): void {
+  console.error(`[fn mcp serve] DESTRUCTIVE ${entry.tool} resourceId=${entry.resourceId} outcome=${entry.outcome}`);
+}
+
+const fnTaskDelete: McpToolDefinition = {
+  name: "fn_task_delete",
+  description:
+    "DESTRUCTIVE: soft-delete a task from active Fusion board views. The task row and artifacts are preserved; " +
+    "optional allowResurrection marks the ID for intentional recreation. If the task is still referenced as a " +
+    "lineage parent by another task, deletion is rejected unless removeLineageReferences:true is passed. " +
+    "Only registered when `fn mcp serve` is started with --allow-destructive.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "Task ID to delete (e.g. FN-001)" },
+      allowResurrection: { type: "boolean", description: "When true, mark this tombstone as explicitly reusable for future recreation." },
+      removeLineageReferences: {
+        type: "boolean",
+        description: "When true, clear incoming lineage-parent references (child sourceParentTaskId) before deleting, so a task still referenced as a lineage parent can be removed.",
+      },
+    },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    try {
+      const task = await store.deleteTask(id, {
+        allowResurrection: args.allowResurrection === true,
+        removeLineageReferences: args.removeLineageReferences === true,
+        auditContext: {
+          agentId: "mcp-operator",
+          runId: `synthetic-mcp-delete-${id}-${Date.now()}`,
+        },
+      });
+      auditDestructiveInvocation({ tool: "fn_task_delete", resourceId: task.id, outcome: "deleted" });
+      return textResult(`Deleted ${task.id}`, { structuredContent: { taskId: task.id, outcome: "deleted" } });
+    } catch (error) {
+      auditDestructiveInvocation({ tool: "fn_task_delete", resourceId: id, outcome: "error" });
+      if (error instanceof Error) return errorResult(error.message);
+      throw error;
+    }
+  },
+};
+
+const fnAgentDelete: McpToolDefinition = {
+  name: "fn_agent_delete",
+  description:
+    "DESTRUCTIVE: delete a non-ephemeral agent. Subject to the same agent-provisioning policy " +
+    "(allow/require-approval/deny) fn_agent_create uses. Only registered when `fn mcp serve` is started with " +
+    "--allow-destructive.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      agent_id: { type: "string", description: "Agent ID to delete" },
+      force: { type: "boolean", description: "Force delete when holding checkout" },
+      reassign_to: { type: "string", description: "Optional replacement agent for assigned tasks" },
+    },
+    required: ["agent_id"],
+  },
+  async handler(store, args, ctx) {
+    const agentId = String(args.agent_id ?? "").trim();
+    if (!agentId) return errorResult("agent_id is required.");
+
+    const agentStore = await getAgentStore(ctx.cwd);
+    /*
+    FNXC:McpServer 2026-07-10-22:10:
+    Reuses the SAME resolveAgentProvisioningPolicy gate the pi-extension
+    fn_agent_delete handler uses (packages/cli/src/extension.ts) — never
+    bypassed. `deny` and `require-approval` decisions never reach
+    AgentStore.deleteAgent.
+    */
+    const caller = { id: "user", role: "user", isPrivileged: true } as const;
+    const policy = resolveAgentProvisioningPolicy({ tool: "fn_agent_delete", caller, settings: await store.getSettings() });
+
+    if (policy.decision === "require-approval") {
+      const approvalStore = new ApprovalRequestStore(store.getDatabase());
+      const request = approvalStore.create({
+        requester: { actorId: "user", actorType: "user", actorName: "MCP Operator" },
+        targetAction: {
+          category: "agent_provisioning",
+          action: "delete",
+          summary: `Delete agent ${agentId}`,
+          resourceType: "agent",
+          resourceId: agentId,
+          context: { tool: "fn_agent_delete", params: redactSecretsDeep(args) },
+        },
+      });
+      auditDestructiveInvocation({ tool: "fn_agent_delete", resourceId: agentId, outcome: "pending_approval" });
+      return textResult(`Approval required. Request ${request.id} created.`, {
+        structuredContent: { outcome: "pending_approval", approvalRequestId: request.id, matchedRule: policy.matchedRule, effectiveMode: policy.effectiveMode, agentId },
+      });
+    }
+
+    if (policy.decision === "deny") {
+      auditDestructiveInvocation({ tool: "fn_agent_delete", resourceId: agentId, outcome: "denied" });
+      return textResult(`DENIED: agent delete blocked by policy (${policy.matchedRule})`, {
+        structuredContent: { outcome: "denied", matchedRule: policy.matchedRule, effectiveMode: policy.effectiveMode, agentId },
+      });
+    }
+
+    await agentStore.deleteAgent(agentId, {
+      force: args.force === true,
+      reassignTo: typeof args.reassign_to === "string" ? args.reassign_to : undefined,
+    });
+    auditDestructiveInvocation({ tool: "fn_agent_delete", resourceId: agentId, outcome: "deleted" });
+    return textResult(`Deleted ${agentId}`, {
+      structuredContent: { outcome: "deleted", matchedRule: policy.matchedRule, effectiveMode: policy.effectiveMode, agentId },
+    });
+  },
+};
+
+/*
+FNXC:McpServer 2026-07-10-22:10:
+fn_workflow_delete wraps the shared bindWorkflowTool binding (same
+createWorkflowAuthoringTools factory as the base v1 workflow tools, and the
+SAME pi-extension fn_workflow_delete dispatch path) with a stderr audit line
+and the DESTRUCTIVE description; it does not duplicate the store's built-in
+workflow protection or occupied-column handling.
+*/
+const fnWorkflowDeleteAudited: McpToolDefinition = {
+  ...fnWorkflowDelete,
+  async handler(store, args, ctx) {
+    const workflowId = typeof args.workflow_id === "string" ? args.workflow_id.trim() : "";
+    const result = await fnWorkflowDelete.handler(store, args, ctx);
+    auditDestructiveInvocation({
+      tool: "fn_workflow_delete",
+      resourceId: workflowId || "unknown",
+      outcome: result.isError ? "error" : "deleted",
+    });
+    return result;
+  },
+};
+
+/**
+ * The destructive tier — EXACTLY three tools, appended to the base registry
+ * only when `McpToolRuntimeContext.allowDestructive === true`. See the
+ * module-level FNXC:McpServer 2026-07-10-22:10 comment for the gate
+ * rationale.
+ */
+export const DESTRUCTIVE_TOOL_TIER: McpToolDefinition[] = [fnTaskDelete, fnAgentDelete, fnWorkflowDeleteAudited];
+
+/**
+ * Single registry-construction entry point for `fn mcp serve`. Returns the
+ * curated v1 {@link MCP_TOOL_REGISTRY} base set, plus
+ * {@link DESTRUCTIVE_TOOL_TIER} ONLY when `ctx.allowDestructive === true`.
+ * This is the ONLY place the two sets are combined — `buildMcpServer` (see
+ * packages/cli/src/mcp-server/server.ts) must call this rather than reading
+ * `MCP_TOOL_REGISTRY` directly, so no registration path can bypass the gate.
+ */
+export function buildMcpToolRegistry(ctx: Pick<McpToolRuntimeContext, "allowDestructive">): McpToolDefinition[] {
+  return ctx.allowDestructive === true ? [...MCP_TOOL_REGISTRY, ...DESTRUCTIVE_TOOL_TIER] : MCP_TOOL_REGISTRY;
+}
