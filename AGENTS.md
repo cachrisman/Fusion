@@ -108,7 +108,7 @@ The merge gate is thin and trusted: CI blocks PRs on exactly Lint, Typecheck, Bu
 ```bash
 pnpm test          # gate suite + changed-only affected tests (bounded; never full-suite)
 pnpm test:gate     # the merge gate: curated engine-core suite + CI-shape test
-pnpm smoke:boot    # boot smoke: CLI --help + real serve /api/health
+pnpm smoke:boot    # boot smoke: CLI --help + real serve /api/health + real mcp serve stdio (initialize/tools-list, 0 stray stdout lines)
 pnpm verify:fast   # TEST-FREE verification: artifact bootstrap + scoped typecheck/build + CLI build + boot smoke; recommended non-test verification/testCommand. Additive — changes no default
 pnpm test:velocity # weekly report-only test velocity baseline; use -- --measure --write-report to refresh
 pnpm test:full     # full workspace suite — explicit opt-in only

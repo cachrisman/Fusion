@@ -34,9 +34,32 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { tsImport } from "tsx/esm/api";
+import { runMcpServeStdioSmoke } from "./lib/mcp-smoke.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cliBin = path.join(repoRoot, "packages/cli/bin.mjs");
+
+/*
+ * FNXC:BootSmoke 2026-07-10-00:00:
+ * FUSI-013: the curated MCP tool set the stdio smoke asserts against is
+ * loaded straight from the SOURCE `MCP_TOOL_REGISTRY`
+ * (packages/cli/src/mcp-server/tools.ts) via `tsx`'s `tsImport` (the same
+ * pattern already used by scripts/audit-squash-merge.mjs to import
+ * TypeScript from a plain Node script) rather than hand-copied into this
+ * file, so the expected set can never silently drift from the real
+ * registry. tsup bundles the whole CLI into a single dist/bin.js with no
+ * separate importable tools module, so the built dist cannot be the source
+ * here — reading the .ts source directly is both correct (the registry is
+ * pure data, unaffected by build vs. source) and simpler. `--allow-
+ * destructive` is intentionally NOT passed to the spawned smoke binary, so
+ * the destructive tier must be absent from this expected set.
+ */
+async function loadExpectedMcpToolNames() {
+  const toolsSrcPath = path.join(repoRoot, "packages/cli/src/mcp-server/tools.ts");
+  const mod = await tsImport(pathToFileURL(toolsSrcPath).href, import.meta.url);
+  return mod.MCP_TOOL_REGISTRY.map((t) => t.name).sort();
+}
 
 const HEALTH_TIMEOUT_MS = 60_000;
 const SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -158,10 +181,38 @@ async function main() {
   for (let attempt = 1; attempt <= BOOT_ATTEMPTS; attempt++) {
     const result = await bootAndVerify(attempt, (fn) => (cleanup = fn));
     if (result === "retry-port") continue;
+    await runMcpStdioStage();
     console.log("boot-smoke: PASS");
     return;
   }
   fail(`could not bind a server port after ${BOOT_ATTEMPTS} attempts (EADDRINUSE each time)`);
+}
+
+/*
+ * FNXC:BootSmoke 2026-07-10-00:00:
+ * FUSI-013: proves the built `fn mcp serve` (stdio transport) binary boots
+ * cleanly as a real operator subprocess — the two FUSI-001 regressions
+ * (unresolved `@modelcontextprotocol/sdk` at startup, `[title-id-drift]`
+ * stdout contamination breaking the JSON-RPC wire) were both invisible to
+ * in-memory tests because they only exercise `buildMcpServer(...)` via
+ * `InMemoryTransport`, never the spawned `packages/cli/bin.mjs`. Runs AFTER
+ * the HTTP boot proof so a broken build (missing dist/bin.js) already fails
+ * fast there. HTTP transport is out of scope here — stdout is only the wire
+ * channel for the stdio transport; the HTTP transport already has real
+ * subprocess-free coverage in http-transport.test.ts.
+ */
+async function runMcpStdioStage() {
+  const expectedToolNames = await loadExpectedMcpToolNames();
+  let result;
+  try {
+    result = await runMcpServeStdioSmoke({ cliBin, expectedToolNames, removeTempDir });
+  } catch (err) {
+    fail(`mcp serve (stdio) smoke failed: ${err.message ?? err}`, err?.stderr ?? "");
+    return;
+  }
+  console.log(
+    `boot-smoke: mcp serve stdio OK (tools/list: ${result.toolNames.length} tools, 0 stray stdout lines)`,
+  );
 }
 
 /**
