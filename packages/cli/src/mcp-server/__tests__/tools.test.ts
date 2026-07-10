@@ -44,7 +44,15 @@ const EXPECTED_TOOL_NAMES = [
   "fn_workflow_select",
 ];
 
-const EXPECTED_DESTRUCTIVE_TOOL_NAMES = ["fn_task_delete", "fn_agent_delete", "fn_workflow_delete"];
+const EXPECTED_DESTRUCTIVE_TOOL_NAMES = [
+  "fn_task_delete",
+  "fn_agent_delete",
+  "fn_workflow_delete",
+  "fn_mission_delete",
+  "fn_milestone_delete",
+  "fn_slice_delete",
+  "fn_feature_delete",
+];
 
 const FORBIDDEN_NAME_PATTERNS = [/release/i, /publish/i, /version[-_]?tag/i, /changeset/i];
 
@@ -95,10 +103,20 @@ describe("buildMcpToolRegistry (FUSI-002 destructive gate)", () => {
     expect(buildMcpToolRegistry({}).map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
   });
 
-  it("adds exactly the three destructive tools, no more, no fewer, when allowDestructive is true", () => {
+  it("adds exactly the seven destructive tools (FUSI-002's three plus FUSI-005's four mission-hierarchy tools), no more, no fewer, when allowDestructive is true", () => {
     const names = buildMcpToolRegistry({ allowDestructive: true }).map((t) => t.name).sort();
     expect(names).toEqual([...EXPECTED_TOOL_NAMES, ...EXPECTED_DESTRUCTIVE_TOOL_NAMES].sort());
     expect(DESTRUCTIVE_TOOL_TIER.map((t) => t.name).sort()).toEqual([...EXPECTED_DESTRUCTIVE_TOOL_NAMES].sort());
+  });
+
+  it("fn_mission_delete has no force property; the milestone/slice/feature delete tools expose an optional force boolean", () => {
+    const byName = new Map(DESTRUCTIVE_TOOL_TIER.map((t) => [t.name, t]));
+    const missionDelete = byName.get("fn_mission_delete");
+    expect(missionDelete?.inputSchema.properties).not.toHaveProperty("force");
+    for (const name of ["fn_milestone_delete", "fn_slice_delete", "fn_feature_delete"]) {
+      const tool = byName.get(name);
+      expect(tool?.inputSchema.properties, `${name} inputSchema.properties`).toHaveProperty("force");
+    }
   });
 
   it("gives every destructive tool a DESTRUCTIVE-marked description and a valid inputSchema", () => {
@@ -170,7 +188,7 @@ describe("fn mcp serve — in-memory server smoke test", () => {
     }
   });
 
-  it("adds exactly the three destructive tools over an in-memory transport when allowDestructive is true", async () => {
+  it("adds exactly the seven destructive tools over an in-memory transport when allowDestructive is true", async () => {
     const { client, mcpServer } = await connectClient({ allowDestructive: true });
     try {
       const { tools } = await client.listTools();
@@ -499,6 +517,108 @@ describe("fn mcp serve — in-memory server smoke test", () => {
         vi.doUnmock("@fusion/core");
         vi.resetModules();
       }
+    });
+
+    describe("mission-hierarchy delete tools (FUSI-005)", () => {
+      function seedMissionHierarchy() {
+        const missionStore = store.getMissionStore();
+        const mission = missionStore.createMission({ title: "Delete Me Mission", autoMerge: true });
+        const milestone = missionStore.addMilestone(mission.id, { title: "MS" });
+        const slice = missionStore.addSlice(milestone.id, { title: "SL" });
+        const feature = missionStore.addFeature(slice.id, { title: "FT" });
+        return { missionStore, mission, milestone, slice, feature };
+      }
+
+      it("fn_mission_delete dispatches to MissionStore.deleteMission, cascades to descendants, and emits an enriched stderr cascade summary", async () => {
+        const { missionStore, mission, milestone, slice, feature } = seedMissionHierarchy();
+        const linkedTask = await store.createTask({ description: "Linked to feature", source: { sourceType: "api" } });
+        missionStore.linkFeatureToTask(feature.id, linkedTask.id);
+        const { client, mcpServer } = await connectClient({ allowDestructive: true });
+        try {
+          const result = await client.callTool({ name: "fn_mission_delete", arguments: { id: mission.id } });
+          expect(result.isError).not.toBe(true);
+          expect(missionStore.getMission(mission.id)).toBeUndefined();
+          expect(missionStore.getMilestone(milestone.id)).toBeUndefined();
+          expect(missionStore.getSlice(slice.id)).toBeUndefined();
+          expect(missionStore.getFeature(feature.id)).toBeUndefined();
+
+          const auditLine = stderrSpy.mock.calls.map((c) => String(c[0])).find((line) => line.includes("fn_mission_delete") && line.includes("cascade"));
+          expect(auditLine).toBeTruthy();
+          expect(auditLine).toContain(mission.id);
+          expect(auditLine).toContain("milestones=1");
+          expect(auditLine).toContain("slices=1");
+          expect(auditLine).toContain("features=1");
+          expect(stdoutSpy.mock.calls.some((c) => String(c[0]).includes("fn_mission_delete"))).toBe(false);
+        } finally {
+          await client.close();
+          await mcpServer.close();
+        }
+      });
+
+      it("fn_mission_delete surfaces a not-found error for a missing mission id", async () => {
+        const { client, mcpServer } = await connectClient({ allowDestructive: true });
+        try {
+          const result = await client.callTool({ name: "fn_mission_delete", arguments: { id: "M-DOES-NOT-EXIST" } });
+          expect(result.isError).toBe(true);
+        } finally {
+          await client.close();
+          await mcpServer.close();
+        }
+      });
+
+      it("fn_feature_delete dispatches to MissionStore.deleteFeature and audits to stderr", async () => {
+        const { missionStore, feature } = seedMissionHierarchy();
+        const { client, mcpServer } = await connectClient({ allowDestructive: true });
+        try {
+          const result = await client.callTool({ name: "fn_feature_delete", arguments: { featureId: feature.id } });
+          expect(result.isError).not.toBe(true);
+          expect(missionStore.getFeature(feature.id)).toBeUndefined();
+
+          const auditLine = stderrSpy.mock.calls.map((c) => String(c[0])).find((line) => line.includes("fn_feature_delete"));
+          expect(auditLine).toBeTruthy();
+          expect(auditLine).toContain(feature.id);
+          expect(auditLine).toContain("deleted");
+        } finally {
+          await client.close();
+          await mcpServer.close();
+        }
+      });
+
+      it("fn_slice_delete / fn_milestone_delete honor the live-task-link guard (force omitted rejects, force=true proceeds and marks forced=true in the audit line)", async () => {
+        const { missionStore, slice, feature } = seedMissionHierarchy();
+        const linkedTask = await store.createTask({ description: "Linked to feature", source: { sourceType: "api" } });
+        missionStore.linkFeatureToTask(feature.id, linkedTask.id);
+        const { client, mcpServer } = await connectClient({ allowDestructive: true });
+        try {
+          const blocked = await client.callTool({ name: "fn_slice_delete", arguments: { sliceId: slice.id } });
+          expect(blocked.isError).toBe(true);
+          const blockedText = (blocked.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+          expect(blockedText).toMatch(/pass force to delete anyway/i);
+          expect(missionStore.getSlice(slice.id)).toBeTruthy();
+
+          const forced = await client.callTool({ name: "fn_slice_delete", arguments: { sliceId: slice.id, force: true } });
+          expect(forced.isError).not.toBe(true);
+          expect(missionStore.getSlice(slice.id)).toBeUndefined();
+
+          const auditLine = stderrSpy.mock.calls.map((c) => String(c[0])).find((line) => line.includes("fn_slice_delete") && line.includes("deleted"));
+          expect(auditLine).toBeTruthy();
+          expect(auditLine).toContain("forced=true");
+        } finally {
+          await client.close();
+          await mcpServer.close();
+        }
+      });
+
+      it("fn_milestone_delete dispatches to MissionStore.deleteMilestone and surfaces a missing-id error", async () => {
+        const { client, mcpServer } = await connectClient({ allowDestructive: true });
+        try {
+          const result = await client.callTool({ name: "fn_milestone_delete", arguments: { milestoneId: "MS-DOES-NOT-EXIST" } });
+          expect(result.isError).toBe(true);
+        } finally {
+          await client.close();
+          await mcpServer.close();
+        }
+      });
     });
   });
 });

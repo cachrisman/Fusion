@@ -53,6 +53,13 @@
  * destructive invocation writes an ids/counts/outcomes-only audit line to
  * **stderr** (never stdout — stdout is the MCP protocol channel) via
  * {@link auditDestructiveInvocation}.
+ *
+ * FUSI-005 extends {@link DESTRUCTIVE_TOOL_TIER} to seven tools by adding the
+ * mission-hierarchy delete tools `fn_mission_delete`, `fn_milestone_delete`,
+ * `fn_slice_delete`, `fn_feature_delete` — same `allowDestructive` gate, same
+ * stderr audit convention, no second gate and no new approval hook (see the
+ * FNXC:McpServer 2026-07-10-23:45 comment above {@link DESTRUCTIVE_TOOL_TIER}
+ * for the recorded design decision).
  */
 import {
   TaskStore,
@@ -950,13 +957,184 @@ const fnWorkflowDeleteAudited: McpToolDefinition = {
   },
 };
 
+/*
+FNXC:McpServer 2026-07-10-23:45:
+FUSI-005 extends the destructive tier with the mission-hierarchy delete
+tools (`fn_mission_delete`, `fn_milestone_delete`, `fn_slice_delete`,
+`fn_feature_delete`). Design decision recorded in FUSI-005's task document
+(key="design"; FUSI-004 recorded no decision document, so this task's own
+recommended defaults were adopted):
+  1. `force` contract — `fn_milestone_delete`/`fn_slice_delete`/
+     `fn_feature_delete` expose an optional `force` boolean mirroring the
+     pi-extension handlers 1:1 (overrides the MissionStore live-task-link
+     guard); a distinct `forced=true` marker is added to the audit line
+     when `force=true` is passed. `fn_mission_delete` exposes NO `force` —
+     `MissionStore.deleteMission` has no force param and always cascades
+     unconditionally, so there is no guard to override.
+  2. Gate strength — `fn_mission_delete`'s cascade (deletes every
+     descendant milestone/slice/feature and unlinks every task-linked
+     feature) reuses the SAME `--allow-destructive` flag as the rest of the
+     tier rather than a second gate: the local-stdio operator-privileged
+     trust model is unchanged from the rest of FUSI-002's tier, so a second
+     flag would add friction without a corresponding new adversary. As a
+     compensating control, `fn_mission_delete`'s audit line is enriched
+     with a pre-delete cascade summary (descendant counts + task-link
+     count) since the rows are gone once `deleteMission` returns.
+  3. No provisioning-policy-equivalent hook exists for ANY of these four
+     MissionStore operations (unlike `fn_agent_delete`'s
+     `resolveAgentProvisioningPolicy` reuse) — none is invented here; the
+     only gate is `--allow-destructive` plus the store's own (unbypassed)
+     live-task-link guard for milestone/slice/feature deletion.
+Every handler below binds directly to the same `store.getMissionStore()`
+operation the pi-extension `fn_mission_delete`/`fn_milestone_delete`/
+`fn_slice_delete`/`fn_feature_delete` handlers in packages/cli/src/extension.ts
+call — no duplicated validation, no HTTP dashboard round-trip.
+*/
+
+const fnMissionDelete: McpToolDefinition = {
+  name: "fn_mission_delete",
+  description:
+    "DESTRUCTIVE: delete a mission and all its milestones, slices, and features. Cascades to ALL descendants and " +
+    "unlinks every task-linked feature (the linked tasks themselves are NOT deleted, only the feature/mission " +
+    "association is cleared). Cannot be undone. Only registered when `fn mcp serve` is started with " +
+    "--allow-destructive.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "Mission ID to delete (e.g., M-001)" },
+    },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+
+    const missionStore = store.getMissionStore();
+    const mission = missionStore.getMission(id);
+    if (!mission) {
+      auditDestructiveInvocation({ tool: "fn_mission_delete", resourceId: id, outcome: "error" });
+      return errorResult(`Mission ${id} not found`);
+    }
+
+    /*
+    FNXC:McpServer 2026-07-10-23:45:
+    Cascade summary MUST be captured before deleteMission() runs — the
+    milestone/slice/feature rows are gone once the delete completes. Counts
+    use the same listMilestones/listSlices/listFeatures reads the store's
+    own getMissionSummary()/getMissionWithHierarchy() helpers use; no
+    bespoke count query is added.
+    */
+    const milestones = missionStore.listMilestones(id);
+    const slices = milestones.flatMap((milestone) => missionStore.listSlices(milestone.id));
+    const features = slices.flatMap((slice) => missionStore.listFeatures(slice.id));
+    const linkedTaskCount = features.filter((feature) => Boolean(feature.taskId)).length;
+
+    missionStore.deleteMission(id);
+
+    auditDestructiveInvocation({
+      tool: "fn_mission_delete",
+      resourceId: id,
+      outcome: "deleted",
+    });
+    console.error(
+      `[fn mcp serve] DESTRUCTIVE fn_mission_delete cascade missionId=${id} title=${JSON.stringify(mission.title)} ` +
+        `milestones=${milestones.length} slices=${slices.length} features=${features.length} taskLinksCleared=${linkedTaskCount}`,
+    );
+
+    return textResult(`Deleted ${id}: "${mission.title}"`, {
+      structuredContent: {
+        missionId: id,
+        title: mission.title,
+        outcome: "deleted",
+        cascade: { milestones: milestones.length, slices: slices.length, features: features.length, taskLinksCleared: linkedTaskCount },
+      },
+    });
+  },
+};
+
+function bindMissionHierarchyDeleteTool(config: {
+  name: "fn_milestone_delete" | "fn_slice_delete" | "fn_feature_delete";
+  paramKey: "milestoneId" | "sliceId" | "featureId";
+  description: string;
+  deleteOp: (missionStore: ReturnType<TaskStore["getMissionStore"]>, id: string, force: boolean) => void;
+}): McpToolDefinition {
+  return {
+    name: config.name,
+    description: config.description,
+    inputSchema: {
+      type: "object",
+      properties: {
+        [config.paramKey]: { type: "string", description: `${config.name.replace("fn_", "").replace("_delete", "")} ID to delete` },
+        force: { type: "boolean", description: "Override linked-task guard" },
+      },
+      required: [config.paramKey],
+    },
+    async handler(store, args) {
+      const id = String(args[config.paramKey] ?? "").trim();
+      if (!id) return errorResult(`${config.paramKey} is required.`);
+      const forced = args.force === true;
+
+      const missionStore = store.getMissionStore();
+      try {
+        config.deleteOp(missionStore, id, forced);
+      } catch (error) {
+        auditDestructiveInvocation({ tool: config.name, resourceId: id, outcome: "error" });
+        if (error instanceof Error) return errorResult(error.message);
+        throw error;
+      }
+
+      auditDestructiveInvocation({
+        tool: config.name,
+        resourceId: id,
+        outcome: forced ? "deleted forced=true" : "deleted",
+      });
+      return textResult(`Deleted ${id}`, { structuredContent: { [config.paramKey]: id, force: forced, outcome: "deleted" } });
+    },
+  };
+}
+
+const fnMilestoneDelete = bindMissionHierarchyDeleteTool({
+  name: "fn_milestone_delete",
+  paramKey: "milestoneId",
+  description:
+    "DESTRUCTIVE: delete a milestone and all descendant slices/features. Rejects deletion when a child feature is " +
+    "linked to a live task unless force=true. Only registered when `fn mcp serve` is started with --allow-destructive.",
+  deleteOp: (missionStore, id, force) => missionStore.deleteMilestone(id, force),
+});
+
+const fnSliceDelete = bindMissionHierarchyDeleteTool({
+  name: "fn_slice_delete",
+  paramKey: "sliceId",
+  description:
+    "DESTRUCTIVE: delete a slice and its features. Rejects deletion when a child feature is linked to a live task " +
+    "unless force=true. Only registered when `fn mcp serve` is started with --allow-destructive.",
+  deleteOp: (missionStore, id, force) => missionStore.deleteSlice(id, force),
+});
+
+const fnFeatureDelete = bindMissionHierarchyDeleteTool({
+  name: "fn_feature_delete",
+  paramKey: "featureId",
+  description:
+    "DESTRUCTIVE: delete a feature. Rejects deletion when linked to a live task unless force=true. Only registered " +
+    "when `fn mcp serve` is started with --allow-destructive.",
+  deleteOp: (missionStore, id, force) => missionStore.deleteFeature(id, force),
+});
+
 /**
- * The destructive tier — EXACTLY three tools, appended to the base registry
+ * The destructive tier — EXACTLY seven tools, appended to the base registry
  * only when `McpToolRuntimeContext.allowDestructive === true`. See the
- * module-level FNXC:McpServer 2026-07-10-22:10 comment for the gate
- * rationale.
+ * module-level FNXC:McpServer 2026-07-10-22:10 and 2026-07-10-23:45 comments
+ * for the gate rationale.
  */
-export const DESTRUCTIVE_TOOL_TIER: McpToolDefinition[] = [fnTaskDelete, fnAgentDelete, fnWorkflowDeleteAudited];
+export const DESTRUCTIVE_TOOL_TIER: McpToolDefinition[] = [
+  fnTaskDelete,
+  fnAgentDelete,
+  fnWorkflowDeleteAudited,
+  fnMissionDelete,
+  fnMilestoneDelete,
+  fnSliceDelete,
+  fnFeatureDelete,
+];
 
 /**
  * Single registry-construction entry point for `fn mcp serve`. Returns the

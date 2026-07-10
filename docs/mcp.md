@@ -281,7 +281,7 @@ FNXC:McpDocs 2026-07-10-21:00:
 Every other section on this page documents Fusion as an MCP *client* (configuring/forwarding external MCP servers). This section documents the inversion: `fn mcp serve` makes Fusion itself an MCP *server*, over local stdio only. Keep the curated tool list and safety boundaries below in sync with packages/cli/src/mcp-server/tools.ts (MCP_TOOL_REGISTRY, DESTRUCTIVE_TOOL_TIER, buildMcpToolRegistry) — that module is the single source of truth.
 
 FNXC:McpDocs 2026-07-10-22:10:
-FUSI-002 adds the off-by-default `--allow-destructive` flag and the first destructive tool tier (`fn_task_delete`, `fn_agent_delete`, `fn_workflow_delete`). Keep the "Destructive tools" section in sync with `DESTRUCTIVE_TOOL_TIER` in tools.ts, and keep the flag's off-by-default default in sync with `BuildMcpServerOptions.allowDestructive` in server.ts.
+FUSI-002 adds the off-by-default `--allow-destructive` flag and the first destructive tool tier (`fn_task_delete`, `fn_agent_delete`, `fn_workflow_delete`). FUSI-005 extends that tier with four mission-hierarchy delete tools (`fn_mission_delete`, `fn_milestone_delete`, `fn_slice_delete`, `fn_feature_delete`) behind the SAME flag. Keep the "Destructive tools" section in sync with `DESTRUCTIVE_TOOL_TIER` in tools.ts, and keep the flag's off-by-default default in sync with `BuildMcpServerOptions.allowDestructive` in server.ts.
 
 FNXC:McpDocs 2026-07-10-23:30:
 FUSI-003 adds a second transport (`--transport http`) alongside the stdio default. Unlike stdio, HTTP is network-facing, so the "Trust model" section below is now split: the stdio subsection keeps the original no-auth operator-privileged rationale verbatim, and a new HTTP subsection documents the re-derived boundary (loopback-by-default binding, mandatory bearer-token auth, hard refusal to bind non-loopback without a token). Keep this in sync with packages/cli/src/mcp-server/http-transport.ts.
@@ -329,13 +329,17 @@ fn mcp serve [--project <name>] [--allow-destructive]
 
 ### Destructive tools (`--allow-destructive`, off by default)
 
-Starting `fn mcp serve --allow-destructive` adds exactly three additional tools on top of the v1 set above. **These are irreversible board mutations** — there is no undo from inside the MCP session:
+Starting `fn mcp serve --allow-destructive` adds exactly seven additional tools on top of the v1 set above. **These are irreversible board mutations** — there is no undo from inside the MCP session:
 
 - `fn_task_delete` — soft-deletes a task from active board views (the task row and artifacts are preserved; use `allowResurrection`/`removeLineageReferences` exactly as the pi-extension `fn_task_delete` tool does). Dispatches to the same `TaskStore.deleteTask(...)` operation.
 - `fn_agent_delete` — deletes a non-ephemeral agent. Subject to the **same** `resolveAgentProvisioningPolicy` gate (`allow` / `require-approval` / `deny`) the pi-extension `fn_agent_delete` handler uses — a `deny` or `require-approval` policy decision is honored exactly as it is elsewhere; the agent is never deleted on those branches. Dispatches to `AgentStore.deleteAgent(...)`.
 - `fn_workflow_delete` — deletes a custom workflow definition. Built-in workflows (`builtin:*`) remain protected — the store's rejection is surfaced, never bypassed. Any tasks pinned to the deleted workflow are re-homed to the default workflow's entry column.
+- `fn_mission_delete` — deletes a mission, cascading unconditionally to **every** descendant milestone/slice/feature and unlinking (not deleting) any task linked to a descendant feature. There is no `force` parameter — `MissionStore.deleteMission(id)` has no guard to override. Dispatches to `store.getMissionStore().deleteMission(id)`, the same operation the pi-extension `fn_mission_delete` tool uses.
+- `fn_milestone_delete` / `fn_slice_delete` / `fn_feature_delete` — delete a milestone (cascading to its slices/features), a slice (cascading to its features), or a single feature. Each accepts an optional `force` boolean mirroring the pi-extension tool exactly: by default, deletion is **rejected** with a `pass force to delete anyway` error when a descendant feature is linked to a live (non-archived, non-deleted) task; pass `force: true` to override the guard and clear the feature→task link (the task itself is never deleted). Dispatch to `MissionStore.deleteMilestone(id, force)` / `.deleteSlice(id, force)` / `.deleteFeature(id, force)` respectively — the store's guard is never bypassed by the MCP wrapper.
 
-Each destructive tool's `description` begins with the literal marker `DESTRUCTIVE:` so it is unmistakable in any MCP client's tool listing. Every destructive invocation — success or failure — writes an ids/counts/outcomes-only audit line to **stderr** (never stdout): tool name, resource id, and outcome (`deleted` / `denied` / `pending_approval` / `error`). No prose and no secret values are ever included in that line.
+Each destructive tool's `description` begins with the literal marker `DESTRUCTIVE:` so it is unmistakable in any MCP client's tool listing. Every destructive invocation — success or failure — writes an ids/counts/outcomes-only audit line to **stderr** (never stdout): tool name, resource id, and outcome (`deleted` / `denied` / `pending_approval` / `error`). No prose and no secret values are ever included in that line. `fn_milestone_delete`/`fn_slice_delete`/`fn_feature_delete` append a `forced=true` marker to the outcome when the call passed `force: true`, so a stderr audit trail can be grepped for guard-overriding deletes specifically. `fn_mission_delete`'s audit line is further enriched with a pre-delete cascade summary — mission id/title plus the milestone/slice/feature counts and the number of task links cleared — captured before the cascading delete runs (the rows no longer exist to count afterward).
+
+`fn_mission_delete`'s mission-wide cascade reuses the **same** `--allow-destructive` flag as the rest of the tier rather than a second/stronger gate: the trust model (a local stdio subprocess under the operator's own OS privileges — see "Trust model" below) is identical for every tool in this tier, so a second CLI flag would add friction without defending against a different adversary. None of the four mission-hierarchy tools has a `resolveAgentProvisioningPolicy`-equivalent approval hook (unlike `fn_agent_delete`) — no bespoke approval/confirmation mechanism is invented for them; `--allow-destructive` plus the store's own live-task-link guard (for milestone/slice/feature deletion) is the complete gate. See FUSI-005's recorded task document (`key="design"`) for the full rationale.
 
 ### HTTP transport (`--transport http`, network-facing)
 
@@ -358,7 +362,7 @@ fn mcp serve --transport http --port <n> [--host <addr>] [--token <t>]
 These are enforced by the tool registry itself, not just by caller discipline:
 
 - **No release/publish/version-tag tooling.** Releasing is an operator-only action performed outside the task loop (see [Contributing](./contributing.md)); `fn mcp serve` never exposes `pnpm release`, `changeset publish`, `pnpm publish`, or git tagging.
-- **`*_delete` tools are opt-in only.** The v1 base set (no `--allow-destructive`) ships zero `*_delete` tools, exactly as it did before this flag existed. `--allow-destructive` adds exactly the three tools documented above — no more, no fewer — and is off by default.
+- **`*_delete` tools are opt-in only.** The v1 base set (no `--allow-destructive`) ships zero `*_delete` tools, exactly as it did before this flag existed. `--allow-destructive` adds exactly the seven tools documented above — no more, no fewer — and is off by default.
 - **No raw secret values.** Every tool result is passed through a redaction pass before being returned; secret-shaped fields (tokens, API keys, passwords, authorization headers) are never surfaced in a tool response. Secret management (`fn mcp add/edit --env/--header`, the Secrets view) is intentionally outside this server's allow-list entirely.
 
 ### Trust model
@@ -401,7 +405,7 @@ Add `"--allow-destructive"` to `args` to also opt into the destructive tool tier
 }
 ```
 
-Omit `--project` (and its argument) to have Fusion auto-detect the project from the working directory the client launches the process in. Expected outcome (no `--allow-destructive`): the client lists the fifteen curated Fusion tools above and can call them directly to manage the board. Expected outcome (with `--allow-destructive`): the client lists those fifteen tools **plus** `fn_task_delete`, `fn_agent_delete`, and `fn_workflow_delete` — eighteen tools total.
+Omit `--project` (and its argument) to have Fusion auto-detect the project from the working directory the client launches the process in. Expected outcome (no `--allow-destructive`): the client lists the fifteen curated Fusion tools above and can call them directly to manage the board. Expected outcome (with `--allow-destructive`): the client lists those fifteen tools **plus** `fn_task_delete`, `fn_agent_delete`, `fn_workflow_delete`, `fn_mission_delete`, `fn_milestone_delete`, `fn_slice_delete`, and `fn_feature_delete` — twenty-two tools total.
 
 ### Connecting a remote client over HTTP
 
