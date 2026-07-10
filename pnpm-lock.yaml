@@ -50,10 +50,13 @@ importers:
     dependencies:
       '@earendil-works/pi-ai':
         specifier: ^0.80.6
-        version: 0.80.6(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)
+        version: 0.80.6(@modelcontextprotocol/sdk@1.28.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       '@earendil-works/pi-coding-agent':
         specifier: ^0.80.6
-        version: 0.80.6(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)
+        version: 0.80.6(@modelcontextprotocol/sdk@1.28.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.0.0
+        version: 1.28.0(zod@4.3.6)
       dockerode:
         specifier: ^4.0.12
         version: 4.0.12
@@ -93,6 +96,9 @@ importers:
       ws:
         specifier: ^8.18.0
         version: 8.20.0
+      zod:
+        specifier: ^4.0.0
+        version: 4.3.6
     devDependencies:
       '@fusion/core':
         specifier: workspace:*
@@ -487,10 +493,10 @@ importers:
     dependencies:
       '@earendil-works/pi-ai':
         specifier: '*'
-        version: 0.77.0(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)
+        version: 0.77.0(@modelcontextprotocol/sdk@1.28.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       '@earendil-works/pi-coding-agent':
         specifier: '*'
-        version: 0.77.0(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)
+        version: 0.77.0(@modelcontextprotocol/sdk@1.28.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
       '@fusion-plugin-examples/droid-runtime':
         specifier: workspace:*
         version: link:../../plugins/fusion-plugin-droid-runtime
@@ -7732,10 +7738,6 @@ snapshots:
       package-manager-detector: 1.6.0
       tinyexec: 1.2.4
 
-  '@anthropic-ai/sdk@0.91.1':
-    dependencies:
-      json-schema-to-ts: 3.1.1
-
   '@anthropic-ai/sdk@0.91.1(zod@3.25.76)':
     dependencies:
       json-schema-to-ts: 3.1.1
@@ -8470,20 +8472,6 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-agent-core@0.77.0(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)':
-    dependencies:
-      '@earendil-works/pi-ai': 0.77.0(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)
-      ignore: 7.0.5
-      typebox: 1.1.38
-      yaml: 2.9.0
-    transitivePeerDependencies:
-      - '@modelcontextprotocol/sdk'
-      - bufferutil
-      - supports-color
-      - utf-8-validate
-      - ws
-      - zod
-
   '@earendil-works/pi-agent-core@0.77.0(@modelcontextprotocol/sdk@1.28.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)':
     dependencies:
       '@earendil-works/pi-ai': 0.77.0(@modelcontextprotocol/sdk@1.28.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
@@ -8540,20 +8528,6 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-agent-core@0.80.6(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)':
-    dependencies:
-      '@earendil-works/pi-ai': 0.80.6(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)
-      ignore: 7.0.5
-      typebox: 1.1.38
-      yaml: 2.9.0
-    transitivePeerDependencies:
-      - '@modelcontextprotocol/sdk'
-      - bufferutil
-      - supports-color
-      - utf-8-validate
-      - ws
-      - zod
-
   '@earendil-works/pi-agent-core@0.80.6(@modelcontextprotocol/sdk@1.28.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)':
     dependencies:
       '@earendil-works/pi-ai': 0.80.6(@modelcontextprotocol/sdk@1.28.0(zod@4.3.6))(ws@8.20.0)(zod@4.3.6)
@@ -8584,29 +8558,9 @@ snapshots:
 
   '@earendil-works/pi-ai@0.77.0':
     dependencies:
-      '@anthropic-ai/sdk': 0.91.1
-      '@aws-sdk/client-bedrock-runtime': 3.1048.0
-      '@google/genai': 1.52.0
-      '@mistralai/mistralai': 2.2.1
-      '@smithy/node-http-handler': 4.7.3
-      http-proxy-agent: 7.0.2
-      https-proxy-agent: 7.0.6
-      openai: 6.26.0
-      partial-json: 0.1.7
-      typebox: 1.1.38
-    transitivePeerDependencies:
-      - '@modelcontextprotocol/sdk'
-      - bufferutil
-      - supports-color
-      - utf-8-validate
-      - ws
-      - zod
-
-  '@earendil-works/pi-ai@0.77.0(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)':
-    dependencies:
       '@anthropic-ai/sdk': 0.91.1(zod@3.25.76)
       '@aws-sdk/client-bedrock-runtime': 3.1048.0
-      '@google/genai': 1.52.0(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))
+      '@google/genai': 1.52.0(@modelcontextprotocol/sdk@1.28.0(zod@4.3.6))
       '@mistralai/mistralai': 2.2.1
       '@smithy/node-http-handler': 4.7.3
       http-proxy-agent: 7.0.2
@@ -8685,30 +8639,9 @@ snapshots:
 
   '@earendil-works/pi-ai@0.80.6':
     dependencies:
-      '@anthropic-ai/sdk': 0.91.1
-      '@aws-sdk/client-bedrock-runtime': 3.1048.0
-      '@google/genai': 1.52.0
-      '@mistralai/mistralai': 2.2.6(@opentelemetry/api@1.9.0)
-      '@opentelemetry/api': 1.9.0
-      '@smithy/node-http-handler': 4.7.3
-      http-proxy-agent: 7.0.2
-      https-proxy-agent: 7.0.6
-      openai: 6.26.0
-      partial-json: 0.1.7
-      typebox: 1.1.38
-    transitivePeerDependencies:
-      - '@modelcontextprotocol/sdk'
-      - bufferutil
-      - supports-color
-      - utf-8-validate
-      - ws
-      - zod
-
-  '@earendil-works/pi-ai@0.80.6(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)':
-    dependencies:
       '@anthropic-ai/sdk': 0.91.1(zod@3.25.76)
       '@aws-sdk/client-bedrock-runtime': 3.1048.0
-      '@google/genai': 1.52.0(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))
+      '@google/genai': 1.52.0(@modelcontextprotocol/sdk@1.28.0(zod@4.3.6))
       '@mistralai/mistralai': 2.2.6(@opentelemetry/api@1.9.0)
       '@opentelemetry/api': 1.9.0
       '@smithy/node-http-handler': 4.7.3
@@ -8750,7 +8683,7 @@ snapshots:
     dependencies:
       '@anthropic-ai/sdk': 0.91.1(zod@3.25.76)
       '@aws-sdk/client-bedrock-runtime': 3.1048.0
-      '@google/genai': 1.52.0
+      '@google/genai': 1.52.0(@modelcontextprotocol/sdk@1.28.0(zod@4.3.6))
       '@mistralai/mistralai': 2.2.6(@opentelemetry/api@1.9.0)
       '@opentelemetry/api': 1.9.0
       '@smithy/node-http-handler': 4.7.3
@@ -8771,35 +8704,6 @@ snapshots:
     dependencies:
       '@earendil-works/pi-agent-core': 0.77.0
       '@earendil-works/pi-ai': 0.77.0
-      '@earendil-works/pi-tui': 0.77.0
-      '@silvia-odwyer/photon-node': 0.3.4
-      chalk: 5.6.2
-      cross-spawn: 7.0.6
-      diff: 8.0.4
-      glob: 13.0.6
-      highlight.js: 10.7.3
-      hosted-git-info: 9.0.3
-      ignore: 7.0.5
-      jiti: 2.7.0
-      minimatch: 10.2.5
-      proper-lockfile: 4.1.2
-      typebox: 1.1.38
-      undici: 8.3.0
-      yaml: 2.9.0
-    optionalDependencies:
-      '@mariozechner/clipboard': 0.3.9
-    transitivePeerDependencies:
-      - '@modelcontextprotocol/sdk'
-      - bufferutil
-      - supports-color
-      - utf-8-validate
-      - ws
-      - zod
-
-  '@earendil-works/pi-coding-agent@0.77.0(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)':
-    dependencies:
-      '@earendil-works/pi-agent-core': 0.77.0(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)
-      '@earendil-works/pi-ai': 0.77.0(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)
       '@earendil-works/pi-tui': 0.77.0
       '@silvia-odwyer/photon-node': 0.3.4
       chalk: 5.6.2
@@ -8917,36 +8821,6 @@ snapshots:
     dependencies:
       '@earendil-works/pi-agent-core': 0.80.6
       '@earendil-works/pi-ai': 0.80.6
-      '@earendil-works/pi-tui': 0.80.6
-      '@silvia-odwyer/photon-node': 0.3.4
-      chalk: 5.6.2
-      cross-spawn: 7.0.6
-      diff: 8.0.4
-      glob: 13.0.6
-      highlight.js: 10.7.3
-      hosted-git-info: 9.0.3
-      ignore: 7.0.5
-      jiti: 2.7.0
-      minimatch: 10.2.5
-      proper-lockfile: 4.1.2
-      semver: 7.8.0
-      typebox: 1.1.38
-      undici: 8.5.0
-      yaml: 2.9.0
-    optionalDependencies:
-      '@mariozechner/clipboard': 0.3.9
-    transitivePeerDependencies:
-      - '@modelcontextprotocol/sdk'
-      - bufferutil
-      - supports-color
-      - utf-8-validate
-      - ws
-      - zod
-
-  '@earendil-works/pi-coding-agent@0.80.6(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)':
-    dependencies:
-      '@earendil-works/pi-agent-core': 0.80.6(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)
-      '@earendil-works/pi-ai': 0.80.6(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))(ws@8.20.0)(zod@3.25.76)
       '@earendil-works/pi-tui': 0.80.6
       '@silvia-odwyer/photon-node': 0.3.4
       chalk: 5.6.2
@@ -9363,30 +9237,6 @@ snapshots:
       levn: 0.4.1
 
   '@exodus/bytes@1.15.0': {}
-
-  '@google/genai@1.52.0':
-    dependencies:
-      google-auth-library: 10.6.2
-      p-retry: 4.6.2
-      protobufjs: 7.5.8
-      ws: 8.20.0
-    transitivePeerDependencies:
-      - bufferutil
-      - supports-color
-      - utf-8-validate
-
-  '@google/genai@1.52.0(@modelcontextprotocol/sdk@1.28.0(zod@3.25.76))':
-    dependencies:
-      google-auth-library: 10.6.2
-      p-retry: 4.6.2
-      protobufjs: 7.5.8
-      ws: 8.20.0
-    optionalDependencies:
-      '@modelcontextprotocol/sdk': 1.28.0(zod@3.25.76)
-    transitivePeerDependencies:
-      - bufferutil
-      - supports-color
-      - utf-8-validate
 
   '@google/genai@1.52.0(@modelcontextprotocol/sdk@1.28.0(zod@4.3.6))':
     dependencies:
@@ -9898,8 +9748,8 @@ snapshots:
   '@mistralai/mistralai@2.2.1':
     dependencies:
       ws: 8.20.0
-      zod: 3.25.76
-      zod-to-json-schema: 3.25.1(zod@3.25.76)
+      zod: 4.3.6
+      zod-to-json-schema: 3.25.1(zod@4.3.6)
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
@@ -9908,36 +9758,13 @@ snapshots:
     dependencies:
       '@opentelemetry/semantic-conventions': 1.41.1
       ws: 8.20.0
-      zod: 3.25.76
-      zod-to-json-schema: 3.25.1(zod@3.25.76)
+      zod: 4.3.6
+      zod-to-json-schema: 3.25.1(zod@4.3.6)
     optionalDependencies:
       '@opentelemetry/api': 1.9.0
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
-
-  '@modelcontextprotocol/sdk@1.28.0(zod@3.25.76)':
-    dependencies:
-      '@hono/node-server': 1.19.12(hono@4.12.9)
-      ajv: 8.18.0
-      ajv-formats: 3.0.1(ajv@8.18.0)
-      content-type: 1.0.5
-      cors: 2.8.6
-      cross-spawn: 7.0.6
-      eventsource: 3.0.7
-      eventsource-parser: 3.0.6
-      express: 5.2.1
-      express-rate-limit: 8.3.1(express@5.2.1)
-      hono: 4.12.9
-      jose: 6.2.2
-      json-schema-typed: 8.0.2
-      pkce-challenge: 5.0.1
-      raw-body: 3.0.2
-      zod: 3.25.76
-      zod-to-json-schema: 3.25.1(zod@3.25.76)
-    transitivePeerDependencies:
-      - supports-color
-    optional: true
 
   '@modelcontextprotocol/sdk@1.28.0(zod@4.3.6)':
     dependencies:
@@ -14008,8 +13835,6 @@ snapshots:
       is-docker: 2.2.1
       is-wsl: 2.2.0
 
-  openai@6.26.0: {}
-
   openai@6.26.0(ws@8.20.0)(zod@3.25.76):
     optionalDependencies:
       ws: 8.20.0
@@ -15666,10 +15491,6 @@ snapshots:
       archiver-utils: 5.0.2
       compress-commons: 6.0.2
       readable-stream: 4.7.0
-
-  zod-to-json-schema@3.25.1(zod@3.25.76):
-    dependencies:
-      zod: 3.25.76
 
   zod-to-json-schema@3.25.1(zod@4.3.6):
     dependencies:

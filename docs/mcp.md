@@ -273,3 +273,77 @@ Read-only sessions do not receive MCP tools automatically. Interactive planning 
 Expected outcome: enabling a server makes it available to subsequent supported AI sessions and explicitly opted-in planning/mission read-only sessions, while unsupported sessions and read-only sessions without the opt-in continue without MCP tools and without logging secret-bearing server definitions.
 
 See [Settings Reference](./settings-reference.md) for the `mcpServers` settings contract and [Agents](./agents.md) for runtime/model lane behavior.
+
+## Fusion as an MCP server (`fn mcp serve`)
+
+<!--
+FNXC:McpDocs 2026-07-10-21:00:
+Every other section on this page documents Fusion as an MCP *client* (configuring/forwarding external MCP servers). This section documents the inversion: `fn mcp serve` makes Fusion itself an MCP *server*, over local stdio only. Keep the curated tool list and safety boundaries below in sync with packages/cli/src/mcp-server/tools.ts (MCP_TOOL_REGISTRY) — that module is the single source of truth.
+-->
+
+Every other command on this page configures Fusion as an MCP **client**. `fn mcp serve` is the inverse: it starts Fusion as a local stdio MCP **server**, so an operator's own MCP client (Claude Desktop, Claude Code, or any other MCP-compatible client) can connect to Fusion and drive the board directly — creating and inspecting tasks, delegating work to agents, and managing workflows — without going through the dashboard UI.
+
+### Running it
+
+```bash
+fn mcp serve [--project <name>]
+```
+
+- Resolves the target project the same way every other `fn` command does: `--project <name>` (registered project name or ID), or CWD auto-detection when omitted.
+- Communicates over **stdio only**. stdout is reserved for the MCP JSON-RPC protocol channel; all operator-facing diagnostics (startup confirmation, errors) are written to stderr.
+- Runs until the connected MCP client disconnects, or until it receives `SIGINT`/`SIGTERM`. On every exit path — clean shutdown, signal, or a startup error — it closes both the MCP server and the underlying `TaskStore`/SQLite handles before exiting (the same close-on-every-exit-path discipline the `fn mcp add/list/...` commands already follow).
+- Never routes through the HTTP dashboard: every tool call dispatches directly to the same `@fusion/core` / `@fusion/engine` domain operations the pi-extension `fn_*` tools use.
+
+### The v1 tool allow-list
+
+`fn mcp serve` exposes a curated, fixed set of tools — read operations plus safe mutations only. Nothing outside this list is reachable:
+
+**Tasks**
+- `fn_task_create` — create a task (enters the planning column; optional `workflow_id`)
+- `fn_task_list` — list tasks grouped by column
+- `fn_task_show` — show full task detail (steps, log, prompt)
+- `fn_task_search` — full-text search across tasks
+- `fn_delegate_task` — create a task pre-assigned to a specific agent
+
+**Agents**
+- `fn_list_agents` — list agents, with role/state filters
+- `fn_agent_show` — show a single agent's detail (org hierarchy, current assignment)
+- `fn_agent_create` — create a new non-ephemeral agent
+- `fn_agent_start` — resume a paused agent
+- `fn_agent_stop` — pause a running agent
+
+**Workflows**
+- `fn_workflow_list` — list workflow definitions
+- `fn_workflow_get` — fetch a workflow definition's IR
+- `fn_workflow_create` — create a custom workflow definition
+- `fn_workflow_update` — update a custom workflow definition
+- `fn_workflow_select` — assign a workflow to a task (`task_id` is required — there is no ambient task context on this server)
+
+### Safety boundaries
+
+These are enforced by the tool registry itself, not just by caller discipline:
+
+- **No release/publish/version-tag tooling.** Releasing is an operator-only action performed outside the task loop (see [Contributing](./contributing.md)); `fn mcp serve` never exposes `pnpm release`, `changeset publish`, `pnpm publish`, or git tagging.
+- **No `*_delete` tools in v1.** Deleting tasks, agents, or workflows is out of scope for this server's first version. A future destructive tool would need to be gated behind an explicit `--allow-destructive` flag — none exists today.
+- **No raw secret values.** Every tool result is passed through a redaction pass before being returned; secret-shaped fields (tokens, API keys, passwords, authorization headers) are never surfaced in a tool response. Secret management (`fn mcp add/edit --env/--header`, the Secrets view) is intentionally outside this server's allow-list entirely.
+
+### Trust model
+
+`fn mcp serve` runs as a local stdio subprocess launched directly by the operator's own MCP client, under the operator's own OS user privileges. Every tool call is treated as an already-authenticated operator action — the same privileged-caller shape (`{ id: "user", role: "user", isPrivileged: true }`) the pi extension's `fn_agent_create` already uses. There is no additional network-facing authentication boundary, and none is needed: this is a local process talking to a local client over stdin/stdout, the same trust boundary as any other CLI command you run yourself. Do not put this server behind a network transport (HTTP/SSE) without re-deriving this trust model first.
+
+### Claude Desktop / Claude Code configuration
+
+Add an entry to your MCP client's server configuration pointing at the `fn` binary with the `mcp serve` subcommand:
+
+```json
+{
+  "mcpServers": {
+    "fusion": {
+      "command": "fn",
+      "args": ["mcp", "serve", "--project", "my-project"]
+    }
+  }
+}
+```
+
+Omit `--project` (and its argument) to have Fusion auto-detect the project from the working directory the client launches the process in. Expected outcome: the client lists the fifteen curated Fusion tools above and can call them directly to manage the board.

@@ -108,7 +108,11 @@ export function resolveTaskListFormatter(core: { formatTaskListText?: unknown })
 
 /** #1403: display a column's label, falling back to the raw id for
  *  workflow-defined custom columns that have no legacy label. */
-function columnLabel(column: ColumnId): string {
+/*
+FNXC:McpServer 2026-07-10-21:00:
+Exported for reuse by the MCP operator server's fn_task_show tool. No behavior change to existing extension.ts callers.
+*/
+export function columnLabel(column: ColumnId): string {
   return (COLUMN_LABELS as Record<string, string>)[column] ?? column;
 }
 
@@ -187,7 +191,11 @@ export async function closeCachedStores(): Promise<void> {
   }
 }
 
-function getFusionDir(cwd: string): string {
+/*
+FNXC:McpServer 2026-07-10-21:00:
+Exported (previously module-private) so packages/cli/src/mcp-server/tools.ts can bind MCP operator tools to the exact same @fusion/core AgentStore rootDir resolution fn_* pi tools use, instead of duplicating the `.fusion` dir derivation. No behavior change to existing extension.ts callers.
+*/
+export function getFusionDir(cwd: string): string {
   return join(resolveProjectRoot(cwd), ".fusion");
 }
 
@@ -222,7 +230,11 @@ function emitSecretAudit(
  * Rejects unknown agents and ephemeral/runtime-managed agents — mirrors fn_delegate
  * so callers can't park hallucinated or task-worker IDs in `task.assignedAgentId`.
  */
-async function validateAssignableAgentId(
+/*
+FNXC:McpServer 2026-07-10-21:00:
+Exported so the MCP operator server's fn_task_create/fn_delegate_task tool handlers (packages/cli/src/mcp-server/tools.ts) reuse the exact same agent-assignment validation as the pi extension tools, instead of re-implementing the ephemeral/role-mismatch checks. No behavior change to existing extension.ts callers.
+*/
+export async function validateAssignableAgentId(
   cwd: string,
   agentId: string,
   task?: Pick<Task, "id" | "column"> | null,
@@ -264,7 +276,11 @@ async function isEphemeralCallerAgent(cwd: string, callerAgentId: string | undef
   }
 }
 
-function normalizeNullableStringInput(value: string | null | undefined): string | null | undefined {
+/*
+FNXC:McpServer 2026-07-10-21:00:
+Exported for reuse by the MCP operator server's fn_task_create tool (packages/cli/src/mcp-server/tools.ts). No behavior change to existing extension.ts callers.
+*/
+export function normalizeNullableStringInput(value: string | null | undefined): string | null | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -315,7 +331,11 @@ function getTaskSourceAgentLabel(task: Pick<Task, "sourceMetadata" | "sourceAgen
   return undefined;
 }
 
-function getTaskSourceLabel(task: Pick<Task, "sourceType" | "sourceMetadata" | "sourceAgentId" | "sourceParentTaskId">): string | undefined {
+/*
+FNXC:McpServer 2026-07-10-21:00:
+Exported for reuse by the MCP operator server's fn_task_show tool (packages/cli/src/mcp-server/tools.ts), which mirrors this extension's fn_task_show formatting. No behavior change to existing extension.ts callers.
+*/
+export function getTaskSourceLabel(task: Pick<Task, "sourceType" | "sourceMetadata" | "sourceAgentId" | "sourceParentTaskId">): string | undefined {
   switch (task.sourceType) {
     case "dashboard_ui":
       return "Dashboard";
@@ -366,7 +386,11 @@ function getTaskSourceLabel(task: Pick<Task, "sourceType" | "sourceMetadata" | "
   }
 }
 
-async function formatDuplicateLineageLine(task: Task, store: TaskStore): Promise<string | null> {
+/*
+FNXC:McpServer 2026-07-10-21:00:
+Exported for reuse by the MCP operator server's fn_task_show tool. No behavior change to existing extension.ts callers.
+*/
+export async function formatDuplicateLineageLine(task: Task, store: TaskStore): Promise<string | null> {
   const lineage = getTaskDuplicateLineage(task);
   if (lineage.length === 0) return null;
 

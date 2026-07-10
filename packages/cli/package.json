@@ -60,6 +60,8 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.80.6",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^4.0.0",
     "@earendil-works/pi-coding-agent": "^0.80.6",
     "dockerode": "^4.0.12",
     "express": "^5.1.0",

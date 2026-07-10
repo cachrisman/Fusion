@@ -126,7 +126,7 @@ async function loadCommandHandlers() {
   const { runSettingsShow, runSettingsSet } = await import("./commands/settings.js");
   const { runSettingsExport } = await import("./commands/settings-export.js");
   const { runSettingsImport } = await import("./commands/settings-import.js");
-  const { runMcpList, runMcpAdd, runMcpEdit, runMcpRemove, runMcpEnable, runMcpDisable, runMcpImport, runMcpExport, runMcpValidate } = await import("./commands/mcp.js");
+  const { runMcpList, runMcpAdd, runMcpEdit, runMcpRemove, runMcpEnable, runMcpDisable, runMcpImport, runMcpExport, runMcpValidate, runMcpServe } = await import("./commands/mcp.js");
   const { runGitStatus, runGitFetch, runGitPull, runGitPush } = await import("./commands/git.js");
   const { runBranchGroupList, runBranchGroupShow, runBranchGroupPromote, runBranchGroupAbandon } = await import("./commands/branch-group.js");
   const { runBackupCreate, runBackupList, runBackupRestore, runBackupCleanup } = await import("./commands/backup.js");
@@ -204,6 +204,7 @@ async function loadCommandHandlers() {
     runMcpImport,
     runMcpExport,
     runMcpValidate,
+    runMcpServe,
     runGitStatus,
     runGitFetch,
     runGitPull,
@@ -411,6 +412,8 @@ PR:
                                       Export Fusion MCP JSON with secret references only
   fn mcp validate [--scope <global|project|effective>] [--json]
                                       Validate MCP definitions without revealing secrets
+  fn mcp serve [--project <name>]      Run Fusion as a local stdio MCP server for operator MCP clients
+                                      (Claude Desktop / Claude Code); curated task/agent/workflow tools only
 
   fn git status              Show current branch, commit, dirty state, ahead/behind
   fn git push                Push current branch
@@ -714,6 +717,7 @@ async function main() {
     runMcpImport,
     runMcpExport,
     runMcpValidate,
+    runMcpServe,
     runGitStatus,
     runGitFetch,
     runGitPull,
@@ -1779,9 +1783,12 @@ async function main() {
           case "test":
             await runMcpValidate({ projectName, scope, json: args.includes("--json") });
             break;
+          case "serve":
+            await runMcpServe({ projectName });
+            break;
           default:
             console.error(`Unknown subcommand: mcp ${subcommand || ""}`);
-            console.log("Try: fn mcp list | add | edit | remove | enable | disable | import | export | validate");
+            console.log("Try: fn mcp list | add | edit | remove | enable | disable | import | export | validate | serve");
             process.exit(1);
         }
         break;

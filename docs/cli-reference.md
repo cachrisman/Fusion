@@ -1125,6 +1125,7 @@ fn mcp disable <name> [--scope global|project]
 fn mcp import <claude-desktop.json> [--scope global|project] [--yes]
 fn mcp export [--scope global|project|effective] [--output <file>] [--json]
 fn mcp validate [--scope global|project|effective] [--json]
+fn mcp serve [--project <name>]
 ```
 
 Scope semantics:
@@ -1139,6 +1140,8 @@ Secret handling:
 - `--env-raw` and `--header-raw` are rejected by design; they exist only to produce an explicit no-plaintext error for scripts that try to pass inline sensitive values.
 - `fn mcp import` accepts Claude Desktop-style `{ "mcpServers": { ... } }` JSON, creates Fusion secrets for imported plaintext env/header values, and writes only secret references.
 - `list`, `export`, and `validate` print descriptors/summaries, never decrypted secret values.
+
+`fn mcp serve` is the inverse of the rest of this command group: instead of configuring MCP servers Fusion connects out to, it runs Fusion itself as a local stdio MCP server for an operator's own MCP client (Claude Desktop, Claude Code). It exposes a curated, fixed task/agent/workflow tool allow-list — no release/publish/version-tag tooling, no `*_delete` tools, no raw secret values. See ["Fusion as an MCP server"](./mcp.md#fusion-as-an-mcp-server-fn-mcp-serve) for the full tool list, safety boundaries, and a Claude Desktop/Code config example.
 
 | Option | Description |
 |---|---|

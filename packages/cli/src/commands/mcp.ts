@@ -624,3 +624,61 @@ export async function runMcpValidate(opts: { projectName?: string; scope?: McpSc
     }
   }
 }
+
+/*
+FNXC:McpServer 2026-07-10-21:00:
+`fn mcp serve` is the inverse of every other verb in this file: instead of
+managing OTHER MCP servers Fusion connects out to, this starts Fusion itself
+as a local stdio MCP server so an operator's own MCP client (Claude Desktop /
+Claude Code) can drive the board directly. It follows the exact same
+`McpContext`/`closeMcpContext` close-on-every-exit-path discipline as every
+other verb here (FN-7739) — the long-lived stdio loop makes leaked
+TaskStore/SQLite handles even more consequential than a one-shot CLI command.
+stdout is reserved for the MCP protocol channel; every operator-facing
+diagnostic in this function goes to stderr only.
+*/
+export async function runMcpServe(opts: { projectName?: string } = {}): Promise<void> {
+  const { buildMcpServer } = await import("../mcp-server/server.js");
+  const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+
+  let context: McpContext | undefined;
+  let mcpServer: Awaited<ReturnType<typeof buildMcpServer>> | undefined;
+  let shuttingDown = false;
+
+  const shutdown = async (exitCode: number): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      if (mcpServer) await mcpServer.close();
+    } catch (error) {
+      console.error("[fn mcp serve] error closing MCP server", error);
+    }
+    if (context) {
+      await closeMcpContext(context);
+    }
+    process.exit(exitCode);
+  };
+
+  const onSignal = () => {
+    void shutdown(0);
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+
+  try {
+    context = await loadContext(opts.projectName, true);
+    const project = ensureProject(context);
+
+    mcpServer = buildMcpServer({ cwd: project.projectPath, store: project.store, version: process.env.npm_package_version });
+    mcpServer.server.server.onclose = () => {
+      void shutdown(0);
+    };
+
+    const transport = new StdioServerTransport();
+    await mcpServer.connect(transport);
+    console.error(`[fn mcp serve] Fusion MCP operator server listening on stdio (project: ${project.projectName})`);
+  } catch (error) {
+    console.error("[fn mcp serve] failed to start", error instanceof Error ? error.message : error);
+    await shutdown(1);
+  }
+}
