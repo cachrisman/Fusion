@@ -31,6 +31,7 @@ const EXPECTED_TOOL_NAMES = [
   "fn_task_list",
   "fn_task_show",
   "fn_task_search",
+  "fn_task_archive",
   "fn_delegate_task",
   "fn_list_agents",
   "fn_agent_show",
@@ -125,6 +126,13 @@ describe("buildMcpToolRegistry (FUSI-002 destructive gate)", () => {
       expect(tool.description).toMatch(/^DESTRUCTIVE:/);
       expect(tool.inputSchema.type).toBe("object");
     }
+  });
+
+  it("fn_task_archive (FUSI-006) is base-tier — present with allowDestructive false/absent, never duplicated into DESTRUCTIVE_TOOL_TIER", () => {
+    expect(MCP_TOOL_REGISTRY.map((t) => t.name)).toContain("fn_task_archive");
+    expect(DESTRUCTIVE_TOOL_TIER.map((t) => t.name)).not.toContain("fn_task_archive");
+    expect(buildMcpToolRegistry({ allowDestructive: false }).map((t) => t.name)).toContain("fn_task_archive");
+    expect(buildMcpToolRegistry({ allowDestructive: true }).filter((t) => t.name === "fn_task_archive")).toHaveLength(1);
   });
 });
 
@@ -235,6 +243,70 @@ describe("fn mcp serve — in-memory server smoke test", () => {
       expect(result.isError).not.toBe(true);
       const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
       expect(text).toContain("unique-token-xyz");
+    } finally {
+      await client.close();
+      await mcpServer.close();
+    }
+  });
+
+  it("dispatches fn_task_archive to store.archiveTask and moves the task to the archived column", async () => {
+    const task = await store.createTask({ description: "Archive me via MCP", source: { sourceType: "api" } });
+    const { client, mcpServer } = await connectClient();
+    try {
+      const result = await client.callTool({ name: "fn_task_archive", arguments: { id: task.id } });
+      expect(result.isError).not.toBe(true);
+      const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+      expect(text).toContain(task.id);
+      expect(text).toContain("Archived");
+      const archived = await store.getTask(task.id);
+      expect(archived.column).toBe("archived");
+    } finally {
+      await client.close();
+      await mcpServer.close();
+    }
+  });
+
+  it("fn_task_archive surfaces an error result (not a throw) when archiving an already-archived task", async () => {
+    // store.archiveTask's default cleanup:true deletes the live task row and moves it into a
+    // separate archive DB, so a REPEAT archive call can no longer find the row at all ("not
+    // found" instead of "already archived"). Use cleanup:false to keep the row in place with
+    // column:'archived' so the handler exercises the store's actual "already archived" guard
+    // (the literal branch store.archiveTask throws from when the row is still present).
+    const task = await store.createTask({ description: "Already archived", source: { sourceType: "api" } });
+    await store.archiveTask(task.id, { cleanup: false });
+    const { client, mcpServer } = await connectClient();
+    try {
+      const result = await client.callTool({ name: "fn_task_archive", arguments: { id: task.id } });
+      expect(result.isError).toBe(true);
+      const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+      expect(text).toMatch(/already archived/i);
+    } finally {
+      await client.close();
+      await mcpServer.close();
+    }
+  });
+
+  it("fn_task_archive rejects a lineage-parent task without removeLineageReferences, and succeeds with it", async () => {
+    const parent = await store.createTask({ column: "done", description: "lineage parent", source: { sourceType: "api" } });
+    const child = await store.createTask({ column: "todo", description: "lineage child", source: { sourceType: "api" } });
+    (store as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db
+      .prepare('UPDATE tasks SET sourceParentTaskId = ?, sourceType = ?, updatedAt = ? WHERE id = ?')
+      .run(parent.id, "task_refine", new Date().toISOString(), child.id);
+
+    const { client, mcpServer } = await connectClient();
+    try {
+      const blocked = await client.callTool({ name: "fn_task_archive", arguments: { id: parent.id } });
+      expect(blocked.isError).toBe(true);
+      const blockedText = (blocked.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+      expect(blockedText).toMatch(/lineage/i);
+      expect((await store.getTask(parent.id)).column).not.toBe("archived");
+
+      const allowed = await client.callTool({
+        name: "fn_task_archive",
+        arguments: { id: parent.id, removeLineageReferences: true },
+      });
+      expect(allowed.isError).not.toBe(true);
+      expect((await store.getTask(parent.id)).column).toBe("archived");
     } finally {
       await client.close();
       await mcpServer.close();

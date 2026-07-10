@@ -285,6 +285,9 @@ FUSI-002 adds the off-by-default `--allow-destructive` flag and the first destru
 
 FNXC:McpDocs 2026-07-10-23:30:
 FUSI-003 adds a second transport (`--transport http`) alongside the stdio default. Unlike stdio, HTTP is network-facing, so the "Trust model" section below is now split: the stdio subsection keeps the original no-auth operator-privileged rationale verbatim, and a new HTTP subsection documents the re-derived boundary (loopback-by-default binding, mandatory bearer-token auth, hard refusal to bind non-loopback without a token). Keep this in sync with packages/cli/src/mcp-server/http-transport.ts.
+
+FNXC:McpDocs 2026-07-10-23:59:
+FUSI-006 adds `fn_task_archive` to the base v1 tool set (fifteen → sixteen; twenty-two → twenty-three with `--allow-destructive`). It is base-tier, NOT destructive, because it is a reversible soft-move restorable via `fn_task_unarchive`. `fn_goal_archive` was evaluated and explicitly DEFERRED (no `fn_goal_list`/`fn_goal_show` base tools exist yet to discover goal IDs) — see the filed follow-up task.
 -->
 
 Every other command on this page configures Fusion as an MCP **client**. `fn mcp serve` is the inverse: it starts Fusion as an MCP **server**, so an operator's own MCP client (Claude Desktop, Claude Code, or any other MCP-compatible client) can connect to Fusion and drive the board directly — creating and inspecting tasks, delegating work to agents, and managing workflows — without going through the dashboard UI. Two transports are available: **stdio** (default, local subprocess) and **streamable HTTP** (network-facing, added by FUSI-003 for remote MCP clients).
@@ -311,6 +314,7 @@ fn mcp serve [--project <name>] [--allow-destructive]
 - `fn_task_list` — list tasks grouped by column
 - `fn_task_show` — show full task detail (steps, log, prompt)
 - `fn_task_search` — full-text search across tasks
+- `fn_task_archive` — archive a task from any live column to `archived`. This is a **reversible** soft-move (restorable via the dashboard's unarchive action / `store.unarchiveTask`) — not a deletion — so it is a base tool and does NOT require `--allow-destructive`. Pass `removeLineageReferences: true` to archive a task still referenced as a lineage parent. Dispatches to the same `TaskStore.archiveTask(id, { removeLineageReferences })` operation the pi-extension `fn_task_archive` tool uses.
 - `fn_delegate_task` — create a task pre-assigned to a specific agent
 
 **Agents**
@@ -405,7 +409,7 @@ Add `"--allow-destructive"` to `args` to also opt into the destructive tool tier
 }
 ```
 
-Omit `--project` (and its argument) to have Fusion auto-detect the project from the working directory the client launches the process in. Expected outcome (no `--allow-destructive`): the client lists the fifteen curated Fusion tools above and can call them directly to manage the board. Expected outcome (with `--allow-destructive`): the client lists those fifteen tools **plus** `fn_task_delete`, `fn_agent_delete`, `fn_workflow_delete`, `fn_mission_delete`, `fn_milestone_delete`, `fn_slice_delete`, and `fn_feature_delete` — twenty-two tools total.
+Omit `--project` (and its argument) to have Fusion auto-detect the project from the working directory the client launches the process in. Expected outcome (no `--allow-destructive`): the client lists the sixteen curated Fusion tools above and can call them directly to manage the board. Expected outcome (with `--allow-destructive`): the client lists those sixteen tools **plus** `fn_task_delete`, `fn_agent_delete`, `fn_workflow_delete`, `fn_mission_delete`, `fn_milestone_delete`, `fn_slice_delete`, and `fn_feature_delete` — twenty-three tools total.
 
 ### Connecting a remote client over HTTP
 

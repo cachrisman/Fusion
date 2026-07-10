@@ -784,21 +784,77 @@ const fnWorkflowDelete = bindWorkflowTool(
   jsonSchemaOf(workflowDeleteParams),
 );
 
+/*
+FNXC:McpServer 2026-07-10-23:59:
+FUSI-006 adds `fn_task_archive` to the BASE registry (not the destructive
+tier gated by --allow-destructive). Archive is a fully reversible soft-move
+to the `archived` column — it has a restore path (`fn_task_unarchive` /
+store.unarchiveTask), unlike the `*_delete` tools in DESTRUCTIVE_TOOL_TIER —
+so it belongs alongside the other safe-mutation base tools. The handler
+dispatches to the SAME `store.archiveTask(id, { removeLineageReferences })`
+call the pi-extension `fn_task_archive` handler uses
+(packages/cli/src/extension.ts), including forwarding `removeLineageReferences`
+so the TaskHasLineageChildrenError recovery path it advertises is reachable
+(see the FN-7661 FNXC:TaskLifecycleTools comment on the extension handler).
+`fn_goal_archive` was evaluated and explicitly DEFERRED: the base registry
+currently exposes no `fn_goal_list`/`fn_goal_show` tools, so a standalone
+goal-archive tool would have no MCP-discoverable way to find goal IDs — see
+the filed follow-up task for introducing a coherent goal tool set.
+*/
+const fnTaskArchive: McpToolDefinition = {
+  name: "fn_task_archive",
+  description:
+    "Archive a task from any live column (move to archived). This is a REVERSIBLE soft-move, not a deletion " +
+    "— archived tasks are preserved for historical reference and restorable via fn_task_unarchive. If the task " +
+    "is still referenced as a lineage parent by another task, archiving is rejected unless " +
+    "removeLineageReferences:true is passed.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "Task ID to archive from any live column (e.g. FN-001)." },
+      removeLineageReferences: {
+        type: "boolean",
+        description:
+          "When true, clear incoming lineage-parent references (child sourceParentTaskId) before archiving, " +
+          "so a task still referenced as a lineage parent can be archived.",
+      },
+    },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    try {
+      const task = await store.archiveTask(id, { removeLineageReferences: args.removeLineageReferences === true });
+      return textResult(`Archived ${task.id} → ${columnLabel(task.column)}`, {
+        structuredContent: redactSecretsDeep({ taskId: task.id, column: task.column }),
+      });
+    } catch (error) {
+      if (error instanceof Error) return errorResult(error.message);
+      throw error;
+    }
+  },
+};
+
 /**
  * The curated v1 allow-list — the base set `fn mcp serve` ALWAYS exposes
  * (with or without --allow-destructive). Order mirrors the task/agent/workflow
- * grouping documented in docs/mcp.md.
+ * grouping documented in docs/mcp.md; `fn_task_archive` (FUSI-006) is grouped
+ * with the other `fnTask*` tools.
  *
  * Deliberately absent: any release/publish/version-tag tool, and any tool
  * that could return raw secret material. `*_delete` tools live in
  * {@link DESTRUCTIVE_TOOL_TIER} instead, appended only via
- * {@link buildMcpToolRegistry} when the operator opts in.
+ * {@link buildMcpToolRegistry} when the operator opts in. `fn_task_archive`
+ * is reversible (restorable via fn_task_unarchive) so it stays here, NOT in
+ * the destructive tier.
  */
 export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnTaskCreate,
   fnTaskList,
   fnTaskShow,
   fnTaskSearch,
+  fnTaskArchive,
   fnDelegateTask,
   fnListAgents,
   fnAgentShow,
