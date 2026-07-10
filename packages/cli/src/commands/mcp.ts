@@ -636,6 +636,18 @@ other verb here (FN-7739) — the long-lived stdio loop makes leaked
 TaskStore/SQLite handles even more consequential than a one-shot CLI command.
 stdout is reserved for the MCP protocol channel; every operator-facing
 diagnostic in this function goes to stderr only.
+
+FNXC:StdioProtocolSafety 2026-07-10-00:00:
+FUSI-016 fixed the root cause of stdout contamination: `@fusion/core`'s
+DB-open/migration diagnostics (`[title-id-drift]`, `[done-paused-backfill]`,
+`[fusion:db]` in db.ts/archive-db.ts) previously used `console.log`, which
+writes to stdout and corrupted this stdio JSON-RPC channel for strict
+clients (Claude Desktop rejected the session with "Unexpected token 'i',
+[title-id-dr... is not valid JSON"). Those call sites now route through
+`createLogger` (stderr-backed). This function's own stderr-only diagnostic
+discipline (above) remains in place as defense-in-depth against any other/
+future stdout writer on this path — it is not a substitute for fixing writers
+at the source, which is what FUSI-016 did.
 */
 /*
 FNXC:McpServer 2026-07-10-22:10:

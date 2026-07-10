@@ -4,6 +4,16 @@ import { join } from "node:path";
 import type { ArchivedTaskEntry } from "./types.js";
 import { isFts5CorruptionError, probeFts5 } from "./db.js";
 import { hasTitleIdDrift, normalizeTitleForTaskId } from "./task-title-id-drift.js";
+import { createLogger } from "./logger.js";
+
+/*
+ * FNXC:StdioProtocolSafety 2026-07-10-00:00:
+ * Diagnostics emitted while opening/migrating the archive DB must never write to stdout:
+ * `fn mcp serve` uses stdout as the stdio JSON-RPC transport, so a stray console.log line
+ * corrupts the protocol stream for strict clients (Claude Desktop). Route through the
+ * stderr-backed logger instead of calling console.log directly (FUSI-016).
+ */
+const log = createLogger("archive-db");
 
 const ARCHIVED_TASKS_FTS_MERGE_PAGES = 16;
 
@@ -330,7 +340,7 @@ export class ArchiveDatabase {
       normalizedCount += 1;
     }
 
-    console.log(`[title-id-drift] archive-db normalized ${normalizedCount} archived titles`);
+    log.log(`title-id-drift: normalized ${normalizedCount} archived titles`);
   }
 
   close(): void {

@@ -23,6 +23,16 @@ import { hasTitleIdDrift, normalizeTitleForTaskId } from "./task-title-id-drift.
 // templateId is one of these to the node id so the graph enables the right optional group.
 import { BROWSER_VERIFICATION_GROUP_ID } from "./builtin-browser-verification-group.js";
 import { CODE_REVIEW_GROUP_ID } from "./builtin-code-review-group.js";
+import { createLogger } from "./logger.js";
+
+/*
+ * FNXC:StdioProtocolSafety 2026-07-10-00:00:
+ * DB-open/migration diagnostics must never write to stdout: `fn mcp serve` uses stdout as
+ * the stdio JSON-RPC transport, so a stray console.log line (e.g. "[title-id-drift] ...")
+ * corrupts the protocol stream for strict clients (Claude Desktop). Route all informational
+ * diagnostics through this stderr-backed logger instead of calling console.log directly (FUSI-016).
+ */
+const log = createLogger("db");
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -4542,7 +4552,7 @@ export class Database {
     if (version < 85) {
       this.applyMigration(85, () => {
         if (!this.hasColumn("tasks", "title")) {
-          console.log("[title-id-drift] db.ts migration normalized 0 active titles");
+          log.log("title-id-drift: db.ts migration normalized 0 active titles");
           return;
         }
 
@@ -4565,7 +4575,7 @@ export class Database {
           normalizedCount += 1;
         }
 
-        console.log(`[title-id-drift] db.ts migration normalized ${normalizedCount} active titles`);
+        log.log(`title-id-drift: db.ts migration normalized ${normalizedCount} active titles`);
       });
     }
 
@@ -4595,7 +4605,7 @@ export class Database {
           const taskColumns = this.getTableColumns("tasks");
           const requiredColumns = ["paused", "userPaused", "pausedByAgentId", "pausedReason"];
           if (!requiredColumns.every((column) => taskColumns.has(column))) {
-            console.log("[done-paused-backfill] db.ts migration skipped (missing paused columns on legacy schema)");
+            log.log("done-paused-backfill: db.ts migration skipped (missing paused columns on legacy schema)");
             return;
           }
 
@@ -4611,7 +4621,7 @@ export class Database {
                   OR pausedByAgentId IS NOT NULL
                   OR pausedReason IS NOT NULL)`)
             .run();
-          console.log(`[done-paused-backfill] db.ts migration repaired ${result.changes} done task rows`);
+          log.log(`done-paused-backfill: db.ts migration repaired ${result.changes} done task rows`);
         } catch (error) {
           console.warn("[done-paused-backfill] db.ts migration failed", error);
         }
@@ -6071,7 +6081,7 @@ export class Database {
     for (const { pluginId, hook } of hooks) {
       try {
         await hook(this);
-        console.log(`[fusion:db] Plugin schema init completed for ${pluginId}`);
+        log.log(`fusion:db: Plugin schema init completed for ${pluginId}`);
       } catch (error) {
         errorCount += 1;
         const message = error instanceof Error ? error.message : String(error);
@@ -6079,8 +6089,8 @@ export class Database {
       }
     }
 
-    console.log(
-      `[fusion:db] Plugin schema initialization complete (${hooks.length} hooks executed, ${errorCount} errors)`,
+    log.log(
+      `fusion:db: Plugin schema initialization complete (${hooks.length} hooks executed, ${errorCount} errors)`,
     );
   }
 
