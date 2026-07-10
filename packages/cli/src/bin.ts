@@ -413,10 +413,14 @@ PR:
   fn mcp validate [--scope <global|project|effective>] [--json]
                                       Validate MCP definitions without revealing secrets
   fn mcp serve [--project <name>] [--allow-destructive]
-                                      Run Fusion as a local stdio MCP server for operator MCP clients
+               [--transport stdio|http] [--port <n>] [--host <addr>] [--token <t>]
+                                      Run Fusion as an MCP server for operator MCP clients
                                       (Claude Desktop / Claude Code); curated task/agent/workflow tools only.
                                       --allow-destructive opts into fn_task_delete/fn_agent_delete/
                                       fn_workflow_delete (off by default)
+                                      --transport defaults to stdio; --transport http requires --port
+                                      and a bearer token (--token or FN_MCP_TOKEN) is REQUIRED for any
+                                      non-loopback --host and strongly recommended even on loopback
 
   fn git status              Show current branch, commit, dirty state, ahead/behind
   fn git push                Push current branch
@@ -1793,9 +1797,30 @@ async function main() {
             must explicitly opt in for `fn mcp serve` to register
             fn_task_delete/fn_agent_delete/fn_workflow_delete. Any other/
             malformed flag value leaves the destructive tier absent.
+
+            FNXC:McpServer 2026-07-10-23:10:
+            FUSI-003 adds --transport/--port/--host/--token. --transport
+            defaults to stdio (undefined here, resolved by runMcpServe) so
+            existing invocations are unchanged. Flag values are passed
+            through as-is — runMcpServe/startHttpMcpTransport own the
+            cross-flag validation (HTTP-only flags, port range, mandatory
+            token for non-loopback binds) so tests calling runMcpServe
+            directly get the same guardrails as the CLI.
             */
             const allowDestructive = args.includes("--allow-destructive");
-            await runMcpServe({ projectName, allowDestructive });
+            const transportFlag = getFlagValue(args, "--transport");
+            const transport = transportFlag === "http" ? "http" : transportFlag === "stdio" ? "stdio" : transportFlag !== undefined ? transportFlag : undefined;
+            const port = getFlagValueNumber(args, "--port");
+            const host = getFlagValue(args, "--host");
+            const token = getFlagValue(args, "--token");
+            await runMcpServe({
+              projectName,
+              allowDestructive,
+              transport: transport as "stdio" | "http" | undefined,
+              port,
+              host,
+              token,
+            });
             break;
           }
           default:

@@ -282,21 +282,25 @@ Every other section on this page documents Fusion as an MCP *client* (configurin
 
 FNXC:McpDocs 2026-07-10-22:10:
 FUSI-002 adds the off-by-default `--allow-destructive` flag and the first destructive tool tier (`fn_task_delete`, `fn_agent_delete`, `fn_workflow_delete`). Keep the "Destructive tools" section in sync with `DESTRUCTIVE_TOOL_TIER` in tools.ts, and keep the flag's off-by-default default in sync with `BuildMcpServerOptions.allowDestructive` in server.ts.
+
+FNXC:McpDocs 2026-07-10-23:30:
+FUSI-003 adds a second transport (`--transport http`) alongside the stdio default. Unlike stdio, HTTP is network-facing, so the "Trust model" section below is now split: the stdio subsection keeps the original no-auth operator-privileged rationale verbatim, and a new HTTP subsection documents the re-derived boundary (loopback-by-default binding, mandatory bearer-token auth, hard refusal to bind non-loopback without a token). Keep this in sync with packages/cli/src/mcp-server/http-transport.ts.
 -->
 
-Every other command on this page configures Fusion as an MCP **client**. `fn mcp serve` is the inverse: it starts Fusion as a local stdio MCP **server**, so an operator's own MCP client (Claude Desktop, Claude Code, or any other MCP-compatible client) can connect to Fusion and drive the board directly — creating and inspecting tasks, delegating work to agents, and managing workflows — without going through the dashboard UI.
+Every other command on this page configures Fusion as an MCP **client**. `fn mcp serve` is the inverse: it starts Fusion as an MCP **server**, so an operator's own MCP client (Claude Desktop, Claude Code, or any other MCP-compatible client) can connect to Fusion and drive the board directly — creating and inspecting tasks, delegating work to agents, and managing workflows — without going through the dashboard UI. Two transports are available: **stdio** (default, local subprocess) and **streamable HTTP** (network-facing, added by FUSI-003 for remote MCP clients).
 
 ### Running it
 
 ```bash
 fn mcp serve [--project <name>] [--allow-destructive]
+             [--transport stdio|http] [--port <n>] [--host <addr>] [--token <t>]
 ```
 
 - Resolves the target project the same way every other `fn` command does: `--project <name>` (registered project name or ID), or CWD auto-detection when omitted.
-- Communicates over **stdio only**. stdout is reserved for the MCP JSON-RPC protocol channel; all operator-facing diagnostics (startup confirmation, errors, destructive-tool audit lines) are written to stderr.
-- Runs until the connected MCP client disconnects, or until it receives `SIGINT`/`SIGTERM`. On every exit path — clean shutdown, signal, or a startup error — it closes both the MCP server and the underlying `TaskStore`/SQLite handles before exiting (the same close-on-every-exit-path discipline the `fn mcp add/list/...` commands already follow).
-- Never routes through the HTTP dashboard: every tool call dispatches directly to the same `@fusion/core` / `@fusion/engine` domain operations the pi-extension `fn_*` tools use.
-- `--allow-destructive` is **off by default**. Omit it (or pass any other/malformed value) and the server exposes exactly the v1 tool set below, with zero `*_delete` tools — identical to running `fn mcp serve` before this flag existed. Pass `--allow-destructive` to opt into the destructive tool tier (see below). This is a boolean presence flag, not `--allow-destructive=true/false`.
+- `--transport` defaults to `stdio` — every existing invocation is unchanged. Pass `--transport http` to serve over `StreamableHTTPServerTransport` instead (see "HTTP transport" below).
+- Runs until the connected MCP client disconnects (stdio), or the listener is closed (HTTP), or until it receives `SIGINT`/`SIGTERM`. On every exit path — clean shutdown, signal, or a startup error — it closes the MCP server, the HTTP listener/transport (HTTP mode only), and the underlying `TaskStore`/SQLite handles before exiting (the same close-on-every-exit-path discipline the `fn mcp add/list/...` commands already follow).
+- Never routes through the HTTP dashboard: every tool call, on either transport, dispatches directly to the same `@fusion/core` / `@fusion/engine` domain operations the pi-extension `fn_*` tools use.
+- `--allow-destructive` is **off by default**. Omit it (or pass any other/malformed value) and the server exposes exactly the v1 tool set below, with zero `*_delete` tools — identical to running `fn mcp serve` before this flag existed. Pass `--allow-destructive` to opt into the destructive tool tier (see below). This is a boolean presence flag, not `--allow-destructive=true/false`. The same tool set (base or +destructive) is served on **both** transports — the transport only changes how bytes reach the server.
 
 ### The v1 tool allow-list
 
@@ -333,6 +337,22 @@ Starting `fn mcp serve --allow-destructive` adds exactly three additional tools 
 
 Each destructive tool's `description` begins with the literal marker `DESTRUCTIVE:` so it is unmistakable in any MCP client's tool listing. Every destructive invocation — success or failure — writes an ids/counts/outcomes-only audit line to **stderr** (never stdout): tool name, resource id, and outcome (`deleted` / `denied` / `pending_approval` / `error`). No prose and no secret values are ever included in that line.
 
+### HTTP transport (`--transport http`, network-facing)
+
+```bash
+fn mcp serve --transport http --port <n> [--host <addr>] [--token <t>]
+```
+
+`--transport http` serves the SAME curated tool set (base or `--allow-destructive`) over `@modelcontextprotocol/sdk`'s `StreamableHTTPServerTransport` instead of stdio, so a remote/networked MCP client can connect instead of a same-machine subprocess. Because HTTP is a network-facing surface — not a same-machine trust boundary like stdio — it does **not** inherit stdio's no-auth trust model; the boundary is re-derived from scratch:
+
+- **`--port <n>` is required.** Must be an integer 0–65535 (`0` requests an OS-assigned ephemeral port — used by this project's own tests, never port 4040).
+- **Binds loopback (`127.0.0.1`) by default.** Pass `--host <addr>` to bind a different interface (e.g. `0.0.0.0` for LAN/remote access).
+- **Bearer token authentication is required on every request.** Provide it via `--token <t>` or the `FN_MCP_TOKEN` environment variable. The server accepts the token either as an `Authorization: Bearer <token>` header (preferred) or a `?token=<token>` query-string fallback, mirroring the pattern in `packages/dashboard/src/auth-middleware.ts`. A missing or incorrect token gets `401` with no body leakage. Token comparison is constant-time (`crypto.timingSafeEqual`) to resist timing attacks.
+- **Refuses to start on a non-loopback bind without a token.** If `--host` resolves to anything other than loopback and no token is configured (`--token`/`FN_MCP_TOKEN`), `fn mcp serve` exits with an error before opening the listener — a networked operator server must never run unauthenticated.
+- **Loopback with no token is permitted but discouraged.** It starts, but emits a stderr warning recommending a token, since other local users/processes on a shared host can still reach a loopback-bound port.
+- **`--port`/`--host`/`--token` are HTTP-only.** Supplying any of them with `--transport stdio` (or omitting `--transport`) is a validation error.
+- MCP protocol bytes flow over the HTTP response body; stdout is never used by the HTTP transport. All diagnostics (bind address, auth-required notice, warnings) go to stderr, same as stdio mode.
+
 ### Safety boundaries
 
 These are enforced by the tool registry itself, not just by caller discipline:
@@ -343,9 +363,15 @@ These are enforced by the tool registry itself, not just by caller discipline:
 
 ### Trust model
 
-`fn mcp serve` runs as a local stdio subprocess launched directly by the operator's own MCP client, under the operator's own OS user privileges. Every tool call is treated as an already-authenticated operator action — the same privileged-caller shape (`{ id: "user", role: "user", isPrivileged: true }`) the pi extension's `fn_agent_create` already uses. There is no additional network-facing authentication boundary, and none is needed: this is a local process talking to a local client over stdin/stdout, the same trust boundary as any other CLI command you run yourself. Do not put this server behind a network transport (HTTP/SSE) without re-deriving this trust model first.
+#### stdio (default)
+
+`fn mcp serve` (no `--transport`, or `--transport stdio`) runs as a local stdio subprocess launched directly by the operator's own MCP client, under the operator's own OS user privileges. Every tool call is treated as an already-authenticated operator action — the same privileged-caller shape (`{ id: "user", role: "user", isPrivileged: true }`) the pi extension's `fn_agent_create` already uses. There is no additional network-facing authentication boundary, and none is needed: this is a local process talking to a local client over stdin/stdout, the same trust boundary as any other CLI command you run yourself.
 
 `--allow-destructive` is not an additional authentication boundary either — it is an explicit operator confirmation that this particular `fn mcp serve` invocation should register delete-capable tools. Since every call is already treated as a privileged operator action, `fn_agent_delete`'s provisioning-policy check will typically resolve to `allow`; the `deny`/`require-approval` branches remain reachable (and are honored) whenever project settings configure a non-default `agentProvisioning` policy.
+
+#### HTTP (`--transport http`) — does NOT inherit the stdio trust model
+
+HTTP is a network-facing surface, not a same-machine pipe the operator's own shell launched — stdio's "no additional auth needed" reasoning does not transfer. `--transport http` re-derives the trust boundary instead of assuming it: loopback-by-default binding, mandatory bearer-token auth on every request, and a hard refusal to bind a non-loopback interface without a configured token (see "HTTP transport" above for the full policy). Treat an HTTP-mode `fn mcp serve` process exactly like any other network service that can create/mutate tasks, agents, and workflows: keep the token secret, prefer loopback binding plus an SSH tunnel or reverse proxy for remote access over exposing `--host 0.0.0.0` directly, and rotate the token if it may have leaked.
 
 ### Claude Desktop / Claude Code configuration
 
@@ -376,3 +402,34 @@ Add `"--allow-destructive"` to `args` to also opt into the destructive tool tier
 ```
 
 Omit `--project` (and its argument) to have Fusion auto-detect the project from the working directory the client launches the process in. Expected outcome (no `--allow-destructive`): the client lists the fifteen curated Fusion tools above and can call them directly to manage the board. Expected outcome (with `--allow-destructive`): the client lists those fifteen tools **plus** `fn_task_delete`, `fn_agent_delete`, and `fn_workflow_delete` — eighteen tools total.
+
+### Connecting a remote client over HTTP
+
+First start the HTTP transport with a token (do this outside the MCP client — `fn mcp serve` is a long-running process):
+
+```bash
+FN_MCP_TOKEN="$(openssl rand -hex 32)" fn mcp serve --project my-project --transport http --port 8765
+```
+
+Then point an MCP client that supports streamable-HTTP servers at the endpoint, supplying the same token as a bearer header:
+
+```json
+{
+  "mcpServers": {
+    "fusion": {
+      "url": "http://127.0.0.1:8765",
+      "headers": {
+        "Authorization": "Bearer <the FN_MCP_TOKEN value>"
+      }
+    }
+  }
+}
+```
+
+For genuinely remote (non-loopback) access, bind explicitly with `--host` and a token is then mandatory (the server refuses to start otherwise):
+
+```bash
+FN_MCP_TOKEN="$(openssl rand -hex 32)" fn mcp serve --project my-project --transport http --host 0.0.0.0 --port 8765
+```
+
+Prefer tunneling (SSH port-forward, VPN, reverse proxy with TLS) over exposing `--host 0.0.0.0` directly on an untrusted network — this transport does not terminate TLS itself.

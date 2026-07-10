@@ -645,17 +645,73 @@ omitted, matching the CLI parse default in bin.ts. This does not change the
 FN-7739 close-on-every-exit-path discipline below — the flag only affects
 which tools the resulting McpServer registers.
 */
-export async function runMcpServe(opts: { projectName?: string; allowDestructive?: boolean } = {}): Promise<void> {
+export interface McpServeOptions {
+  projectName?: string;
+  allowDestructive?: boolean;
+  /** Transport to serve over. Defaults to "stdio" (unchanged FUSI-001/FUSI-002 behavior). */
+  transport?: "stdio" | "http";
+  /** HTTP-only: bind port. Required (and validated 1-65535) when transport === "http". */
+  port?: number;
+  /** HTTP-only: bind host. Defaults to loopback (127.0.0.1) inside startHttpMcpTransport. */
+  host?: string;
+  /** HTTP-only: bearer token. Falls back to FN_MCP_TOKEN env var when omitted. */
+  token?: string;
+}
+
+/*
+FNXC:McpServer 2026-07-10-23:10:
+FUSI-003 adds a second transport (`--transport http`) alongside the FUSI-001
+stdio path. `--transport` defaults to "stdio" so every existing `fn mcp
+serve` invocation is byte-for-byte unchanged. Flags are cross-validated here
+(not just in bin.ts) so programmatic callers (tests) get the same guardrails
+as the CLI: --port/--host/--token are HTTP-only, --port is mandatory and
+must be a valid 1-65535 integer for --transport http. The HTTP listener,
+its StreamableHTTPServerTransport, the McpServer, AND every TaskStore/SQLite
+handle (via closeMcpContext) are closed on every exit path (signal, error,
+or transport onclose) per the FN-7739 handle-leak discipline.
+*/
+export async function runMcpServe(opts: McpServeOptions = {}): Promise<void> {
   const { buildMcpServer } = await import("../mcp-server/server.js");
-  const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+  const transportKind = opts.transport ?? "stdio";
+
+  if (transportKind !== "stdio" && transportKind !== "http") {
+    console.error(`[fn mcp serve] invalid --transport "${transportKind}". Use stdio or http.`);
+    process.exit(1);
+    return;
+  }
+  if (transportKind === "stdio" && (opts.port !== undefined || opts.host !== undefined || opts.token !== undefined)) {
+    console.error("[fn mcp serve] --port/--host/--token are only valid with --transport http.");
+    process.exit(1);
+    return;
+  }
+  let resolvedPort: number | undefined;
+  if (transportKind === "http") {
+    if (opts.port === undefined) {
+      console.error("[fn mcp serve] --port is required with --transport http.");
+      process.exit(1);
+      return;
+    }
+    if (!Number.isInteger(opts.port) || opts.port < 0 || opts.port > 65535) {
+      console.error("[fn mcp serve] --port must be an integer between 0 and 65535 (0 = OS-assigned ephemeral port).");
+      process.exit(1);
+      return;
+    }
+    resolvedPort = opts.port;
+  }
 
   let context: McpContext | undefined;
   let mcpServer: Awaited<ReturnType<typeof buildMcpServer>> | undefined;
+  let httpHandle: Awaited<ReturnType<typeof import("../mcp-server/http-transport.js").startHttpMcpTransport>> | undefined;
   let shuttingDown = false;
 
   const shutdown = async (exitCode: number): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+    try {
+      if (httpHandle) await httpHandle.close();
+    } catch (error) {
+      console.error("[fn mcp serve] error closing HTTP transport", error);
+    }
     try {
       if (mcpServer) await mcpServer.close();
     } catch (error) {
@@ -683,12 +739,30 @@ export async function runMcpServe(opts: { projectName?: string; allowDestructive
       void shutdown(0);
     };
 
-    const transport = new StdioServerTransport();
-    await mcpServer.connect(transport);
-    console.error(
-      `[fn mcp serve] Fusion MCP operator server listening on stdio (project: ${project.projectName})` +
-        (allowDestructive ? " [destructive tools ENABLED: fn_task_delete, fn_agent_delete, fn_workflow_delete]" : ""),
-    );
+    if (transportKind === "stdio") {
+      const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+      const transport = new StdioServerTransport();
+      await mcpServer.connect(transport);
+      console.error(
+        `[fn mcp serve] Fusion MCP operator server listening on stdio (project: ${project.projectName})` +
+          (allowDestructive ? " [destructive tools ENABLED: fn_task_delete, fn_agent_delete, fn_workflow_delete]" : ""),
+      );
+    } else {
+      const { startHttpMcpTransport } = await import("../mcp-server/http-transport.js");
+      const token = opts.token ?? process.env.FN_MCP_TOKEN;
+      httpHandle = await startHttpMcpTransport({
+        server: mcpServer,
+        host: opts.host,
+        port: resolvedPort as number,
+        token,
+      });
+      httpHandle.transport.onclose = () => {
+        void shutdown(0);
+      };
+      if (allowDestructive) {
+        console.error("[fn mcp serve] destructive tools ENABLED: fn_task_delete, fn_agent_delete, fn_workflow_delete");
+      }
+    }
   } catch (error) {
     console.error("[fn mcp serve] failed to start", error instanceof Error ? error.message : error);
     await shutdown(1);
