@@ -533,6 +533,10 @@ export const DEFAULT_PROJECT_SETTINGS = {
   autoUnpauseEnabled: true,
   autoUnpauseBaseDelayMs: 300_000,
   autoUnpauseMaxDelayMs: 3_600_000,
+  // FNXC:RateLimitResume 2026-07-11-00:00: buffer added after a known rate-limit
+  // resetAt before auto-unpausing (reset-time-aware resume prefers resetAt+buffer
+  // over blind exponential backoff; see SelfHealingManager.scheduleResetAwareUnpause).
+  autoUnpauseResetBufferMs: 60_000,
   maxStuckKills: 6,
   maxBranchConflictRecoveries: 5,
   // maxReviewerContextRetries / maxReviewerFallbackRetries MOVED to workflow

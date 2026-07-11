@@ -1301,6 +1301,12 @@ If the server can start the current project engine, use **Start engine** in the 
 
 If the dashboard is running without engine management, the banner stays informational and disables the start action. Start the full server with `fn serve` to enable one-click engine startup and live task execution.
 
+### Global pause rate-limit ETA banner
+
+<!-- FNXC:RateLimitResume 2026-07-11-00:00: previously the global-pause state showed a bare "paused" with no ETA; usage.ts reset data was display-only inside the Usage dropdown. -->
+
+When the board is globally paused for `rate-limit` (a Claude subscription rate limit tripped `globalPause`), Fusion shows a **Paused — Claude 5h/weekly limit, resumes ~HH:MM (in Xh Ym)** banner with a live countdown, computed from the same usage data shown in the Usage dropown. If the reset time is not yet known, the banner falls back to **Paused — Claude limit, resuming automatically** rather than showing a fabricated time. The banner is not shown for a manual global pause (`globalPauseReason: "manual"`) or when the board is not paused. Self-healing schedules the actual auto-unpause using the same reset time (see `docs/architecture.md`), so the countdown reflects when the engine will actually resume, not a blind backoff guess.
+
 ### Identifying high-impact blockers
 
 Use blocker fan-out signals on task cards and in the footer status bar to spot blockers with high downstream impact:

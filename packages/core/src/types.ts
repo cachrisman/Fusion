@@ -4480,6 +4480,14 @@ export interface ProjectSettings {
   autoUnpauseBaseDelayMs?: number;
   /** Maximum delay cap in milliseconds for auto-unpause backoff. Default: 3600000 (60 min). */
   autoUnpauseMaxDelayMs?: number;
+  /** FNXC:RateLimitResume 2026-07-11-00:00: When a rate-limit globalPause has a real
+   *  future `resetAt` (from the usage source), self-healing prefers scheduling the
+   *  auto-unpause at `resetAt + autoUnpauseResetBufferMs` over blind exponential
+   *  backoff. This is the small buffer (in milliseconds) added after the known reset
+   *  time before resuming, to avoid probing exactly at the boundary. Falls back to
+   *  the existing exponential backoff (autoUnpauseBaseDelayMs/autoUnpauseMaxDelayMs)
+   *  when no reset time is known. Default: 60000 (60s). */
+  autoUnpauseResetBufferMs?: number;
   /** Maximum number of times the stuck-task detector can kill and re-queue a task
    *  before it is marked as permanently failed. Default: 6. */
   maxStuckKills?: number;

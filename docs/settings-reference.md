@@ -602,7 +602,8 @@ Default notes:
 | `aiSessionCleanupIntervalMs` | `number` | `3600000` | Interval in ms for AI session cleanup sweeps (1 hour). |
 | `autoUnpauseEnabled` | `boolean` | `true` | Auto-unpause after rate-limit-triggered pauses; manual pauses stay paused until explicitly unpaused by the user. |
 | `autoUnpauseBaseDelayMs` | `number` | `300000` | Base unpause delay in ms (5 min). |
-| `autoUnpauseMaxDelayMs` | `number` | `3600000` | Max auto-unpause delay in ms (1 hour). |
+| `autoUnpauseMaxDelayMs` | `number` | `3600000` | Max auto-unpause delay in ms (1 hour) — used only by the blind exponential-backoff fallback path (unknown reset time). |
+| `autoUnpauseResetBufferMs` | `number` | `60000` | Buffer added after a known Claude usage-window `resetAt` before auto-unpausing (60s). Reset-time-aware resume prefers `resetAt + autoUnpauseResetBufferMs` over blind backoff when the reset time is known; see `docs/architecture.md` self-healing section. |
 | `maxStuckKills` | `number` | `6` | Max stuck-task terminations before permanent failure. |
 | `maxBranchConflictRecoveries` | `number` | `5` | Max branch-conflict recovery retries before retry-storm failure handling triggers. |
 | `maxReviewerContextRetries` | `number` | `2` | Max reviewer context-compaction retries (FN-4082) per task. |

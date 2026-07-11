@@ -612,6 +612,7 @@ function AppInner() {
     planAutoApproveEnabled,
     showWorktreeGrouping,
     globalPaused,
+    globalPauseReason,
     isTestMode,
     taskStuckTimeoutMs,
     staleHighFanoutBlockerAgeThresholdMs,
@@ -1500,6 +1501,8 @@ function AppInner() {
     gitHubStarPromptShown,
     markGitHubStarPromptShown,
     setShowGitHubStarPrompt,
+    globalPaused,
+    globalPauseReason,
   };
   return (
     <ModalDismissPreferenceProvider enabled={dismissModalsOnOutsideClick}>

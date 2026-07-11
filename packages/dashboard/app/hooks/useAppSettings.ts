@@ -21,6 +21,8 @@ export interface UseAppSettingsResult {
   testMode: boolean;
   isTestMode: boolean;
   globalPaused: boolean;
+  /* FNXC:RateLimitResume 2026-07-11-00:00: exposed so GlobalPauseBanner can distinguish a rate-limit auto-recoverable pause (which gets the live ETA countdown) from a manual pause. */
+  globalPauseReason: string | undefined;
   enginePaused: boolean;
   taskStuckTimeoutMs: number | undefined;
   staleHighFanoutBlockerAgeThresholdMs: number;
@@ -72,6 +74,7 @@ export function useAppSettings(projectId?: string): UseAppSettingsResult {
   const [testMode, setTestMode] = useState(false);
   const [isTestMode, setIsTestMode] = useState(false);
   const [globalPaused, setGlobalPaused] = useState(false);
+  const [globalPauseReason, setGlobalPauseReason] = useState<string | undefined>(undefined);
   const [enginePaused, setEnginePaused] = useState(false);
   const [taskStuckTimeoutMs, setTaskStuckTimeoutMs] = useState<number | undefined>(undefined);
   const [staleHighFanoutBlockerAgeThresholdMs, setStaleHighFanoutBlockerAgeThresholdMs] = useState(2 * 60 * 60 * 1000);
@@ -135,6 +138,7 @@ export function useAppSettings(projectId?: string): UseAppSettingsResult {
       setTestMode(nextTestMode);
       setIsTestMode(nextIsTestMode);
       setGlobalPaused(Boolean(settings.globalPause));
+      setGlobalPauseReason(typeof settings.globalPauseReason === "string" ? settings.globalPauseReason : undefined);
       setEnginePaused(Boolean(settings.enginePaused));
       setPrAuthAvailable(Boolean(settings.prAuthAvailable));
       setTaskStuckTimeoutMs(settings.taskStuckTimeoutMs);
@@ -314,6 +318,7 @@ export function useAppSettings(projectId?: string): UseAppSettingsResult {
     testMode,
     isTestMode,
     globalPaused,
+    globalPauseReason,
     enginePaused,
     taskStuckTimeoutMs,
     staleHighFanoutBlockerAgeThresholdMs,

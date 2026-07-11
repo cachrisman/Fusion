@@ -295,4 +295,7 @@ export interface DashboardBannersProps {
   gitHubStarPromptShown: boolean;
   markGitHubStarPromptShown: () => void;
   setShowGitHubStarPrompt: Dispatch<SetStateAction<boolean>>;
+  /* FNXC:RateLimitResume 2026-07-11-00:00: global-pause state/reason drive the rate-limit ETA banner vs. the plain manual-pause posture elsewhere. */
+  globalPaused: boolean;
+  globalPauseReason: string | undefined;
 }

@@ -42,6 +42,10 @@
     "starting": "Starting…",
     "title": "Project engine is not connected"
   },
+  "globalPauseBanner": {
+    "rateLimitEta": "Paused — Claude 5h/weekly limit, resumes ~{{clockTime}} (in {{countdown}})",
+    "rateLimitUnknown": "Paused — Claude limit, resuming automatically"
+  },
   "activityFeed": {
     "emptyHint": "Activity will appear here when tasks are created, moved, or completed",
     "eventCount_one": "{{count}} event",

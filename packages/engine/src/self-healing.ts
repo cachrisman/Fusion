@@ -422,6 +422,21 @@ export interface SelfHealingOptions {
    * preserves the prior behavior. The path passed is the absolute worktree dir.
    */
   isWorktreeResumeReserved?: (worktreePath: string) => boolean;
+  /**
+   * FNXC:RateLimitResume 2026-07-11-00:00:
+   * Optional callback injected by the dashboard (usage.ts lives in
+   * @fusion/dashboard and cannot be imported here — engine must not depend on
+   * the dashboard package) that returns the soonest future reset time for the
+   * subscription window that is currently exhausted (the window that would
+   * have triggered a `rate-limit` globalPause), or `null` when unknown/not
+   * exhausted. When present and it resolves a valid future reset, auto-unpause
+   * scheduling prefers `resetAt + autoUnpauseResetBufferMs` over blind
+   * exponential backoff. May also be set post-construction via
+   * `setRateLimitResetProvider` (mirrors `setUsageLimitPauser` on the runtime),
+   * since the dashboard often only has `authStorage` available after the
+   * engine/self-healing manager has already been constructed.
+   */
+  getRateLimitResetAt?: () => Promise<{ resetAt: string; resetMs: number } | null>;
 }
 
 const APPROVED_TRIAGE_RECOVERY_GRACE_MS = 60_000;
@@ -798,6 +813,15 @@ export class SelfHealingManager {
   private unpauseAttempt = 0;
   private lastPauseTriggeredAt = 0;
   private lastUnpauseAt = 0;
+  /**
+   * FNXC:RateLimitResume 2026-07-11-00:00: post-construction override for
+   * `SelfHealingOptions.getRateLimitResetAt`, set via `setRateLimitResetProvider`.
+   * The dashboard typically only has `authStorage` (needed to call
+   * `fetchAllProviderUsage`) available after the engine/self-healing manager
+   * is already constructed, so this mirrors the `setUsageLimitPauser` setter
+   * pattern on the in-process runtime rather than requiring construction-time DI.
+   */
+  private rateLimitResetProvider?: () => Promise<{ resetAt: string; resetMs: number } | null>;
 
   // ── Maintenance timer ───────────────────────────────────────────────
   private maintenanceInterval: ReturnType<typeof setInterval> | null = null;
@@ -856,7 +880,19 @@ export class SelfHealingManager {
   constructor(
     private store: TaskStore,
     private options: SelfHealingOptions,
-  ) {}
+  ) {
+    this.rateLimitResetProvider = options.getRateLimitResetAt;
+  }
+
+  /**
+   * FNXC:RateLimitResume 2026-07-11-00:00: allows the dashboard to inject the
+   * reset-time provider after construction (mirrors `setUsageLimitPauser` on
+   * the in-process runtime). Overrides any provider passed via
+   * `SelfHealingOptions.getRateLimitResetAt` at construction time.
+   */
+  setRateLimitResetProvider(provider: () => Promise<{ resetAt: string; resetMs: number } | null>): void {
+    this.rateLimitResetProvider = provider;
+  }
 
   private classifyPausedAbortWorkflowRecovery(
     task: Task,
@@ -1507,11 +1543,22 @@ export class SelfHealingManager {
 
       this.lastPauseTriggeredAt = Date.now();
 
-      const baseDelay = settings.autoUnpauseBaseDelayMs ?? 300_000;
-      const maxDelay = settings.autoUnpauseMaxDelayMs ?? 3_600_000;
-      const delay = Math.min(baseDelay * Math.pow(2, this.unpauseAttempt), maxDelay);
-
-      this.scheduleUnpause(delay);
+      /*
+      FNXC:RateLimitResume 2026-07-11-00:00:
+      When paused for a rate-limit (or an undefined/legacy reason — treated the
+      same as rate-limit for backward compat) and a real future `resetAt` is
+      known from the injected usage source, schedule the auto-unpause at
+      `resetAt + autoUnpauseResetBufferMs` instead of blind exponential backoff.
+      This is dispatched as a floating async helper (onSettingsUpdated is a sync
+      event listener) that degrades gracefully to the existing exponential
+      backoff path on any failure/timeout/absence, so the pause is NEVER left
+      unscheduled.
+      */
+      void this.scheduleResetAwareUnpause(settings).catch((err: unknown) => {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        log.error(`scheduleResetAwareUnpause failed unexpectedly — falling back to blind backoff: ${errorMessage}`);
+        this.scheduleBlindBackoffUnpause(settings);
+      });
     }
 
     // globalPause true → false: check if we should reset backoff
@@ -1525,13 +1572,66 @@ export class SelfHealingManager {
     }
   }
 
-  private scheduleUnpause(delayMs: number): void {
+  /**
+   * FNXC:RateLimitResume 2026-07-11-00:00:
+   * Reset-time-aware auto-unpause scheduling. Prefers a known `resetAt` (from
+   * the dashboard-injected `getRateLimitResetAt`/`setRateLimitResetProvider`)
+   * over blind exponential backoff. Contract:
+   *  - No provider, provider returns `null`, or provider rejects → fall back
+   *    to the EXISTING exponential-backoff computation unchanged
+   *    (`min(baseDelay * 2^attempt, maxDelay)`), and the blind-backoff
+   *    `unpauseAttempt` escalation semantics are preserved for that path.
+   *  - A resolved reset-aware schedule does NOT increment `unpauseAttempt` —
+   *    a known reset time is not a "probe failed, try again" signal, so the
+   *    blind-backoff attempt counter (which drives exponential growth) is left
+   *    untouched. It still resets to 0 on sustained unpause via the existing
+   *    `globalPause: true → false` handling in `onSettingsUpdated`.
+   *  - Delay is clamped to a defensible ceiling so a corrupt/absurd resetAt
+   *    cannot wedge the pause indefinitely: a weekly Claude usage window is the
+   *    longest legitimate reset horizon, so the ceiling is 7 days + buffer
+   *    (documented constant below), not `autoUnpauseMaxDelayMs` (which is sized
+   *    for blind-probe backoff, not real reset horizons).
+   */
+  private async scheduleResetAwareUnpause(settings: Settings): Promise<void> {
+    const provider = this.rateLimitResetProvider;
+    if (provider) {
+      try {
+        const resolved = await provider();
+        if (resolved && resolved.resetMs > 0) {
+          const buffer = settings.autoUnpauseResetBufferMs ?? 60_000;
+          const rawDelay = resolved.resetMs + buffer;
+          // Ceiling: longest legitimate Claude reset horizon (weekly window) + buffer.
+          const ceilingMs = 7 * 24 * 60 * 60 * 1000 + buffer;
+          const delay = Math.min(Math.max(rawDelay, 0), ceilingMs);
+          log.log(`Reset-aware unpause: resetAt=${resolved.resetAt}`);
+          this.scheduleUnpause(delay, { resetAware: true });
+          return;
+        }
+      } catch (err: unknown) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        log.warn(`getRateLimitResetAt failed — falling back to blind backoff: ${errorMessage}`);
+      }
+    }
+
+    this.scheduleBlindBackoffUnpause(settings);
+  }
+
+  /** Existing exponential-backoff fallback path, unchanged. */
+  private scheduleBlindBackoffUnpause(settings: Settings): void {
+    const baseDelay = settings.autoUnpauseBaseDelayMs ?? 300_000;
+    const maxDelay = settings.autoUnpauseMaxDelayMs ?? 3_600_000;
+    const delay = Math.min(baseDelay * Math.pow(2, this.unpauseAttempt), maxDelay);
+    this.scheduleUnpause(delay, { resetAware: false });
+  }
+
+  private scheduleUnpause(delayMs: number, context: { resetAware: boolean } = { resetAware: false }): void {
     this.cancelUnpauseTimer();
 
     const delaySec = Math.round(delayMs / 1000);
     const delayMin = Math.round(delaySec / 60);
     const display = delayMin >= 1 ? `${delayMin}m` : `${delaySec}s`;
-    log.warn(`Auto-unpause scheduled in ${display} (attempt ${this.unpauseAttempt + 1})`);
+    const kind = context.resetAware ? "reset-aware" : "backoff";
+    log.warn(`Auto-unpause scheduled (${kind}) in ${display} (attempt ${this.unpauseAttempt + 1})`);
 
     this.unpauseTimer = setTimeout(() => {
       this.unpauseTimer = null;

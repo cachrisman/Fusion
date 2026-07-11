@@ -7,6 +7,7 @@ import type { SectionId } from "../SettingsModal";
 import { TestModeBanner } from "../TestModeBanner";
 import { EngineUnavailableBanner } from "../EngineUnavailableBanner";
 import { EngineStatusBanner } from "../EngineStatusBanner";
+import { GlobalPauseBanner } from "../GlobalPauseBanner";
 import { OAuthReloginBanner } from "../OAuthReloginBanner";
 import { SessionNotificationBanner } from "../SessionNotificationBanner";
 import { CliBinaryInstallBanner } from "../CliBinaryInstallBanner";
@@ -66,6 +67,8 @@ export function DashboardBanners({
   gitHubStarPromptShown,
   markGitHubStarPromptShown,
   setShowGitHubStarPrompt,
+  globalPaused,
+  globalPauseReason,
 }: DashboardBannersProps) {
   /* FNXC:DashboardBanners 2026-06-26-00:00: The Open Mailbox approval banner is gated by an approval:<id> candidate from a real ApprovalRequest. The count floor remains only for the approval-SSE/count-refresh race and must not fabricate a mailbox request for task awaiting-approval states. */
   const showMailboxApprovalBanner = isMailboxApprovalCandidate(approvalBannerCandidate);
@@ -85,6 +88,8 @@ export function DashboardBanners({
             /* FNXC:EngineStatusBanner 2026-06-22-00:00: Project-scoped engine remediation belongs in the same project-only banner guard family as the existing operational notices, and the key resets polling immediately when the user switches projects. */
             <EngineStatusBanner key={currentProject.id} projectId={currentProject.id} />
           )}
+          {/* FNXC:RateLimitResume 2026-07-11-00:00: rate-limit global-pause ETA lives in the same project-only banner guard family; GlobalPauseBanner itself returns null unless paused for "rate-limit", so no shell renders otherwise. */}
+          <GlobalPauseBanner globalPaused={globalPaused} globalPauseReason={globalPauseReason} />
           <OAuthReloginBanner
             onReLogin={(_providerId) => openSettingsWithNav("authentication" as SectionId)}
           />

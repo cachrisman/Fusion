@@ -2069,3 +2069,47 @@ export async function fetchAllProviderUsage(authStorage?: AuthStorageLike): Prom
 export function clearUsageCache(): void {
   usageCache = null;
 }
+
+/**
+ * FNXC:RateLimitResume 2026-07-11-00:00:
+ * Pure, display-agnostic resolver that answers "when does the rate-limit-triggering
+ * window actually reset" from already-fetched provider usage data. Used by both:
+ *  1. The engine-injected `getRateLimitResetAt` callback (self-healing reset-aware
+ *     auto-unpause scheduling — see SelfHealingOptions in packages/engine/src/self-healing.ts).
+ *  2. The dashboard GlobalPauseBanner ETA countdown.
+ *
+ * Only resolves a reset time when a window is actually exhausted (percentLeft <= 0
+ * or percentUsed >= 100) — i.e. the window that would have triggered the rate-limit
+ * globalPause. A non-exhausted window's resetAt (even if soonest) is intentionally
+ * ignored: reporting an ETA for a window that isn't the reason for the pause would
+ * be misleading (the pause may resolve sooner, or the operator would resume-guess
+ * against the wrong window). Prefers the Claude provider and ignores providers whose
+ * `status !== "ok"` (no-auth/error providers carry no trustworthy reset data).
+ */
+export function resolveRateLimitResetAt(
+  providers: ProviderUsage[],
+): { resetAt: string; resetMs: number } | null {
+  const claude = providers.find((p) => p.name === "Claude" && p.status === "ok");
+  if (!claude) return null;
+
+  const now = Date.now();
+  let best: { resetAt: string; resetMs: number } | null = null;
+
+  for (const window of claude.windows) {
+    const isExhausted = window.percentLeft <= 0 || window.percentUsed >= 100;
+    if (!isExhausted) continue;
+    if (!window.resetAt || window.resetMs === undefined) continue;
+
+    // Guard against past/invalid resets — reuse the resetMs/resetAt already
+    // computed by the fetchers rather than re-parsing resetAt.
+    const resetTimeMs = new Date(window.resetAt).getTime();
+    if (Number.isNaN(resetTimeMs) || resetTimeMs <= now) continue;
+    if (window.resetMs <= 0) continue;
+
+    if (!best || resetTimeMs < new Date(best.resetAt).getTime()) {
+      best = { resetAt: window.resetAt, resetMs: window.resetMs };
+    }
+  }
+
+  return best;
+}

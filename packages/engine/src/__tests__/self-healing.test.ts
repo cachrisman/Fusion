@@ -374,6 +374,226 @@ describe("SelfHealingManager", () => {
 
       expect(store.updateSettings).not.toHaveBeenCalled();
     });
+
+    // ── FNXC:RateLimitResume 2026-07-11-00:00: reset-time-aware scheduling ──
+
+    it("schedules the reset-aware delay (resetMs + buffer) instead of blind backoff when getRateLimitResetAt resolves a future reset", async () => {
+      const getRateLimitResetAt = vi.fn().mockResolvedValue({
+        resetAt: new Date(Date.now() + 10_000).toISOString(),
+        resetMs: 10_000,
+      });
+      manager = new SelfHealingManager(store, { rootDir: "/tmp/test-project", getRateLimitResetAt });
+      manager.start();
+
+      store.emit("settings:updated", {
+        settings: {
+          globalPause: true,
+          globalPauseReason: "rate-limit",
+          autoUnpauseEnabled: true,
+          autoUnpauseBaseDelayMs: 100_000, // Deliberately large so the assertion below would fail if blind backoff were used instead.
+          autoUnpauseMaxDelayMs: 800_000,
+          autoUnpauseResetBufferMs: 1_000,
+        },
+        previous: { globalPause: false },
+      });
+
+      // Flush the microtask so the floating `scheduleResetAwareUnpause` promise resolves and schedules the timer.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getRateLimitResetAt).toHaveBeenCalledTimes(1);
+
+      // resetMs(10s) + buffer(1s) = 11s. Just under that, nothing has fired yet.
+      await vi.advanceTimersByTimeAsync(10_500);
+      expect(store.updateSettings).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(store.updateSettings).toHaveBeenCalledWith({
+        globalPause: false,
+        globalPauseReason: undefined,
+      });
+    });
+
+    it("falls back to exponential backoff when getRateLimitResetAt is absent", async () => {
+      manager.start(); // default manager from beforeEach has no getRateLimitResetAt
+
+      store.emit("settings:updated", {
+        settings: {
+          globalPause: true,
+          globalPauseReason: "rate-limit",
+          autoUnpauseEnabled: true,
+          autoUnpauseBaseDelayMs: 100,
+          autoUnpauseMaxDelayMs: 800,
+        },
+        previous: { globalPause: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(150);
+
+      expect(store.updateSettings).toHaveBeenCalledWith({
+        globalPause: false,
+        globalPauseReason: undefined,
+      });
+    });
+
+    it("falls back to exponential backoff when getRateLimitResetAt returns null", async () => {
+      const getRateLimitResetAt = vi.fn().mockResolvedValue(null);
+      manager = new SelfHealingManager(store, { rootDir: "/tmp/test-project", getRateLimitResetAt });
+      manager.start();
+
+      store.emit("settings:updated", {
+        settings: {
+          globalPause: true,
+          globalPauseReason: "rate-limit",
+          autoUnpauseEnabled: true,
+          autoUnpauseBaseDelayMs: 100,
+          autoUnpauseMaxDelayMs: 800,
+        },
+        previous: { globalPause: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(150);
+
+      expect(getRateLimitResetAt).toHaveBeenCalledTimes(1);
+      expect(store.updateSettings).toHaveBeenCalledWith({
+        globalPause: false,
+        globalPauseReason: undefined,
+      });
+    });
+
+    it("falls back to exponential backoff when getRateLimitResetAt rejects (never leaves the pause unscheduled)", async () => {
+      const getRateLimitResetAt = vi.fn().mockRejectedValue(new Error("usage fetch failed"));
+      manager = new SelfHealingManager(store, { rootDir: "/tmp/test-project", getRateLimitResetAt });
+      manager.start();
+
+      store.emit("settings:updated", {
+        settings: {
+          globalPause: true,
+          globalPauseReason: "rate-limit",
+          autoUnpauseEnabled: true,
+          autoUnpauseBaseDelayMs: 100,
+          autoUnpauseMaxDelayMs: 800,
+        },
+        previous: { globalPause: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(150);
+
+      expect(store.updateSettings).toHaveBeenCalledWith({
+        globalPause: false,
+        globalPauseReason: undefined,
+      });
+    });
+
+    it("clamps the reset-aware delay to the documented ceiling (7 days + buffer)", async () => {
+      const absurdResetAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(); // 1 year out
+      const getRateLimitResetAt = vi.fn().mockResolvedValue({
+        resetAt: absurdResetAt,
+        resetMs: 365 * 24 * 60 * 60 * 1000,
+      });
+      manager = new SelfHealingManager(store, { rootDir: "/tmp/test-project", getRateLimitResetAt });
+      manager.start();
+
+      store.emit("settings:updated", {
+        settings: {
+          globalPause: true,
+          globalPauseReason: "rate-limit",
+          autoUnpauseEnabled: true,
+          autoUnpauseBaseDelayMs: 100,
+          autoUnpauseMaxDelayMs: 800,
+          autoUnpauseResetBufferMs: 60_000,
+        },
+        previous: { globalPause: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      const ceilingMs = 7 * 24 * 60 * 60 * 1000 + 60_000;
+      // Just under the ceiling — should not have fired yet.
+      await vi.advanceTimersByTimeAsync(ceilingMs - 1_000);
+      expect(store.updateSettings).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(store.updateSettings).toHaveBeenCalledWith({
+        globalPause: false,
+        globalPauseReason: undefined,
+      });
+    });
+
+    it("still skips scheduling for manual pause even when getRateLimitResetAt is provided", async () => {
+      const getRateLimitResetAt = vi.fn().mockResolvedValue({
+        resetAt: new Date(Date.now() + 10_000).toISOString(),
+        resetMs: 10_000,
+      });
+      manager = new SelfHealingManager(store, { rootDir: "/tmp/test-project", getRateLimitResetAt });
+      manager.start();
+
+      store.emit("settings:updated", {
+        settings: {
+          globalPause: true,
+          globalPauseReason: "manual",
+          autoUnpauseEnabled: true,
+        },
+        previous: { globalPause: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      expect(getRateLimitResetAt).not.toHaveBeenCalled();
+      expect(store.updateSettings).not.toHaveBeenCalled();
+    });
+
+    it("still skips scheduling when autoUnpauseEnabled is false even when getRateLimitResetAt is provided", async () => {
+      const getRateLimitResetAt = vi.fn().mockResolvedValue({
+        resetAt: new Date(Date.now() + 10_000).toISOString(),
+        resetMs: 10_000,
+      });
+      manager = new SelfHealingManager(store, { rootDir: "/tmp/test-project", getRateLimitResetAt });
+      manager.start();
+
+      store.emit("settings:updated", {
+        settings: {
+          globalPause: true,
+          globalPauseReason: "rate-limit",
+          autoUnpauseEnabled: false,
+        },
+        previous: { globalPause: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      expect(getRateLimitResetAt).not.toHaveBeenCalled();
+      expect(store.updateSettings).not.toHaveBeenCalled();
+    });
+
+    it("setRateLimitResetProvider injects the provider post-construction (dashboard DI seam)", async () => {
+      manager = new SelfHealingManager(store, { rootDir: "/tmp/test-project" });
+      const getRateLimitResetAt = vi.fn().mockResolvedValue({
+        resetAt: new Date(Date.now() + 5_000).toISOString(),
+        resetMs: 5_000,
+      });
+      manager.setRateLimitResetProvider(getRateLimitResetAt);
+      manager.start();
+
+      store.emit("settings:updated", {
+        settings: {
+          globalPause: true,
+          globalPauseReason: "rate-limit",
+          autoUnpauseEnabled: true,
+          autoUnpauseBaseDelayMs: 100_000,
+          autoUnpauseMaxDelayMs: 800_000,
+          autoUnpauseResetBufferMs: 1_000,
+        },
+        previous: { globalPause: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getRateLimitResetAt).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(store.updateSettings).toHaveBeenCalledWith({
+        globalPause: false,
+        globalPauseReason: undefined,
+      });
+    });
   });
 
   // ── Stuck kill budget ─────────────────────────────────────────────

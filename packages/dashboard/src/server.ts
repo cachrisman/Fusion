@@ -38,6 +38,7 @@ import { WebSocketManager, type BadgeSnapshot } from "./websocket.js";
 import type { BadgePubSub } from "./badge-pubsub.js";
 import { createBadgePubSub, type BadgePubSubMessage } from "./badge-pubsub.js";
 import { createRuntimeLogger, type RuntimeLogger } from "./runtime-logger.js";
+import { fetchAllProviderUsage, resolveRateLimitResetAt } from "./usage.js";
 import { registerGithubTrackingHook } from "./github-tracking-hook.js";
 import { registerBeforeExitCleanup } from "./process-lifecycle.js";
 import { createTerminalWebSocketDiagnostics } from "./terminal-websocket-diagnostics.js";
@@ -857,6 +858,26 @@ export function createServer(store: TaskStore, options?: ServerOptions): ReturnT
             getActiveMergeTaskId: selfHealing.getActiveMergeTaskId.bind(selfHealing),
           },
         };
+      }
+    }
+    /*
+    FNXC:RateLimitResume 2026-07-11-00:00:
+    Inject the reset-time-aware auto-unpause provider into the REAL
+    SelfHealingManager instance (not the scoped ServerOptions["selfHealingManager"]
+    subset assigned above). `usage.ts` (resetAt/resetMs source of truth) lives in
+    @fusion/dashboard and cannot be imported by the engine, so this setter
+    (mirroring `setUsageLimitPauser` on the in-process runtime) is the DI seam:
+    the engine calls back into this closure, which reuses the existing 30s
+    `fetchAllProviderUsage` cache — no new provider API pressure is added.
+    */
+    {
+      const selfHealingInstance = engine.getSelfHealingManager();
+      const resolvedAuthStorage = options!.authStorage;
+      if (selfHealingInstance && resolvedAuthStorage) {
+        selfHealingInstance.setRateLimitResetProvider(async () => {
+          const providers = await fetchAllProviderUsage(resolvedAuthStorage);
+          return resolveRateLimitResetAt(providers);
+        });
       }
     }
     if (!options!.routineStore) {
