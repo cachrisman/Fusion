@@ -161,3 +161,16 @@ export {
   CliRelaunchRegistry,
   type CliSessionTransportDeps,
 } from "./cli-session-transport.js";
+
+// FNXC:McpServer 2026-07-11-00:00: Re-exported so @fusion/cli's operator MCP
+// server (FUSI-062 fn_usage_windows tool) can import the live Session(5h)/
+// Weekly rate-limit usage surface without a subpath import. This wraps the
+// SAME fetchAllProviderUsage() the dashboard "Usage" dropdown already calls
+// (incl. its 30s cache) — no new provider API pressure is introduced.
+export {
+  fetchAllProviderUsage,
+  clearUsageCache,
+  type ProviderUsage,
+  type UsageWindow,
+  type UsagePace,
+} from "./usage.js";

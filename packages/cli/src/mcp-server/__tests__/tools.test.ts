@@ -101,6 +101,26 @@ vi.mock("@fusion/core", async () => {
 
   return { ...actual, CentralCore: FakeCentralCore };
 });
+
+/*
+FNXC:McpServer 2026-07-11-18:00:
+FUSI-062's `fn_usage_windows` handler dispatches to `fetchAllProviderUsage`
+(re-exported from `@fusion/dashboard`). Mock just that one export (spreading
+the real module for everything else, mirroring the `@fusion/core` mock
+above) so tests control the returned `ProviderUsage[]` fixture without a
+real auth-storage/provider-API round-trip. `fakeProviderUsageResult` is a
+module-level box (reset in `beforeEach`) so it survives the single hoisted
+`vi.mock` factory instantiation.
+*/
+const { fakeProviderUsageResult } = vi.hoisted(() => ({
+  fakeProviderUsageResult: { value: [] as Array<Record<string, unknown>> },
+}));
+
+vi.mock("@fusion/dashboard", async () => {
+  const actual = await vi.importActual<typeof import("@fusion/dashboard")>("@fusion/dashboard");
+  return { ...actual, fetchAllProviderUsage: vi.fn(async () => fakeProviderUsageResult.value) };
+});
+
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { MCP_TOOL_REGISTRY, DESTRUCTIVE_TOOL_TIER, buildMcpToolRegistry, redactSecretsDeep } from "../tools.js";
 import { buildMcpServer } from "../server.js";
@@ -175,6 +195,9 @@ const EXPECTED_TOOL_NAMES = [
   "fn_research_cancel",
   "fn_research_retry",
   "fn_trait_list",
+  // FUSI-062: token usage / rate-limit analytics reads
+  "fn_token_usage",
+  "fn_usage_windows",
 ];
 
 const EXPECTED_DESTRUCTIVE_TOOL_NAMES = [
@@ -296,6 +319,7 @@ describe("fn mcp serve — in-memory server smoke test", () => {
 
   beforeEach(async () => {
     fakeCentralRegistry.clear();
+    fakeProviderUsageResult.value = [];
     tmpDir = await mkdtemp(join(tmpdir(), "fn-fusi-001-mcp-"));
     await mkdir(join(tmpDir, ".fusion"), { recursive: true });
     store = new TaskStore(tmpDir);
@@ -2208,6 +2232,154 @@ describe("fn mcp serve — in-memory server smoke test", () => {
         await client.close();
         await mcpServer.close();
       }
+    });
+
+    it("fn_token_usage returns zeroed totals (never an error) for an empty/zeroed range", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({
+          name: "fn_token_usage",
+          arguments: { from: "2020-01-01T00:00:00.000Z", to: "2020-01-02T00:00:00.000Z" },
+        });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { totals?: { totalTokens?: number; nTasks?: number } } | undefined;
+        expect(structured?.totals?.totalTokens).toBe(0);
+        expect(structured?.totals?.nTasks).toBe(0);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_token_usage rolls up seeded task token rows, grouped by model, with unredacted cache read/write split", async () => {
+      const task = await store.createTask({ description: "Token usage probe", source: { sourceType: "api" } });
+      const db = store.getDatabase();
+      db.prepare(
+        `UPDATE tasks SET
+           tokenUsageInputTokens = ?, tokenUsageOutputTokens = ?, tokenUsageCachedTokens = ?,
+           tokenUsageCacheWriteTokens = ?, tokenUsageTotalTokens = ?, tokenUsageLastUsedAt = ?,
+           tokenUsageModelProvider = ?, tokenUsageModelId = ?
+         WHERE id = ?`,
+      ).run(100, 50, 20, 5, 175, "2026-06-01T00:00:00.000Z", "anthropic", "claude-test", task.id);
+
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({
+          name: "fn_token_usage",
+          arguments: { from: "2026-01-01T00:00:00.000Z", to: "2026-12-31T23:59:59.000Z", groupBy: "model" },
+        });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as {
+          totals?: { inputTokens: number; outputTokens: number; cachedTokens: number; cacheWriteTokens: number; totalTokens: number };
+          groups?: Array<{ key: string | null; totalTokens: number }>;
+        } | undefined;
+        // Real numeric values must survive — NOT redacted to "[redacted]" despite
+        // key names containing the substring "token" (see the FNXC:McpServer
+        // comment above fnTokenUsage for why redactSecretsDeep is intentionally
+        // skipped on this payload).
+        expect(structured?.totals?.inputTokens).toBe(100);
+        expect(structured?.totals?.outputTokens).toBe(50);
+        expect(structured?.totals?.cachedTokens).toBe(20);
+        expect(structured?.totals?.cacheWriteTokens).toBe(5);
+        expect(structured?.totals?.totalTokens).toBe(175);
+        expect(structured?.groups?.some((g) => g.key === "claude-test" && g.totalTokens === 175)).toBe(true);
+        const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+        expect(text).toContain("cachedRead=20");
+        expect(text).toContain("cacheWrite=5");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_token_usage rejects an invalid groupBy value with an error result", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_token_usage", arguments: { groupBy: "not-a-real-dimension" } });
+        expect(result.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_usage_windows surfaces percentUsed/resetAt/windowDurationMs/pace from a fixture ProviderUsage[]", async () => {
+      fakeProviderUsageResult.value = [
+        {
+          name: "Claude",
+          icon: "\u{1F916}",
+          status: "ok",
+          plan: "Max",
+          windows: [
+            {
+              label: "Session (5h)",
+              percentUsed: 42.5,
+              percentLeft: 57.5,
+              resetText: "resets in 2h",
+              resetAt: "2026-07-11T20:00:00.000Z",
+              windowDurationMs: 18000000,
+              pace: { status: "on-track", percentElapsed: 40, message: "on track" },
+            },
+            {
+              label: "Weekly",
+              percentUsed: 10,
+              percentLeft: 90,
+              resetText: "resets in 3d",
+              resetAt: "2026-07-14T00:00:00.000Z",
+              windowDurationMs: 604800000,
+              pace: { status: "behind", percentElapsed: 60, message: "behind pace" },
+            },
+          ],
+        },
+      ];
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_usage_windows", arguments: {} });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { providers?: Array<{ windows?: Array<Record<string, unknown>> }> } | undefined;
+        const windows = structured?.providers?.[0]?.windows ?? [];
+        expect(windows).toHaveLength(2);
+        expect(windows[0]).toMatchObject({ percentUsed: 42.5, resetAt: "2026-07-11T20:00:00.000Z", windowDurationMs: 18000000 });
+        expect((windows[0] as { pace?: { status?: string } }).pace?.status).toBe("on-track");
+        const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+        expect(text).toContain("Session (5h)");
+        expect(text).toContain("Weekly");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_usage_windows returns a clear no-provider message (not an error) for an empty provider array", async () => {
+      fakeProviderUsageResult.value = [];
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_usage_windows", arguments: {} });
+        expect(result.isError).not.toBe(true);
+        const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+        expect(text.toLowerCase()).toContain("no authenticated usage providers");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_token_usage and fn_usage_windows are base-tier — present without --allow-destructive, never DESTRUCTIVE:-prefixed", async () => {
+      const { client, mcpServer } = await connectClient({ allowDestructive: false });
+      try {
+        const { tools } = await client.listTools();
+        const names = (tools ?? []).map((t) => t.name);
+        expect(names).toContain("fn_token_usage");
+        expect(names).toContain("fn_usage_windows");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+      expect(DESTRUCTIVE_TOOL_TIER.map((t) => t.name)).not.toContain("fn_token_usage");
+      expect(DESTRUCTIVE_TOOL_TIER.map((t) => t.name)).not.toContain("fn_usage_windows");
+      const byName = new Map(MCP_TOOL_REGISTRY.map((t) => [t.name, t]));
+      expect(byName.get("fn_token_usage")?.description).not.toMatch(/^DESTRUCTIVE:/);
+      expect(byName.get("fn_usage_windows")?.description).not.toMatch(/^DESTRUCTIVE:/);
     });
 
     it("fn_research_run / fn_research_list / fn_research_get / fn_research_cancel / fn_research_retry gate on availability without throwing when research is unconfigured", async () => {

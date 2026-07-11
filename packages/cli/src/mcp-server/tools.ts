@@ -173,6 +173,26 @@
  * channel. All fifteen are BASE-tier: none is `DESTRUCTIVE:`-prefixed or
  * `*_delete`-class — see the per-tool FNXC:McpServer 2026-07-11-16:00
  * comments above each tool group for the individual base-tier rationale.
+ *
+ * FNXC:McpServer 2026-07-11-18:00:
+ * FUSI-062 adds two base tools on top of FUSI-052's 64/11/75 baseline —
+ * `fn_token_usage` (thin wrapper over `aggregateTokenAnalytics` from
+ * `@fusion/core`'s `token-analytics.ts`, the same rollup behind the
+ * dashboard "TOKENS BY MODEL" widget) and `fn_usage_windows` (thin wrapper
+ * over `fetchAllProviderUsage` from `@fusion/dashboard`'s `usage.ts`, the
+ * same call the dashboard Usage dropdown makes, re-exported from the
+ * dashboard package root for this purpose — see the FNXC:McpServer comment
+ * in packages/dashboard/src/index.ts). Base tool count sixty-four →
+ * sixty-six; combined with --allow-destructive: seventy-five → seventy-
+ * seven; destructive tier UNCHANGED at eleven. Neither tool introduces new
+ * aggregation/metering logic — both dispatch straight through to the SAME
+ * domain functions the dashboard already calls. `fn_token_usage`
+ * deliberately skips {@link redactSecretsDeep} on its numeric totals (see
+ * the FNXC:McpServer 2026-07-11-18:00 comment above it for why — the
+ * blanket "token" substring match would otherwise blank every legitimate
+ * token-count field); `fn_usage_windows`'s response carries no `token`-
+ * named keys and IS run through {@link redactSecretsDeep} as usual. Both
+ * are BASE-tier reads: neither is `DESTRUCTIVE:`-prefixed.
  */
 import {
   TaskStore,
@@ -199,6 +219,7 @@ import {
   RESEARCH_RUN_STATUSES,
   registerBuiltInZaiProvider,
   registerBuiltInGrokProvider,
+  aggregateTokenAnalytics,
   type Task,
   type ColumnId,
   type TaskPriority,
@@ -206,6 +227,8 @@ import {
   type AgentCapability,
   type AgentUpdateInput,
   type ResearchRunStatus,
+  type TokenAnalyticsQuery,
+  type TokenGroupBy,
 } from "@fusion/core";
 import { scaffoldFusionProject } from "../commands/init.js";
 import { existsSync, statSync } from "node:fs";
@@ -227,6 +250,7 @@ import {
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { getModelRegistryModelsPath } from "../commands/auth-paths.js";
+import { fetchAllProviderUsage, type ProviderUsage, type UsageWindow } from "@fusion/dashboard";
 import {
   getFusionDir,
   validateAssignableAgentId,
@@ -1115,6 +1139,164 @@ const fnModelsList: McpToolDefinition = {
       if (error instanceof Error) return errorResult(error.message);
       throw error;
     }
+  },
+};
+
+// ── Token usage / rate-limit analytics tools (read-only) ────────────────────
+
+const TOKEN_USAGE_GROUP_BY_VALUES = ["model", "provider", "task"] as const;
+type TokenUsageGroupByArg = (typeof TOKEN_USAGE_GROUP_BY_VALUES)[number];
+
+/*
+FNXC:McpServer 2026-07-11-18:00:
+FUSI-062 adds `fn_token_usage` — a THIN wrapper over the existing
+`aggregateTokenAnalytics(db, query)` rollup in `packages/core/src/
+token-analytics.ts` (the SAME function that backs the dashboard "TOKENS BY
+MODEL" widget). No new aggregation/SQL logic is introduced here; the
+handler only validates/normalizes the three MCP-facing params
+(`from`/`to`/`groupBy`) and calls straight through to `store.getDatabase()`
++ `aggregateTokenAnalytics`. `groupBy` is restricted to the three
+operator-meaningful dimensions from the task spec (`model`/`provider`/
+`task`) — `aggregateTokenAnalytics` also supports `node`/`agent`, but those
+are left off this tool's public surface to keep the MCP contract narrow;
+invalid values are rejected with an `errorResult`, never silently coerced.
+
+Deliberately NOT run through {@link redactSecretsDeep}: that helper's
+`SECRET_KEY_PATTERN` matches any key CONTAINING the substring "token"
+(case-insensitive) as a defense-in-depth heuristic against secret/API-token
+leakage in free-form records. `TokenTotals`/`TokenGroupSummary` field names
+(`inputTokens`, `outputTokens`, `cachedTokens`, `cacheWriteTokens`,
+`totalTokens`) are exactly that substring by construction — running them
+through the heuristic would blank every count to "[redacted]", destroying
+the tool's entire purpose. This is safe to skip: unlike agent/task/settings
+records, `TokenAnalytics` is a closed, code-computed numeric aggregation
+(SQL SUM()s plus controlled model/provider/task id strings) with no
+free-text/user-input surface that could carry a real secret value. The
+query echo (`from`/`to`/`groupBy`) is likewise plain ISO-date/enum input,
+not free text.
+*/
+function normalizeTokenUsageDateBound(value: unknown, label: string): { ok: true; value: string | undefined } | { ok: false; error: string } {
+  if (value === undefined || value === null) return { ok: true, value: undefined };
+  if (typeof value !== "string" || !value.trim()) return { ok: false, error: `${label} must be a non-empty ISO-8601 string when provided.` };
+  return { ok: true, value: value.trim() };
+}
+
+const fnTokenUsage: McpToolDefinition = {
+  name: "fn_token_usage",
+  description:
+    "Read token-consumption analytics (input/output/cache-read/cache-write token counts, task/chat-message " +
+    "counts, and derived USD cost) over an inclusive ISO-8601 [from, to] date range, optionally grouped by " +
+    "model, provider, or task. Wraps the SAME rollup that backs the dashboard 'TOKENS BY MODEL' widget — no new " +
+    "aggregation logic. Base-tier read — does not require --allow-destructive.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      from: { type: "string", description: "Inclusive ISO-8601 lower bound on token-usage timestamp. Omit for no lower bound." },
+      to: { type: "string", description: "Inclusive ISO-8601 upper bound on token-usage timestamp. Omit for no upper bound." },
+      groupBy: {
+        type: "string",
+        enum: [...TOKEN_USAGE_GROUP_BY_VALUES],
+        description: "Optional dimension to group totals by: 'model', 'provider', or 'task'. Omit for grand-total only.",
+      },
+    },
+  },
+  async handler(store, args) {
+    const fromCheck = normalizeTokenUsageDateBound(args.from, "from");
+    if (!fromCheck.ok) return errorResult(fromCheck.error);
+    const toCheck = normalizeTokenUsageDateBound(args.to, "to");
+    if (!toCheck.ok) return errorResult(toCheck.error);
+
+    let groupBy: TokenGroupBy | undefined;
+    if (args.groupBy !== undefined && args.groupBy !== null) {
+      if (typeof args.groupBy !== "string" || !TOKEN_USAGE_GROUP_BY_VALUES.includes(args.groupBy as TokenUsageGroupByArg)) {
+        return errorResult(`groupBy must be one of: ${TOKEN_USAGE_GROUP_BY_VALUES.join(", ")}.`);
+      }
+      groupBy = args.groupBy as TokenGroupBy;
+    }
+
+    const query: TokenAnalyticsQuery = { from: fromCheck.value, to: toCheck.value, groupBy, now: Date.now() };
+    const analytics = await aggregateTokenAnalytics(store.getDatabase(), query);
+
+    const { totals, cost, groups } = analytics;
+    const costLine = cost.usd === null ? "cost: unavailable (no priced model in range)" : `cost: $${cost.usd.toFixed(4)}${cost.unavailable ? " (partial — some models unpriced)" : ""}`;
+    const lines = [
+      `Token usage${analytics.from || analytics.to ? ` (${analytics.from ?? "…"} → ${analytics.to ?? "…"})` : ""}${analytics.groupBy ? `, grouped by ${analytics.groupBy}` : ""}:`,
+      `  input=${totals.inputTokens} output=${totals.outputTokens} cachedRead=${totals.cachedTokens} cacheWrite=${totals.cacheWriteTokens} total=${totals.totalTokens}`,
+      `  nTasks=${totals.nTasks} nChatMessages=${totals.nChatMessages ?? 0} — ${costLine}`,
+    ];
+    if (groups.length > 0) {
+      lines.push("Groups:");
+      for (const g of groups) {
+        const gCost = g.cost.usd === null ? "cost=unavailable" : `cost=$${g.cost.usd.toFixed(4)}`;
+        lines.push(`  ${g.key ?? "(unset)"}: total=${g.totalTokens} input=${g.inputTokens} output=${g.outputTokens} cachedRead=${g.cachedTokens} cacheWrite=${g.cacheWriteTokens} nTasks=${g.nTasks} ${gCost}`);
+      }
+    }
+
+    return textResult(lines.join("\n"), {
+      structuredContent: { from: analytics.from, to: analytics.to, groupBy: analytics.groupBy, totals, cost, groups },
+    });
+  },
+};
+
+/*
+FNXC:McpServer 2026-07-11-18:00:
+FUSI-062 adds `fn_usage_windows` — a THIN wrapper over the existing
+`fetchAllProviderUsage(authStorage)` in `packages/dashboard/src/usage.ts`
+(the SAME function the dashboard's Usage dropdown calls), re-exported from
+`@fusion/dashboard`'s package root for this purpose (see the FNXC:McpServer
+comment in `packages/dashboard/src/index.ts`). It reuses that function's own
+30s in-process cache, so this tool adds NO new provider-API request
+pressure beyond what the dashboard already issues. Motivation: the 5h
+Session window is Claude subscription plans' actual binding throttle,
+while the Weekly window is chronically under-utilized — an operator needs
+both numbers programmatically to pace work against the 5h ceiling without
+leaving weekly capacity stranded (the FUSI-058/FUSI-059 adaptive-
+concurrency/proactive-throttle groundwork this task is scoped to unblock,
+not implement).
+*/
+function summarizeUsageWindow(w: UsageWindow): string {
+  const resetPart = w.resetText ? `, ${w.resetText}` : "";
+  const pacePart = w.pace ? `, pace=${w.pace.status}` : "";
+  return `${w.label}: ${w.percentUsed.toFixed(1)}% used${resetPart}${pacePart}`;
+}
+
+const fnUsageWindows: McpToolDefinition = {
+  name: "fn_usage_windows",
+  description:
+    "Read the current live rate-limit usage windows (typically 'Session (5h)' and 'Weekly') for every " +
+    "authenticated AI provider, including percentUsed, resetAt/resetText, windowDurationMs, and pace. Wraps the " +
+    "SAME fetchAllProviderUsage() the dashboard Usage dropdown calls (reuses its 30s cache — no added provider " +
+    "API pressure). Base-tier read — does not require --allow-destructive.",
+  inputSchema: { type: "object", properties: {} },
+  async handler(_store, _args) {
+    let providers: ProviderUsage[];
+    try {
+      const authStorage = createFusionAuthStorage();
+      providers = await fetchAllProviderUsage(authStorage);
+    } catch (error) {
+      if (error instanceof Error) return errorResult(error.message);
+      throw error;
+    }
+
+    const authenticated = providers.filter((p) => p.status !== "no-auth");
+    if (providers.length === 0 || authenticated.length === 0) {
+      return textResult("No authenticated usage providers — nothing to report.", {
+        structuredContent: redactSecretsDeep({ providers }),
+      });
+    }
+
+    const lines: string[] = [];
+    for (const p of providers) {
+      if (p.status === "no-auth") continue;
+      if (p.status === "error") {
+        lines.push(`${p.icon} ${p.name}: error — ${p.error ?? "unknown"}`);
+        continue;
+      }
+      const windowLines = p.windows.map((w) => `    ${summarizeUsageWindow(w)}`);
+      lines.push(`${p.icon} ${p.name}${p.plan ? ` (${p.plan})` : ""}:`, ...windowLines);
+    }
+
+    return textResult(lines.join("\n"), { structuredContent: redactSecretsDeep({ providers }) });
   },
 };
 
@@ -3121,6 +3303,8 @@ export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnSettingsGet,
   fnProjectList,
   fnProjectShow,
+  fnTokenUsage,
+  fnUsageWindows,
 ];
 
 // ── Destructive tools (opt-in via --allow-destructive) ─────────────────────

@@ -1,0 +1,7 @@
+---
+"@runfusion/fusion": minor
+---
+
+summary: Add read-only MCP tools for token usage analytics and live rate-limit windows.
+category: feature
+dev: Extends the curated `fn mcp serve` operator MCP registry (`packages/cli/src/mcp-server/tools.ts`) with two base-tier tools: `fn_token_usage` (thin wrapper over `aggregateTokenAnalytics` from `@fusion/core`'s `token-analytics.ts`, params `from`/`to`/`groupBy: model|provider|task`, the same rollup that backs the dashboard "TOKENS BY MODEL" widget) and `fn_usage_windows` (thin wrapper over `fetchAllProviderUsage` from `@fusion/dashboard`'s `usage.ts`, re-exported from the dashboard package root, returning current Session(5h)/Weekly `percentUsed`/`resetAt`/`windowDurationMs`/`pace` per authenticated provider, reusing its own 30s cache). Neither tool introduces new aggregation/metering logic. `fn_token_usage`'s structured payload deliberately skips `redactSecretsDeep` on its numeric totals — the helper's key-name heuristic matches any key containing "token", which would blank legitimate `inputTokens`/`outputTokens`/`cachedTokens`/`cacheWriteTokens`/`totalTokens` fields; `TokenAnalytics` is a closed, code-computed numeric aggregation with no free-text surface, so that pass is safely skipped. Both are base-tier (not `--allow-destructive`-gated); base registry count 64 → 66, combined 75 → 77, destructive tier unchanged at 11 — enforced by `registry-invariants.test.ts`'s Invariant G.

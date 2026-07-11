@@ -332,13 +332,19 @@ describe("Invariant G — tool-count parity across surfaces stays source-derived
     // (task lifecycle, agent edit, fn_models_list, research pipeline,
     // fn_trait_list) — base 49 → 64, destructive unchanged at 11, combined
     // 60 → 75.
+    //
+    // FNXC:McpServer 2026-07-11-18:00: FUSI-062 adds two base tools
+    // (fn_token_usage, fn_usage_windows) — base 64 → 66, destructive
+    // unchanged at 11, combined 75 → 77.
     const numberWords: Record<number, string> = {
       43: "forty-three",
       49: "forty-nine",
       54: "fifty-four",
       60: "sixty",
       64: "sixty-four",
+      66: "sixty-six",
       75: "seventy-five",
+      77: "seventy-seven",
       11: "eleven",
     };
     expect(numberWords[base], `no spelled-out word mapping recorded for base count ${base} — update this test's numberWords map`).toBeTruthy();
