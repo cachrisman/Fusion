@@ -511,4 +511,138 @@ describe("artifacts route integration", () => {
       rmSync(crossGlobalDir, { recursive: true, force: true });
     }
   });
+
+  /*
+   * FNXC:ArtifactRegistry 2026-07-10-15:20:
+   * The Artifacts view document viewer/editor contract: GET /artifacts/:id returns the full row
+   * INCLUDING inline content (the list route intentionally strips it), and PATCH /artifacts/:id
+   * persists title/description/content edits for inline-content docs, emitting artifact:updated.
+   * Binary-backed artifacts must reject content edits.
+   */
+  it("GET /artifacts/:id returns inline content and PATCH persists doc edits", async () => {
+    const doc = await store.registerArtifact({
+      type: "document",
+      title: "Design notes",
+      content: "# Original\nbody",
+      mimeType: "text/markdown",
+      authorId: "agent-doc",
+      authorType: "agent",
+    });
+
+    const detail = await REQUEST(app, "GET", `/api/artifacts/${doc.id}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body).toMatchObject({ id: doc.id, content: "# Original\nbody" });
+
+    const listed = await REQUEST(app, "GET", "/api/artifacts");
+    expect((listed.body as ArtifactWithTask[]).find((a) => a.id === doc.id)?.content).toBeFalsy();
+
+    const updated = vi.fn();
+    store.on("artifact:updated", updated);
+
+    const patch = await REQUEST(app, "PATCH", `/api/artifacts/${doc.id}`, JSON.stringify({
+      title: "Design notes v2",
+      content: "# Edited\nbody",
+    }), { "content-type": "application/json" });
+    expect(patch.status).toBe(200);
+    expect(patch.body).toMatchObject({ id: doc.id, title: "Design notes v2", content: "# Edited\nbody" });
+    expect(updated).toHaveBeenCalledTimes(1);
+
+    const reread = await REQUEST(app, "GET", `/api/artifacts/${doc.id}`);
+    expect(reread.body).toMatchObject({ title: "Design notes v2", content: "# Edited\nbody" });
+  });
+
+  it("PATCH /artifacts/:id rejects content edits on binary artifacts, empty updates, and unknown ids", async () => {
+    const { artifact } = await createTaskImageArtifact();
+
+    const binaryPatch = await REQUEST(app, "PATCH", `/api/artifacts/${artifact.id}`, JSON.stringify({ content: "not allowed" }), { "content-type": "application/json" });
+    expect(binaryPatch.status).toBe(400);
+
+    const metadataPatch = await REQUEST(app, "PATCH", `/api/artifacts/${artifact.id}`, JSON.stringify({ description: "New caption" }), { "content-type": "application/json" });
+    expect(metadataPatch.status).toBe(200);
+    expect(metadataPatch.body).toMatchObject({ description: "New caption" });
+
+    const emptyPatch = await REQUEST(app, "PATCH", `/api/artifacts/${artifact.id}`, JSON.stringify({}), { "content-type": "application/json" });
+    expect(emptyPatch.status).toBe(400);
+
+    const missing = await REQUEST(app, "PATCH", "/api/artifacts/does-not-exist", JSON.stringify({ title: "x" }), { "content-type": "application/json" });
+    expect(missing.status).toBe(404);
+
+    const missingGet = await REQUEST(app, "GET", "/api/artifacts/does-not-exist");
+    expect(missingGet.status).toBe(404);
+  });
+
+  /*
+   * FNXC:ArtifactRegistry 2026-07-11-10:20:
+   * Video playback contract: the media route must serve HTTP byte ranges (206 + Content-Range +
+   * Accept-Ranges) because <video> seeking issues Range requests and Safari refuses to play from
+   * servers that ignore them. Unsatisfiable ranges answer 416.
+   *
+   * FNXC:ArtifactRegistry 2026-07-10-12:30:
+   * Range assertions ride the in-memory test-request harness (TestResponse.bodyBuffer for exact
+   * byte comparison) per the no-real-network testing rule; no real TCP server is started.
+   * Every 206 variant asserts the full contract: status + Content-Range + Content-Length + bytes.
+   */
+  it("serves byte-range requests for video artifact media", async () => {
+    const task = await store.createTask({ title: "Demo recording", description: "range test" });
+    const videoBytes = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypmp42-0123456789abcdef")]);
+    const artifact = await store.registerArtifact({
+      type: "video",
+      title: "Feature demo",
+      mimeType: "video/mp4",
+      data: videoBytes,
+      authorId: "agent-video",
+      authorType: "agent",
+      taskId: task.id,
+    });
+    const mediaPath = `/api/artifacts/${artifact.id}/media`;
+
+    const full = await REQUEST(app, "GET", mediaPath);
+    expect(full.status).toBe(200);
+    expect(full.headers["accept-ranges"]).toBe("bytes");
+    expect(String(full.headers["content-length"])).toBe(String(videoBytes.length));
+    expect(full.bodyBuffer).toEqual(videoBytes);
+
+    const ranged = await REQUEST(app, "GET", mediaPath, undefined, { Range: "bytes=4-11" });
+    expect(ranged.status).toBe(206);
+    expect(ranged.headers["content-range"]).toBe(`bytes 4-11/${videoBytes.length}`);
+    expect(String(ranged.headers["content-length"])).toBe("8");
+    expect(ranged.bodyBuffer).toEqual(videoBytes.subarray(4, 12));
+
+    const suffix = await REQUEST(app, "GET", mediaPath, undefined, { Range: "bytes=-5" });
+    expect(suffix.status).toBe(206);
+    expect(suffix.headers["content-range"]).toBe(`bytes ${videoBytes.length - 5}-${videoBytes.length - 1}/${videoBytes.length}`);
+    expect(String(suffix.headers["content-length"])).toBe("5");
+    expect(suffix.bodyBuffer).toEqual(videoBytes.subarray(videoBytes.length - 5));
+
+    const openEnded = await REQUEST(app, "GET", mediaPath, undefined, { Range: `bytes=10-` });
+    expect(openEnded.status).toBe(206);
+    expect(openEnded.headers["content-range"]).toBe(`bytes 10-${videoBytes.length - 1}/${videoBytes.length}`);
+    expect(String(openEnded.headers["content-length"])).toBe(String(videoBytes.length - 10));
+    expect(openEnded.bodyBuffer).toEqual(videoBytes.subarray(10));
+
+    const unsatisfiable = await REQUEST(app, "GET", mediaPath, undefined, { Range: `bytes=${videoBytes.length + 5}-` });
+    expect(unsatisfiable.status).toBe(416);
+    expect(unsatisfiable.headers["content-range"]).toBe(`bytes */${videoBytes.length}`);
+  });
+
+  it("bridges a video attachment into the artifact registry and streams it", async () => {
+    const task = await store.createTask({ title: "Video attachment", description: "bridge test" });
+    const videoBytes = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypmp42-attachment-video")]);
+    await store.addAttachment(task.id, "walkthrough.mp4", videoBytes, "video/mp4");
+
+    const listRes = await REQUEST(app, "GET", `/api/artifacts?taskId=${task.id}`);
+    expect(listRes.status).toBe(200);
+    const bridged = (listRes.body as ArtifactWithTask[]).find((a) => a.type === "video");
+    expect(bridged).toMatchObject({
+      type: "video",
+      title: "walkthrough.mp4",
+      mimeType: "video/mp4",
+      authorType: "system",
+    });
+
+    const media = await REQUEST(app, "GET", `/api/artifacts/${bridged!.id}/media`);
+    expect(media.status).toBe(200);
+    expect(media.headers["content-type"]).toBe("video/mp4");
+    expect(media.bodyBuffer).toEqual(videoBytes);
+  });
 });

@@ -68,6 +68,8 @@ const EXPECTED_TOOL_NAMES = [
   "fn_mission_link_goal",
   "fn_mission_unlink_goal",
   "fn_mission_list_goals",
+  // FUSI-019: settings read
+  "fn_settings_get",
 ];
 
 const EXPECTED_DESTRUCTIVE_TOOL_NAMES = [
@@ -78,6 +80,7 @@ const EXPECTED_DESTRUCTIVE_TOOL_NAMES = [
   "fn_milestone_delete",
   "fn_slice_delete",
   "fn_feature_delete",
+  "fn_settings_update",
 ];
 
 const FORBIDDEN_NAME_PATTERNS = [/release/i, /publish/i, /version[-_]?tag/i, /changeset/i];
@@ -129,7 +132,7 @@ describe("buildMcpToolRegistry (FUSI-002 destructive gate)", () => {
     expect(buildMcpToolRegistry({}).map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
   });
 
-  it("adds exactly the seven destructive tools (FUSI-002's three plus FUSI-005's four mission-hierarchy tools), no more, no fewer, when allowDestructive is true", () => {
+  it("adds exactly the eight destructive tools (FUSI-002's three plus FUSI-005's four mission-hierarchy tools plus FUSI-019's fn_settings_update), no more, no fewer, when allowDestructive is true", () => {
     const names = buildMcpToolRegistry({ allowDestructive: true }).map((t) => t.name).sort();
     expect(names).toEqual([...EXPECTED_TOOL_NAMES, ...EXPECTED_DESTRUCTIVE_TOOL_NAMES].sort());
     expect(DESTRUCTIVE_TOOL_TIER.map((t) => t.name).sort()).toEqual([...EXPECTED_DESTRUCTIVE_TOOL_NAMES].sort());
@@ -221,7 +224,7 @@ describe("fn mcp serve — in-memory server smoke test", () => {
     }
   });
 
-  it("adds exactly the seven destructive tools over an in-memory transport when allowDestructive is true", async () => {
+  it("adds exactly the eight destructive tools over an in-memory transport when allowDestructive is true", async () => {
     const { client, mcpServer } = await connectClient({ allowDestructive: true });
     try {
       const { tools } = await client.listTools();
@@ -1035,6 +1038,142 @@ describe("fn mcp serve — in-memory server smoke test", () => {
         expect(unlinkResult.isError).not.toBe(true);
         expect(store.getMissionStore().listGoalIdsForMission(mission.id)).not.toContain(goal.id);
       } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+  });
+
+  describe("settings tools (FUSI-019)", () => {
+    it("fn_settings_get returns settings for scope: project, global, and default/effective; rejects an unknown scope", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        const project = await client.callTool({ name: "fn_settings_get", arguments: { scope: "project" } });
+        expect(project.isError).not.toBe(true);
+        expect((project.structuredContent as { scope: string; settings: unknown }).scope).toBe("project");
+
+        const global = await client.callTool({ name: "fn_settings_get", arguments: { scope: "global" } });
+        expect(global.isError).not.toBe(true);
+        expect((global.structuredContent as { scope: string; settings: unknown }).scope).toBe("global");
+
+        const effective = await client.callTool({ name: "fn_settings_get", arguments: { scope: "effective" } });
+        expect(effective.isError).not.toBe(true);
+        expect((effective.structuredContent as { scope: string; settings: unknown }).scope).toBe("effective");
+
+        const defaulted = await client.callTool({ name: "fn_settings_get", arguments: {} });
+        expect(defaulted.isError).not.toBe(true);
+        expect((defaulted.structuredContent as { scope: string }).scope).toBe("effective");
+
+        const bad = await client.callTool({ name: "fn_settings_get", arguments: { scope: "bogus" } });
+        expect(bad.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_settings_get redacts secret-shaped values in its structured payload", async () => {
+      await store.updateGlobalSettings({ mcpServers: { enabled: true, servers: [] } } as never);
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_settings_get", arguments: { scope: "effective" } });
+        expect(result.isError).not.toBe(true);
+        const redacted = redactSecretsDeep({ apiKey: "sk-live-should-never-appear" });
+        expect((redacted as { apiKey: string }).apiKey).toBe("[redacted]");
+        const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+        expect(text).not.toContain("sk-live-should-never-appear");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_settings_update is absent from the base registry and present only when allowDestructive is true", async () => {
+      const base = await connectClient();
+      try {
+        const { tools } = await base.client.listTools();
+        expect((tools ?? []).map((t) => t.name)).not.toContain("fn_settings_update");
+      } finally {
+        await base.client.close();
+        await base.mcpServer.close();
+      }
+
+      const destructive = await connectClient({ allowDestructive: true });
+      try {
+        const { tools } = await destructive.client.listTools();
+        expect((tools ?? []).map((t) => t.name)).toContain("fn_settings_update");
+      } finally {
+        await destructive.client.close();
+        await destructive.mcpServer.close();
+      }
+    });
+
+    it("fn_settings_update applies a project-scope patch via store.updateSettings", async () => {
+      const { client, mcpServer } = await connectClient({ allowDestructive: true });
+      try {
+        const result = await client.callTool({
+          name: "fn_settings_update",
+          arguments: { scope: "project", patch: { globalPause: true } },
+        });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { appliedKeys: string[] };
+        expect(structured.appliedKeys).toContain("globalPause");
+        const settings = await store.getSettings();
+        expect(settings.globalPause).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_settings_update applies a global-scope patch via store.updateGlobalSettings", async () => {
+      const { client, mcpServer } = await connectClient({ allowDestructive: true });
+      try {
+        const result = await client.callTool({
+          name: "fn_settings_update",
+          arguments: { scope: "global", patch: { testMode: true } },
+        });
+        expect(result.isError).not.toBe(true);
+        const { global } = await store.getSettingsByScope();
+        expect(global.testMode).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_settings_update rejects a missing/empty patch or an invalid scope", async () => {
+      const { client, mcpServer } = await connectClient({ allowDestructive: true });
+      try {
+        const missingPatch = await client.callTool({ name: "fn_settings_update", arguments: { scope: "project" } });
+        expect(missingPatch.isError).toBe(true);
+
+        const emptyPatch = await client.callTool({ name: "fn_settings_update", arguments: { scope: "project", patch: {} } });
+        expect(emptyPatch.isError).toBe(true);
+
+        const badScope = await client.callTool({ name: "fn_settings_update", arguments: { scope: "effective", patch: { globalPause: true } } });
+        expect(badScope.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_settings_update writes an ids/counts/outcomes-only stderr audit line carrying key NAMES but never patched values", async () => {
+      const { client, mcpServer } = await connectClient({ allowDestructive: true });
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const result = await client.callTool({
+          name: "fn_settings_update",
+          arguments: { scope: "project", patch: { globalPause: true } },
+        });
+        expect(result.isError).not.toBe(true);
+        const auditLines = errSpy.mock.calls.map((call) => call.join(" ")).filter((line) => line.includes("fn_settings_update"));
+        expect(auditLines.length).toBeGreaterThan(0);
+        expect(auditLines.some((line) => line.includes("keys=globalPause"))).toBe(true);
+        expect(auditLines.some((line) => line.includes("true"))).toBe(false);
+      } finally {
+        errSpy.mockRestore();
         await client.close();
         await mcpServer.close();
       }

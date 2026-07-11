@@ -82,6 +82,24 @@
  * See the FNXC:McpServer 2026-07-11-10:30 comment above the "Mission
  * hierarchy & goal mutation tools" section for the full rationale,
  * including why `fn_goal_archive` (deferred in FUSI-006) is safe to add now.
+ *
+ * FNXC:McpServer 2026-07-11-09:30:
+ * FUSI-019 adds settings read/write on top of FUSI-018's set: `fn_settings_get`
+ * (BASE-tier, scope-selected read — `project`/`global`/`effective`) dispatches
+ * to the SAME `TaskStore.getSettings()`/`getSettingsByScope()` reads used
+ * everywhere else in Fusion, always through {@link redactSecretsDeep} before
+ * serialization (settings carry secret-ref/token-bearing fields). Base tool
+ * count forty → forty-one; with --allow-destructive: forty-seven →
+ * forty-nine. `fn_settings_update` (DESTRUCTIVE tier, gated behind the SAME
+ * `--allow-destructive` flag as the rest of the tier — no second gate) is a
+ * SHALLOW scope-selected PATCH via `store.updateSettings(patch)` (project)
+ * / `store.updateGlobalSettings(patch)` (global) — it never reads-then-
+ * replaces the whole settings object, so the store's own key-filtering/
+ * null-delete/merge semantics apply untouched. Its stderr audit line
+ * carries the patched key NAMES only, never values (values may be secret-
+ * bearing). See the FNXC:McpServer 2026-07-11-09:30 comment above
+ * `fnSettingsUpdate` in the destructive-tools section for the full
+ * rationale.
  */
 import {
   TaskStore,
@@ -95,6 +113,8 @@ import {
   COLUMNS,
   COLUMN_LABELS,
   ActiveGoalLimitExceededError,
+  isGlobalSettingsKey,
+  isProjectSettingsKey,
   type Task,
   type ColumnId,
   type TaskPriority,
@@ -1774,6 +1794,63 @@ const fnMissionUnlinkGoal: McpToolDefinition = {
   },
 };
 
+// ── Settings tools ────────────────────────────────────────────────────
+
+const SETTINGS_SCOPES = ["project", "global", "effective"] as const;
+type SettingsScope = (typeof SETTINGS_SCOPES)[number];
+
+/*
+FNXC:McpServer 2026-07-11-09:30:
+BASE-tier (not destructive) settings read — scope-selected (`project` /
+`global` / `effective`), dispatching to the SAME `TaskStore.getSettings()`
+(fully merged effective settings) / `TaskStore.getSettingsByScope()`
+(scope-separated project/global reads) operations used by `fn config` and
+every other Fusion settings surface — no bespoke settings-read logic is
+introduced here. {@link redactSecretsDeep} is mandatory on the returned
+object before it is placed in EITHER the text body or `structuredContent`:
+settings objects can carry secret-ref/token-bearing fields (e.g. `mcpServers`
+env/header secret refs), and this is a read tool with no destructive gate,
+so redaction is the only thing standing between a misconfigured settings
+value and a leaked secret over the MCP wire.
+*/
+const fnSettingsGet: McpToolDefinition = {
+  name: "fn_settings_get",
+  description:
+    "Read Fusion settings for a selected scope (project, global, or the fully merged effective settings). " +
+    "All secret-like values (tokens, API keys, passwords, MCP secret refs) are redacted before being returned. " +
+    "Base-tier read — does not require --allow-destructive.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      scope: {
+        type: "string",
+        enum: [...SETTINGS_SCOPES],
+        description: "Which settings to read: 'project' (project-scope only), 'global' (global-scope only), or 'effective' (fully merged; default).",
+      },
+    },
+  },
+  async handler(store, args) {
+    const scopeArg = typeof args.scope === "string" ? args.scope : "effective";
+    if (!SETTINGS_SCOPES.includes(scopeArg as SettingsScope)) {
+      return errorResult("scope must be one of: project, global, effective.");
+    }
+    const scope = scopeArg as SettingsScope;
+
+    let settings: unknown;
+    if (scope === "effective") {
+      settings = await store.getSettings();
+    } else {
+      const byScope = await store.getSettingsByScope();
+      settings = scope === "project" ? byScope.project : byScope.global;
+    }
+
+    const redacted = redactSecretsDeep({ scope, settings }) as { scope: SettingsScope; settings: Record<string, unknown> };
+    return textResult(`Settings (scope: ${scope}):\n${JSON.stringify(redacted.settings, null, 2)}`, {
+      structuredContent: redacted,
+    });
+  },
+};
+
 export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnTaskCreate,
   fnTaskList,
@@ -1815,6 +1892,7 @@ export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnMissionLinkGoal,
   fnMissionUnlinkGoal,
   fnMissionListGoals,
+  fnSettingsGet,
 ];
 
 // ── Destructive tools (opt-in via --allow-destructive) ─────────────────────
@@ -2125,8 +2203,95 @@ const fnFeatureDelete = bindMissionHierarchyDeleteTool({
   deleteOp: (missionStore, id, force) => missionStore.deleteFeature(id, force),
 });
 
+/*
+FNXC:McpServer 2026-07-11-09:30:
+fn_settings_update is a DESTRUCTIVE-tier write gated behind the SAME
+--allow-destructive flag as the rest of the tier (no second gate — same
+local-stdio operator-privileged trust model as fn_task_delete/etc., per the
+FUSI-002/FUSI-005 recorded decision). It performs a SHALLOW scope-selected
+PATCH — `scope: "project"` calls `store.updateSettings(patch)` (the
+project-config writer, which already filters out global-only keys and
+treats a `null` value as an explicit key-delete); `scope: "global"` calls
+`store.updateGlobalSettings(patch)` (merges into the global store and emits
+`settings:updated`). It NEVER reads the whole settings object and writes it
+back — the patch is passed straight through to the store, so the store's
+own key-filtering/null-delete/merge semantics are the single source of
+truth (no duplicated validation here). There is no `scope: "effective"`
+write target — an effective read is a merge of two independently-owned
+writable scopes, so writing to it would be ambiguous.
+
+Key-scope choice: rather than rejecting a patch that mixes in a key
+belonging to the other scope, this handler surfaces which keys were
+APPLIED vs DROPPED in both the audit line and the tool result (using
+`isGlobalSettingsKey`/`isProjectSettingsKey` purely for that informational
+split) and still lets the underlying store's own silent filter run —
+matching `updateSettings`'s existing behavior elsewhere in Fusion (see the
+changeset `dev:` note for the recorded rationale). The stderr audit line
+carries the patched key NAMES only, never values — patch values may be
+secret-bearing (e.g. an `mcpServers` secret ref) and must never be echoed
+back to the client either in the audit line or in `structuredContent`.
+*/
+const fnSettingsUpdate: McpToolDefinition = {
+  name: "fn_settings_update",
+  description:
+    "DESTRUCTIVE: apply a shallow PATCH to Fusion settings for a selected scope (project or global) — never a " +
+    "full-object replace. A null value in the patch deletes that key. Only registered when `fn mcp serve` is " +
+    "started with --allow-destructive.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      scope: { type: "string", enum: ["project", "global"], description: "Which settings scope to patch: 'project' or 'global'." },
+      patch: {
+        type: "object",
+        additionalProperties: true,
+        description: "Shallow key/value patch to apply. A null value for a key deletes that key.",
+      },
+    },
+    required: ["scope", "patch"],
+  },
+  async handler(store, args) {
+    const scope = args.scope;
+    if (scope !== "project" && scope !== "global") {
+      return errorResult("scope must be one of: project, global.");
+    }
+    const patch = args.patch;
+    if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
+      return errorResult("patch is required and must be an object.");
+    }
+    const patchKeys = Object.keys(patch as Record<string, unknown>);
+    if (patchKeys.length === 0) {
+      return errorResult("patch must contain at least one key.");
+    }
+
+    try {
+      if (scope === "project") {
+        await store.updateSettings(patch as Record<string, unknown>);
+      } else {
+        await store.updateGlobalSettings(patch as Record<string, unknown>);
+      }
+    } catch (error) {
+      auditDestructiveInvocation({ tool: "fn_settings_update", resourceId: scope, outcome: "error" });
+      if (error instanceof Error) return errorResult(error.message);
+      throw error;
+    }
+
+    const belongsToScope = scope === "project" ? isProjectSettingsKey : isGlobalSettingsKey;
+    const appliedKeys = patchKeys.filter((key) => belongsToScope(key));
+    const droppedKeys = patchKeys.filter((key) => !belongsToScope(key));
+
+    auditDestructiveInvocation({ tool: "fn_settings_update", resourceId: scope, outcome: "updated" });
+    console.error(`[fn mcp serve] DESTRUCTIVE fn_settings_update scope=${scope} keys=${patchKeys.join(",")}`);
+
+    return textResult(
+      `Updated ${scope} settings.\nApplied keys: ${appliedKeys.join(", ") || "(none)"}` +
+        (droppedKeys.length ? `\nDropped keys (not valid for ${scope} scope): ${droppedKeys.join(", ")}` : ""),
+      { structuredContent: redactSecretsDeep({ scope, appliedKeys, droppedKeys, outcome: "updated" }) },
+    );
+  },
+};
+
 /**
- * The destructive tier — EXACTLY seven tools, appended to the base registry
+ * The destructive tier — EXACTLY eight tools, appended to the base registry
  * only when `McpToolRuntimeContext.allowDestructive === true`. See the
  * module-level FNXC:McpServer 2026-07-10-22:10 and 2026-07-10-23:45 comments
  * for the gate rationale.
@@ -2139,6 +2304,7 @@ export const DESTRUCTIVE_TOOL_TIER: McpToolDefinition[] = [
   fnMilestoneDelete,
   fnSliceDelete,
   fnFeatureDelete,
+  fnSettingsUpdate,
 ];
 
 /**

@@ -200,6 +200,8 @@ Features:
 <!-- FNXC:PlannerOversight 2026-07-04-19:10: FN-7539 fix — the badge was rendering on virtually every card because the schema default `autonomous` tier was treated as "meaningfully configured". Narrowed the gate so an inherited (no per-task-override, no non-default workflow tier) `autonomous` level renders no badge; only an explicit per-task override or a resolved workflow/effective tier that is not the plain inherited default surfaces the badge. -->
 - Task cards show a read-only **oversight-level badge** (`Observe`, `Steer`, or `Auto-recovery`) in the meta-badges cluster reflecting the effective planner-oversight level, but only when oversight is *meaningfully configured* — an explicit per-task override (including an explicit `autonomous` override), or a resolved workflow/effective tier of `observe`/`steer` (`data-testid="card-oversight-badge"`). A card that merely **inherits** the schema default `autonomous` tier (no per-task override, no non-default workflow tier) renders no badge and no empty `.card-meta-badges` shell. The badge is also absent when the effective level is explicitly "off", **and** while an inherited (no per-task-override) workflow tier is still being resolved (in flight or not yet fetched) — it never shows a guessed default during that window.
 <!-- FNXC:PlannerOversight 2026-07-04-HH:MM: FN-7542 removed the FN-7516 active-overseer-state ("Executor") indicator described above as unwanted per-card noise — it fired on nearly every in-progress card. The oversight-level badge documented above is unaffected. -->
+<!-- FNXC:PlannerOversight 2026-07-11-00:00: FN-7592 reintroduced a compact active-overseer state indicator as an Eye glyph instead of a wide text badge, using the engine-provided transient plannerOverseerState rather than locally guessing from task fields. -->
+- Task cards show a compact **planner-overseer eye badge** (`data-testid="planner-overseer-state-badge"`) when the engine reports a non-idle transient `plannerOverseerState`. The eye badge is an active-overseer state marker, not a human-read/view indicator: `watching` means passive monitoring, `steering`/`recovering` mean active guidance or recovery is underway, and `awaiting-confirmation` means a human decision is required before the overseer can continue. Hover exposes the composed tooltip with the overseer's reason, watched stage/signal, and pending-confirmation note when present.
 <!-- FNXC:PlannerOversight 2026-07-04-17:00: FN-7517 adds interactive task-detail planner-overseer controls (quick level change, manual nudge, stop oversight, explain current action) alongside the FN-7516 read-only card badges above. These controls live ONLY in TaskDetailModal, not TaskCard.
 
 FNXC:PlannerOversight 2026-07-05-00:00: FN-7604 collapses the desktop inline cluster (documented below through FN-7545/FN-7546) into the single universal overflow-menu dropdown that FN-7545 originally built for mobile only — the dropdown is now the ONE canonical surface on every viewport, desktop included. -->
@@ -259,8 +261,10 @@ Features:
 - Bulk selection + batch model updates
 - Bulk Pause / Unpause / Archive actions from the selection toolbar (`Pause selected`, `Unpause selected`, `Archive selected`) for fast batch task state management.
 - Bulk delete from the selection toolbar (`Delete selected`): archived selections are skipped automatically, and dependency-conflict failures can be force-deleted per task after a danger confirmation that removes dependency references.
-- List rows and mobile cards support the same task context menu as Board cards from right-click, keyboard context menu / Shift+F10, or touch long-press without changing ordinary row selection or tap-to-open behavior. Selecting an action applies that exact action once and dismisses the menu, including **Refine** for completed tasks.
-<!-- FNXC:ListContextMenu 2026-06-29-00:00: List context menus are alternate action entry points only; desktop left-click still selects the split-pane detail and mobile tap still opens detail while long-press suppresses the follow-up tap.
+- Desktop List view keeps the two-pane table/detail split. Tablet-width and mobile viewports use the single-pane card layout so list controls and quick-add stay full-width; tapping a task opens detail instead of selecting an embedded split pane.
+- List rows and tablet/mobile cards support the same task context menu as Board cards from right-click, keyboard context menu / Shift+F10, or touch long-press without changing ordinary row selection or tap-to-open behavior. Selecting an action applies that exact action once and dismisses the menu, including **Refine** for completed tasks.
+<!-- FNXC:ListView 2026-07-10-00:00: FN-7809 makes tablet List view use the same single-pane card/detail route as mobile because the desktop split sidebar clipped the primary controls and quick-add composer at 769–1024px.
+FNXC:ListContextMenu 2026-06-29-00:00: List context menus are alternate action entry points only; desktop left-click still selects the split-pane detail and mobile tap still opens detail while long-press suppresses the follow-up tap.
 FNXC:ListContextMenu 2026-06-30-00:20: Keyboard access is part of the Board/List context-menu contract, so docs must include the context-menu key and Shift+F10 alongside pointer and touch entry points.
 FNXC:DoneTaskRefine 2026-07-01-00:00: Completed List row/card context menus route Refine to the existing task-detail feedback modal so desktop right-click and mobile long-press share the same refinement flow.
 FNXC:TaskContextMenu 2026-07-01-00:00: Mobile List card long-press action taps must select and dismiss through the same shared TaskContextMenu invariant as Board and Task Detail surfaces. -->
@@ -619,6 +623,9 @@ Mailbox view shows inbox/outbox communication threads and unread state.
 
 Fusion embeds a terminal using xterm.js. Desktop and tablet use the footer status bar as the terminal launcher; mobile keeps the full-screen terminal path.
 
+<!-- FNXC:TaskDetailTerminal 2026-07-10-00:00: FN-7813 gives single-worktree tasks their own Task Detail Terminal tab while preserving the existing CLI-agent Session tab label, so operators can distinguish an interactive shell from the read-only/live agent session transcript. -->
+Task Detail has two terminal-adjacent tabs when both are applicable: **Session** shows the pre-existing CLI agent session transcript/control surface, while **Terminal** embeds the interactive multi-tab terminal inside the task detail body. The interactive **Terminal** tab appears only for non-workspace tasks with a single recorded worktree; its first shell starts in that task worktree, and its terminal tabs are stored separately from the footer/global project terminal tabs.
+
 On Windows, the embedded terminal starts a supported shell inside Fusion, such as Command Prompt (`cmd.exe`) or Windows PowerShell. Windows Terminal (`wt.exe`) is an external terminal host and is not required or launched for the embedded panel, so Fusion should not show native Windows Terminal help/version popups while starting a terminal. If embedded terminal startup fails, Fusion shows an inline error with **Retry** instead of a blocking native dialog; install or repair Windows Terminal separately with `winget install Microsoft.WindowsTerminal` only if you want to use Windows Terminal outside Fusion.
 
 Use the terminal on desktop/tablet:
@@ -809,30 +816,36 @@ For per-run aggregation, `GET /api/agents/:id/runs/:runId/cited-goals` returns `
 
 ## Artifacts View
 
-Artifacts view aggregates project markdown files, task documents, and registered artifacts. The dashboard title is **Artifacts**; the internal tab bar keeps the shipped **Project Files**, **Task Documents**, and **Artifacts** labels.
+Artifacts view aggregates registered artifacts, project markdown files, and task documents. The dashboard title is **Artifacts**; the internal tab bar leads with **Artifacts** (the landing tab), followed by **Project Files** and **Task Documents**. On mobile the tab buttons render at the uniform 44px control height with non-wrapping labels in a horizontally scrollable row.
 
 Features:
 
-- Group task documents by task ID (with revision history metadata) and show the parent task status badge in each task group header when status metadata is available
+- Browse **Task Documents** in the same left-sidebar/right-pane pattern as **Project Files**: the sidebar groups document entries by task ID with revision metadata and parent task status badges when available, while the right pane loads the selected document content
 - Search documents across tasks
-- Open project markdown files with inline preview
+- Open project markdown files and task documents with inline preview
 - Browse the **Artifacts** tab for registry media registered by any agent, dashboard chat/user action, or system tool across tasks
 - Already-open global and task-detail artifact lists refresh live from the artifact registry event when an agent, dashboard chat session, user action, or system tool registers a new artifact, while preserving active search filters and task scoping
 - Use the tab-count badges to see the current counts for Project Files, Task Documents, and Artifacts; the Artifacts badge reflects the loaded `GET /api/artifacts` result set, including active search filters
-- Use the responsive media gallery to scan thumbnail-first image and video cards with consistent framing, while audio, document, and generic artifacts remain readable cards in the same grid
-- Expand image and video artifact thumbnails into a full-size lightbox; dismiss it with the close button, backdrop click, or Escape while non-previewable artifact cards keep their normal controls and links
-- Preview artifact images inline, play video and audio with native controls, read document previews from inline content/description, and open generic `other` artifacts through their media URL (`GET /api/artifacts/:id/media`)
-- Read artifact metadata on each card: type badge (`Image`, `Video`, `Audio`, `Document`, or `Other`), title, optional description/content preview, author ID, timestamp, and linked task title/ID when present
-- Use **Open task** on an artifact card to jump back to the originating task when the artifact has a `taskId`; inside task detail, the **Artifacts** tab shows that task's documents and registered media artifacts together
+- Browse the category-driven gallery: artifacts are broken down into **Images**, **Docs**, **PDFs**, **Videos**, **Audio**, and **Other** content categories (PDFs are detected by MIME type/extension regardless of registry type). "All" renders one section per present category; the chip row filters to a single category, and chips only appear for categories that exist
+- Each category has a tailored experience: Images/Videos use a visual-first tile grid with hover metadata and a full-size lightbox; Docs open a full document viewer with rendered markdown; PDFs open an embedded viewer with an open-in-new-tab action; Audio renders inline player rows; Other renders compact download rows
+- Video artifacts (agent-registered recordings, `path`-ingested MP4/WebM/MOV, and bridged video attachments) play with working seek because the media route serves HTTP byte ranges
+- HTML doc artifacts (`mimeType: text/html`) render as **live sandboxed previews** by default in the document viewer (scripts allowed, same-origin denied), with a Preview/Source toggle and the same Edit mode as other docs
+- **Edit any inline-content doc in place**: the document viewer's **Edit** button switches to an editor whose **Save** persists through `PATCH /api/artifacts/:id` and live-refreshes open galleries via the `artifact:updated` registry event; binary-backed documents stay read-only with a media link
+- Every viewer (image/video lightbox, PDF viewer, document viewer) opens in a draggable, resizable floating window (drag by the viewer header, resize by any edge/corner; geometry persists per viewer kind); dismiss with the close button or Escape. Windows are non-blocking, so the gallery behind them stays interactive
+- Read artifact metadata on cards, rows, and viewer footers: title, optional description, author ID, timestamp, size, and linked task ID when present
+- Use the task link on a card/row or viewer footer to jump back to the originating task when the artifact has a `taskId`; inside task detail, the **Artifacts** tab shows that task's documents and registered media artifacts together
+- The gallery scales down at the mobile breakpoint (including landscape phones): category chips scroll horizontally, visual grids collapse to two columns, cards and rows go single-column, and viewer windows clamp to the viewport
 - Loading state: the Artifacts tab shows `Loading artifacts…` while the first artifact list request is pending and no artifact results are loaded
 - Empty states: with no search query it shows `No artifacts yet.` plus the hint that artifacts are created by agents, users, and system tools; with a search query it shows `No artifacts match "<query>".`
 - Error state: a failed artifact list request uses the shared `Failed to load artifacts: <error>` panel with a **Retry** action that re-runs the artifact fetch
 - Toggle between raw text and rendered markdown using the **Markdown/Plain** button
-- Highlight text in raw or rendered project-file previews, choose **Add comment**, and send the file path, selected snippet, and your comment to the **New Task** dialog
+- Highlight text in raw or rendered project-file previews or the selected Task Document's right pane, choose **Add comment**, and send the source path/key, selected snippet, and your comment to the **New Task** dialog
 
 Agent registrations also surface through the [Mailbox View](#mailbox-view): successful `fn_artifact_register` calls send a best-effort system inbox notification so users can discover new media even before opening the gallery. Artifact list live-refresh does not depend on that best-effort message; it listens to the registry registration event.
 
-![Artifacts view](./screenshots/documents-view.png)
+![Artifacts gallery](./screenshots/artifacts-gallery.png)
+
+![Artifact document viewer with edit mode](./screenshots/artifacts-doc-edit.png)
 
 ## Reports View
 
@@ -861,7 +874,7 @@ Artifacts view supports toggling between raw text and formatted markdown when vi
 
 The toggle button is accessible with `aria-pressed` for screen readers. Toggle state is scoped per-document, so switching between documents resets the view to raw mode.
 
-Project-file previews also support selection comments in both raw and rendered markdown modes. Select text, click **Add comment**, enter a short note, and Fusion opens **New Task** with a seeded description containing the file path, snippet, and comment.
+Project-file previews and selected Task Documents also support selection comments in both raw and rendered markdown modes. Select text, click **Add comment**, enter a short note, and Fusion opens **New Task** with a seeded description containing the file path or task-document key, snippet, and comment.
 
 ## Todo View
 

@@ -1069,6 +1069,7 @@ export interface TaskStoreEvents {
   "task:merged": [result: MergeResult];
   "settings:updated": [data: { settings: Settings; previous: Settings }];
   "artifact:registered": [artifact: Artifact];
+  "artifact:updated": [artifact: Artifact];
   "agent:log": [entry: AgentLogEntry];
   "merger:autostashOrphans": [data: {
     rootDir: string;
@@ -13157,6 +13158,10 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
     "image/jpeg",
     "image/gif",
     "image/webp",
+    // FNXC:ArtifactRegistry 2026-07-11-10:20: video attachments (screen recordings, demo reels) are first-class — they bridge into the artifact registry and stream through the range-aware media route.
+    "video/mp4",
+    "video/webm",
+    "video/quicktime",
     "text/plain",
     "text/markdown",
     "application/json",
@@ -13167,6 +13172,8 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
   ]);
 
   private static MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024; // 5MB
+  // FNXC:ArtifactRegistry 2026-07-11-10:20: videos get a larger cap than other attachments — a 5MB ceiling cannot hold even a short screen recording.
+  private static MAX_VIDEO_ATTACHMENT_SIZE = 100 * 1024 * 1024; // 100MB
 
   async addAttachment(
     id: string,
@@ -13179,9 +13186,10 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
         `Invalid mime type '${mimeType}'. Allowed: ${[...TaskStore.ALLOWED_MIME_TYPES].join(", ")}`,
       );
     }
-    if (content.length > TaskStore.MAX_ATTACHMENT_SIZE) {
+    const maxSize = mimeType.startsWith("video/") ? TaskStore.MAX_VIDEO_ATTACHMENT_SIZE : TaskStore.MAX_ATTACHMENT_SIZE;
+    if (content.length > maxSize) {
       throw new Error(
-        `File too large (${content.length} bytes). Maximum: ${TaskStore.MAX_ATTACHMENT_SIZE} bytes (5MB)`,
+        `File too large (${content.length} bytes). Maximum: ${maxSize} bytes (${maxSize / (1024 * 1024)}MB)`,
       );
     }
 
@@ -13215,19 +13223,23 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
       return attachment;
     });
 
-    if (mimeType.startsWith("image/")) {
+    if (mimeType.startsWith("image/") || mimeType.startsWith("video/")) {
       /*
        * FNXC:ArtifactRegistry 2026-07-10-00:00:
        * FN-7791 requires image task attachments created by agents, dashboard uploads, and route callers to surface as normal image artifacts. Register a URI-only artifact that points at the already-written attachment file so the proven artifact listing/SSE/media pipeline is reused without duplicating bytes or re-entering addAttachment.
        *
+       * FNXC:ArtifactRegistry 2026-07-11-10:20:
+       * Video attachments bridge the same way so uploaded/agent-attached recordings surface in the Artifacts gallery's Videos section and stream through the range-aware media route.
+       *
        * FNXC:ArtifactRegistry 2026-07-10-00:00:
        * registerArtifact() enforces the artifact-registry active/non-archived task rule (see registerArtifact's ACTIVE_TASKS_WHERE check), but addAttachment has never enforced that rule for attachments themselves — attachments may be added to archived or soft-deleted tasks. Without this guard, attaching an image to an archived/soft-deleted task would throw here AFTER the attachment file and task.json were already written, so the caller would see addAttachment fail even though the attachment actually succeeded. Bridging into the artifact registry is best-effort: swallow the expected archived/not-found rejection so addAttachment keeps its existing always-succeeds-for-a-valid-image contract, and only the artifact-gallery bridge is skipped.
        */
+      const bridgeType = mimeType.startsWith("video/") ? "video" as const : "image" as const;
       try {
         await this.registerArtifact({
-          type: "image",
+          type: bridgeType,
           title: attachment.originalName,
-          description: "Image task attachment",
+          description: bridgeType === "video" ? "Video task attachment" : "Image task attachment",
           mimeType,
           sizeBytes: attachment.size,
           uri: `attachments/${attachment.filename}`,
@@ -14018,6 +14030,49 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
     this.db.bumpLastModified();
     this.emit("artifact:registered", artifact);
     return artifact;
+  }
+
+  /**
+   * FNXC:ArtifactRegistry 2026-07-10-15:20:
+   * The dashboard Artifacts view lets operators edit any inline-content document artifact in place
+   * (title/description/content). Binary artifacts (rows with a uri) keep content non-editable because
+   * their payload lives on disk; only metadata edits are allowed there. Archived-task artifacts stay
+   * read-only, mirroring registerArtifact. Emits `artifact:updated` and bumps lastModified so open
+   * artifact lists live-refresh.
+   */
+  async updateArtifact(id: string, updates: { title?: string; description?: string; content?: string }): Promise<Artifact> {
+    const existing = await this.getArtifact(id);
+    if (!existing) {
+      throw new Error(`Artifact ${id} not found`);
+    }
+
+    if (existing.taskId && this.isTaskArchived(existing.taskId)) {
+      throw new Error(`Task ${existing.taskId} is archived — artifacts are read-only`);
+    }
+
+    if (updates.content !== undefined && existing.uri) {
+      throw new Error(`Artifact ${id} stores a binary payload; its content is not editable`);
+    }
+
+    const now = new Date().toISOString();
+    this.db.prepare(
+      "UPDATE artifacts SET title = ?, description = ?, content = ?, updatedAt = ? WHERE id = ?",
+    ).run(
+      updates.title !== undefined ? updates.title : existing.title,
+      updates.description !== undefined ? updates.description : existing.description ?? null,
+      updates.content !== undefined ? updates.content : existing.content ?? null,
+      now,
+      id,
+    );
+
+    const updated = await this.getArtifact(id);
+    if (!updated) {
+      throw new Error(`Failed to update artifact ${id}`);
+    }
+
+    this.db.bumpLastModified();
+    this.emit("artifact:updated", updated);
+    return updated;
   }
 
   /**

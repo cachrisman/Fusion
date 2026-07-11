@@ -3,7 +3,12 @@ import * as path from "node:path";
 import { readFile } from "node:fs/promises";
 import * as https from "node:https";
 import * as child_process from "node:child_process";
-import { choosePreferredStoredCredential, readStoredCredentialsFromAuthFile } from "@fusion/core";
+import {
+  choosePreferredStoredCredential,
+  GROK_CLI_PROVIDER_ID,
+  GROK_PROVIDER_REGISTRATION,
+  readStoredCredentialsFromAuthFile,
+} from "@fusion/core";
 import { getAuthFileCandidates } from "./auth-paths.js";
 
 function getHomeDir(): string {
@@ -1590,6 +1595,91 @@ async function fetchMinimaxUsage(authStorage?: AuthStorageLike): Promise<Provide
   return usage;
 }
 
+
+// ── Grok (xAI) fetcher ─────────────────────────────────────────────────────
+
+async function readGrokUserSettingsApiKey(): Promise<string | null> {
+  try {
+    const settingsPath = path.join(getHomeDir(), ".grok", "user-settings.json");
+    const raw = await readFile(settingsPath, "utf-8");
+    const parsed = JSON.parse(raw) as { apiKey?: unknown };
+    return typeof parsed?.apiKey === "string" && parsed.apiKey.trim().length > 0
+      ? parsed.apiKey.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readGrokApiKey(authStorage?: AuthStorageLike): Promise<string | null> {
+  const envKey = process.env.GROK_API_KEY;
+  if (typeof envKey === "string" && envKey.trim().length > 0) {
+    return envKey.trim();
+  }
+
+  const userSettingsKey = await readGrokUserSettingsApiKey();
+  if (userSettingsKey) {
+    return userSettingsKey;
+  }
+
+  return readConfiguredApiKey(GROK_CLI_PROVIDER_ID, authStorage);
+}
+
+async function fetchGrokUsage(authStorage?: AuthStorageLike): Promise<ProviderUsage> {
+  const usage: ProviderUsage = {
+    name: "Grok",
+    icon: "✖️",
+    status: "no-auth",
+    windows: [],
+  };
+
+  const apiKey = await readGrokApiKey(authStorage);
+  if (!apiKey) {
+    usage.error = "No Grok credentials — set GROK_API_KEY or add a key";
+    return usage;
+  }
+
+  try {
+    /*
+    FNXC:UsageProviders 2026-07-10-00:00:
+    xAI's inference key exposes GET /api-key as the verified auth-validity endpoint on the same direct provider base URL Fusion already uses for `grok-cli`. The public xAI API does not document a subscription reset-window or remaining-quota meter for inference keys, so this provider must remain an auth-validity card unless xAI returns confirmed consumption data in this response or standard rate-limit headers. Do not fabricate percent-used, reset timestamps, or UsageWindow entries from key metadata alone.
+    */
+    const res = await httpsRequest(`${GROK_PROVIDER_REGISTRATION.baseUrl}/api-key`, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+      },
+    });
+
+    if (res.status === 401 || res.status === 403) {
+      usage.status = "error";
+      usage.error = "Auth expired — check your Grok/xAI API key";
+      return usage;
+    }
+
+    if (res.status !== 200) {
+      usage.status = "error";
+      usage.error = `HTTP ${res.status}: ${res.body.slice(0, 200)}`;
+      return usage;
+    }
+
+    const data = res.body.trim().length > 0 ? JSON.parse(res.body) : {};
+    if (data?.api_key_blocked === true || data?.api_key_disabled === true || data?.team_blocked === true) {
+      usage.status = "error";
+      usage.error = "Grok/xAI API key is blocked or disabled";
+      return usage;
+    }
+
+    usage.status = "ok";
+  } catch (e: unknown) {
+    usage.status = "error";
+    usage.error = e instanceof Error ? e.message : "Failed to fetch";
+  }
+
+  return usage;
+}
+
 // ── Zai (Zhipu AI) fetcher ──────────────────────────────────────────────────
 
 async function fetchZaiUsage(authStorage?: AuthStorageLike): Promise<ProviderUsage> {
@@ -1937,13 +2027,14 @@ export async function fetchAllProviderUsage(authStorage?: AuthStorageLike): Prom
   }
 
   // Fetch all providers in parallel with per-provider timeout
-  // Currently includes: Claude, Codex, Gemini, Minimax, Zai, GitHub Copilot
+  // Currently includes: Claude, Codex, Gemini, Minimax, Zai, Grok, GitHub Copilot
   const results = await Promise.allSettled([
     withTimeout(fetchClaudeUsage(authStorage), "Claude", CLAUDE_FETCH_TIMEOUT_MS),
     withTimeout(fetchCodexUsage(), "Codex"),
     withTimeout(fetchGeminiUsage(), "Gemini"),
     withTimeout(fetchMinimaxUsage(authStorage), "Minimax"),
     withTimeout(fetchZaiUsage(authStorage), "Zai"),
+    withTimeout(fetchGrokUsage(authStorage), "Grok"),
     withTimeout(fetchGitHubCopilotUsage(), "GitHub Copilot"),
   ]);
 

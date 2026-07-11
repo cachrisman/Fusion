@@ -1452,6 +1452,22 @@ Documents are versioned — each write creates a new revision. Use meaningful ke
 
 Use \`fn_artifact_register\` to register multi-type artifacts for discovery across agents and tasks, \`fn_artifact_list\` to find registered artifacts by type/author/task/search, and \`fn_artifact_view\` to inspect artifact metadata plus inline content or URI references. Artifact registration sends a best-effort system inbox notification to the dashboard user; notification failures do not make registration fail.
 
+**IMPORTANT — Register visual and media deliverables as artifacts:** Whenever you produce a visual or media output — a screenshot of the app or a UI change, a wireframe, a design mockup, a diagram, a rendered chart, a before/after capture, a screen recording, an HTML prototype, or a PDF export — you MUST register it so it appears in the dashboard Artifacts gallery:
+
+1. Save the file to disk in your worktree (e.g. \`screenshots/after.png\`).
+2. Call \`fn_artifact_register(type="image", title="Settings modal — after fix", description="What this shows and why it matters", path="screenshots/after.png")\`.
+
+Relative paths resolve against your worktree, and the file is COPIED into managed storage — so register even files you do not commit, and register before the worktree is cleaned up. Artifacts you register are associated with this task automatically. Type cheat sheet:
+
+- **Images** (screenshots, wireframes, mockups, diagrams): \`type="image"\` with \`path\` — PNG, JPEG, GIF, WebP, or SVG.
+- **Videos** (screen recordings, demo reels): \`type="video"\` with \`path\` — MP4, WebM, or MOV. They play with seeking directly in the gallery.
+- **Audio**: \`type="audio"\` with \`path\` — MP3, WAV, or OGG.
+- **HTML mockups/prototypes**: \`type="document"\`, \`mimeType="text/html"\`, with inline \`content\` or \`path\` — they render as LIVE sandboxed web previews in the gallery, so a self-contained HTML file is a great way to deliver an interactive mock.
+- **PDFs** (spec exports, reports): \`type="document"\`, \`mimeType="application/pdf"\`, with \`path\` — they open in an embedded PDF viewer.
+- **Text/markdown deliverables**: \`type="document"\` with inline \`content\` — rendered as formatted markdown and editable by the user.
+
+Register visual evidence proactively for any UI-affecting task: capture at least one screenshot demonstrating the final result when the change has a visible surface. If the task asks for wireframes, mockups, designs, HTML prototypes, or recordings, the registered artifacts ARE the deliverable.
+
 **IMPORTANT — Save your deliverables as documents:** When your task produces written output (documentation, specifications, reports, API references, README updates, guides, or any other content), you MUST save that content as a task document using \`fn_task_document_write\`. Use a key that describes the deliverable (e.g., key="readme", key="api-docs", key="changelog"). Do this in addition to writing the file to disk — the document persists in the task for review even after the worktree is cleaned up.
 
 If the task's PROMPT.md includes a "Documentation Requirements" section listing files to update, save each updated file's final content as a task document with a matching key.
@@ -10509,12 +10525,16 @@ export class TaskExecutor {
         this.createTaskDocumentReadTool(task.id),
         // FNXC:FileScope 2026-07-08-22:40: let the coding agent extend its own declared ## File Scope at runtime (fn_task_file_scope_add) so edits beyond the initial scope are not stranded by the scope-aware squash merge.
         this.createTaskFileScopeAddTool(task.id),
-        // FNXC:ArtifactRegistry 2026-06-21-07:04: Artifact list/view are read-only discovery tools and must remain available even when the task has no assigned agent identity; only registration requires an authorId for persisted attribution and best-effort inbox notification.
         this.createArtifactListTool(),
         this.createArtifactViewTool(),
-        ...(assignedAgentId ? [
-          this.createArtifactRegisterTool(assignedAgentId),
-        ] : []),
+        /*
+        FNXC:ArtifactRegistry 2026-07-10-14:30:
+        fn_artifact_register was previously gated on assignedAgentId, but default ephemeral mode never
+        sets assignedAgentId on in-progress tasks — so executor agents never had the register tool at
+        all and agent-produced screenshots/wireframes could not reach the Artifacts gallery. Always
+        expose it, attributing ephemeral runs to the established "executor" fallback author.
+        */
+        this.createArtifactRegisterTool(assignedAgentId ?? "executor", task.id, worktreePath),
         this.createWorkflowListTool(),
         this.createWorkflowGetTool(),
         this.createWorkflowSelectTool(task.id),
@@ -12534,8 +12554,17 @@ export class TaskExecutor {
     return sharedCreateTaskFileScopeAddTool(this.store, taskId, this.getRunContextFor(taskId));
   }
 
-  private createArtifactRegisterTool(authorId: string): ToolDefinition {
-    return sharedCreateArtifactRegisterTool(this.store, authorId, this.options.messageStore);
+  /*
+  FNXC:ArtifactRegistry 2026-07-10-14:30:
+  Executor-lane registration anchors relative `path` payloads at the task worktree (where the agent
+  saves screenshots/wireframes/mocks) and defaults taskId to the executing task so agent-produced
+  media surfaces in the per-task Artifacts tab without the agent having to repeat its own task id.
+  */
+  private createArtifactRegisterTool(authorId: string, taskId: string, worktreePath: string): ToolDefinition {
+    return sharedCreateArtifactRegisterTool(this.store, authorId, this.options.messageStore, {
+      baseDir: worktreePath,
+      defaultTaskId: taskId,
+    });
   }
 
   private createArtifactListTool(): ToolDefinition {

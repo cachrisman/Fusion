@@ -91,6 +91,7 @@ describe("usage", () => {
     coreInteropMocks.readStoredCredentialsFromAuthFile.mockReturnValue({});
     vi.stubEnv("HOME", "/home/testuser");
     vi.stubEnv("CODEX_HOME", "");
+    vi.stubEnv("GROK_API_KEY", "");
   });
 
   afterEach(() => {
@@ -3249,6 +3250,162 @@ describe("usage", () => {
       const resetAtDate = new Date(modelWindow.resetAt!);
       const expectedMs = Date.now() + remainsTimeMs;
       expect(Math.abs(resetAtDate.getTime() - expectedMs)).toBeLessThan(1000);
+    });
+  });
+
+  describe("Grok provider", () => {
+    const mockGrokApiKeyResponse = (statusCode: number, body: unknown) => {
+      const mockReq = { on: vi.fn(), write: vi.fn(), end: vi.fn() };
+      mockRequest.mockImplementation((options: any, callback: any) => {
+        expect(options.hostname).toBe("api.x.ai");
+        expect(options.path).toBe("/v1/api-key");
+        const responseBody = typeof body === "string" ? body : JSON.stringify(body);
+        const mockRes = {
+          statusCode,
+          headers: {},
+          on: vi.fn((event: string, handler: any) => {
+            if (event === "data") handler(Buffer.from(responseBody));
+            if (event === "end") handler();
+          }),
+        };
+        callback(mockRes);
+        return mockReq;
+      });
+    };
+
+    it("omits Grok when no env, user settings, or auth-file key exists", async () => {
+      mockReadFile.mockImplementation(async () => {
+        return Promise.reject(new Error("File not found"));
+      });
+      mockExecFileSync.mockImplementation(() => {
+        throw new Error("Keychain item not found");
+      });
+
+      const providers = await fetchAllProviderUsage();
+      const grok = providers.find((p) => p.name === "Grok");
+
+      expect(grok).toBeUndefined();
+    });
+
+    it("uses GROK_API_KEY env first and renders a validity-only ok card", async () => {
+      vi.stubEnv("GROK_API_KEY", "env-grok-key");
+      mockReadFile.mockImplementation(async () => {
+        return Promise.reject(new Error("File not found"));
+      });
+      mockExecFileSync.mockImplementation(() => {
+        throw new Error("Keychain item not found");
+      });
+      mockGrokApiKeyResponse(200, {
+        api_key_blocked: false,
+        api_key_disabled: false,
+        team_blocked: false,
+      });
+
+      const providers = await fetchAllProviderUsage();
+      const grok = providers.find((p) => p.name === "Grok")!;
+
+      expect(grok.status).toBe("ok");
+      expect(grok.icon).toBe("✖️");
+      expect(grok.windows).toEqual([]);
+      expect(mockRequest).toHaveBeenCalledTimes(1);
+      expect(mockRequest.mock.calls[0][0].headers.authorization).toBe("Bearer env-grok-key");
+      expect(mockReadFile.mock.calls.every(([filePath]) => !String(filePath).includes(".grok/user-settings.json"))).toBe(true);
+    });
+
+    it("reads Grok API key from ~/.grok/user-settings.json before auth files", async () => {
+      mockReadFile.mockImplementation((filePath: string) => {
+        if (filePath.includes(".grok/user-settings.json")) {
+          return JSON.stringify({ apiKey: "user-settings-grok-key" });
+        }
+        if (filePath.includes(".pi/agent/auth.json")) {
+          return JSON.stringify({ "grok-cli": { type: "api_key", key: "auth-file-grok-key" } });
+        }
+        return Promise.reject(new Error("File not found"));
+      });
+      mockExecFileSync.mockImplementation(() => {
+        throw new Error("Keychain item not found");
+      });
+      mockGrokApiKeyResponse(200, { api_key_blocked: false });
+
+      const providers = await fetchAllProviderUsage();
+      const grok = providers.find((p) => p.name === "Grok")!;
+
+      expect(grok.status).toBe("ok");
+      expect(mockRequest.mock.calls[0][0].headers.authorization).toBe("Bearer user-settings-grok-key");
+    });
+
+    it("falls back to grok-cli auth storage when env and user settings are absent", async () => {
+      mockReadFile.mockImplementation(async () => {
+        return Promise.reject(new Error("File not found"));
+      });
+      mockExecFileSync.mockImplementation(() => {
+        throw new Error("Keychain item not found");
+      });
+      mockGrokApiKeyResponse(200, { api_key_blocked: false });
+
+      const providers = await fetchAllProviderUsage({
+        reload: vi.fn(),
+        hasAuth: vi.fn(() => true),
+        getApiKey: vi.fn((provider: string) =>
+          provider === "grok-cli" ? "auth-storage-grok-key" : null
+        ),
+      });
+      const grok = providers.find((p) => p.name === "Grok")!;
+
+      expect(grok.status).toBe("ok");
+      expect(mockRequest.mock.calls[0][0].headers.authorization).toBe("Bearer auth-storage-grok-key");
+    });
+
+    it("keeps Grok visible as error for 401/403 auth failures", async () => {
+      vi.stubEnv("GROK_API_KEY", "expired-grok-key");
+      mockReadFile.mockImplementation(async () => {
+        return Promise.reject(new Error("File not found"));
+      });
+      mockExecFileSync.mockImplementation(() => {
+        throw new Error("Keychain item not found");
+      });
+      mockGrokApiKeyResponse(401, { error: "unauthorized" });
+
+      const providers = await fetchAllProviderUsage();
+      const grok = providers.find((p) => p.name === "Grok")!;
+
+      expect(grok).toBeDefined();
+      expect(grok.status).toBe("error");
+      expect(grok.error).toContain("Auth expired");
+    });
+
+    it("keeps Grok visible as error when xAI reports the key is blocked", async () => {
+      vi.stubEnv("GROK_API_KEY", "blocked-grok-key");
+      mockReadFile.mockImplementation(async () => {
+        return Promise.reject(new Error("File not found"));
+      });
+      mockExecFileSync.mockImplementation(() => {
+        throw new Error("Keychain item not found");
+      });
+      mockGrokApiKeyResponse(200, { api_key_blocked: true });
+
+      const providers = await fetchAllProviderUsage();
+      const grok = providers.find((p) => p.name === "Grok")!;
+
+      expect(grok.status).toBe("error");
+      expect(grok.error).toContain("blocked or disabled");
+    });
+
+    it("keeps Grok visible as error for non-200 responses", async () => {
+      vi.stubEnv("GROK_API_KEY", "server-error-grok-key");
+      mockReadFile.mockImplementation(async () => {
+        return Promise.reject(new Error("File not found"));
+      });
+      mockExecFileSync.mockImplementation(() => {
+        throw new Error("Keychain item not found");
+      });
+      mockGrokApiKeyResponse(500, { error: "server error" });
+
+      const providers = await fetchAllProviderUsage();
+      const grok = providers.find((p) => p.name === "Grok")!;
+
+      expect(grok.status).toBe("error");
+      expect(grok.error).toContain("HTTP 500");
     });
   });
 

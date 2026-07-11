@@ -112,6 +112,12 @@ export function resolveTaskListFormatter(core: { formatTaskListText?: unknown })
 /*
 FNXC:McpServer 2026-07-10-21:00:
 Exported for reuse by the MCP operator server's fn_task_show tool. No behavior change to existing extension.ts callers.
+
+FNXC:McpServer 2026-07-11-09:20:
+Exported (not just used internally) so packages/cli/src/mcp-server/tools.ts
+can reuse the exact same helper the pi-extension `fn_*` tools use, avoiding
+a duplicate implementation drifting out of sync (per FUSI-017's recorded
+"import mcp-server dependency content from main" decision).
 */
 export function columnLabel(column: ColumnId): string {
   return (COLUMN_LABELS as Record<string, string>)[column] ?? column;
