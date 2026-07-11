@@ -113,14 +113,24 @@ export async function runInit(options: InitOptions = {}): Promise<void> {
 
   // Add local Fusion/Pi storage directories to .gitignore
   await addLocalStorageToGitignore(cwd);
-  await warnIfQmdMissing();
 
+  /**
+   * FNXC:ProjectMemory 2026-07-11-09:15:
+   * Durable board-DB creation must happen on the critical path BEFORE the
+   * informational qmd probe (FUSI-023). The qmd probe (`warnIfQmdMissing` →
+   * `isQmdAvailable`) is defense-in-depth non-fatal even after the executor fix
+   * in memory-backend.ts's `getDefaultExecFileAsync`: if it ever throws or hangs
+   * again for any reason, `fn init` must still have already written `fusion.db`
+   * and moved on to central registration rather than leaving `.fusion/` empty.
+   */
   // Create fusion.db (empty SQLite file)
   if (!existsSync(dbPath)) {
     // A zero-byte bootstrap file is a valid SQLite starting point.
     writeFileSync(dbPath, "");
     console.log(`  ✓ Created fusion.db`);
   }
+
+  await warnIfQmdMissingSafe();
 
   const bundledSkillInstall = installBundledFusionSkill();
   logBundledSkillInstallResults(bundledSkillInstall.results);
@@ -319,6 +329,23 @@ async function warnIfQmdMissing(): Promise<void> {
 
   console.log(`  ⚠ qmd not found; memory search will use local file fallback`);
   console.log(`    Install qmd for indexed retrieval: ${QMD_INSTALL_COMMAND}`);
+}
+
+/**
+ * FNXC:ProjectMemory 2026-07-11-09:15:
+ * Defense-in-depth wrapper (FUSI-023): the qmd probe is purely informational and
+ * must never gate or abort `fn init`. `writeFileSync(dbPath)` and central
+ * registration already run before this is called; if `warnIfQmdMissing()` throws
+ * for any reason (e.g. a future qmd CLI change), swallow it and report the local
+ * fallback so init still completes and exits 0 with a valid `fusion.db`.
+ */
+async function warnIfQmdMissingSafe(): Promise<void> {
+  try {
+    await warnIfQmdMissing();
+  } catch (err) {
+    console.log(`  ⚠ qmd probe failed; memory search will use local file fallback`);
+    console.log(`    ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 function logBundledSkillInstallResults(results: SkillInstallResult[]): void {

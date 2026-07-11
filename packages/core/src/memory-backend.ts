@@ -998,9 +998,11 @@ async function searchWithQmd(rootDir: string, options: MemorySearchOptions): Pro
     // (see getDefaultExecFileAsync's doc comment / .fusion/memory/MEMORY.md),
     // `promisify(execFile)`'s internal stdout/stderr buffering re-refs the pipe
     // handles on a later tick, so even a manual `.unref()` wouldn't have stuck.
-    // Reuse the same hardened, spawn-based, synchronously-unref'd executor FN-7706
-    // established for the refresh path instead of carrying a second leaky copy.
-    const execFileAsync = await getDefaultExecFileAsync();
+    // Reuse the same hardened, spawn-based executor FN-7706 established for the
+    // refresh path instead of carrying a second leaky copy. This call is awaited
+    // (foreground), so it must opt in to keepProcessAlive (FUSI-023) — the
+    // background refresh scheduled just below stays on the default unref'd path.
+    const execFileAsync = await getDefaultExecFileAsync({ keepProcessAlive: true });
     await ensureQmdProjectMemoryCollection(rootDir, execFileAsync);
     scheduleQmdProjectMemoryRefresh(rootDir);
     const args = buildQmdSearchArgs(rootDir, options);
@@ -1110,33 +1112,57 @@ interface QmdExecError extends Error {
   stderr?: string;
 }
 
-async function getDefaultExecFileAsync(): Promise<ExecFileAsync> {
+/**
+ * FNXC:ProjectMemory 2026-07-11-09:15:
+ * `getDefaultExecFileAsync({ keepProcessAlive: true })` skips the synchronous
+ * unref of the child + stdio + timeout handle. Requirement (FUSI-023): awaited
+ * FOREGROUND qmd calls — `isQmdAvailable()`, `searchWithQmd(...)`, `installQmd()`
+ * — must keep the event loop ref'd until the child's `close`/`error` event fires,
+ * or a short-lived CLI process (e.g. non-interactive `fn init`) can have Node drain
+ * the event loop and exit before the awaited promise ever settles. Repro: `fn init`
+ * in a non-TTY shell with `qmd` on PATH printed its early progress lines, then died
+ * with "Detected unsettled top-level await at bin.mjs:20" and exit code 13, leaving
+ * `.fusion/` without a `fusion.db` because the qmd probe never resolved.
+ * The default (no options / `keepProcessAlive: false`) stays fully unref'd — this
+ * preserves the FN-7706 fire-and-forget background refresh semantics
+ * (`scheduleQmdProjectMemoryRefresh` / `scheduleQmdAgentMemoryRefresh` /
+ * `scheduleQmdInstallAndRefresh`), which must never hold a short-lived caller open
+ * for the child's full runtime.
+ */
+async function getDefaultExecFileAsync(options?: { keepProcessAlive?: boolean }): Promise<ExecFileAsync> {
   const { spawn } = await import("node:child_process");
+  const keepProcessAlive = options?.keepProcessAlive === true;
 
-  return (file, args, options) =>
+  return (file, args, execOptions) =>
     new Promise<{ stdout: string; stderr: string }>((resolvePromise, reject) => {
       const child = spawn(file, args as string[], {
-        cwd: options?.cwd,
+        cwd: execOptions?.cwd,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });
-      // FNXC:ProjectMemory 2026-07-08-00:00: unref synchronously right after spawn —
-      // see the doc comment above this function for why this must NOT go through
-      // promisify(execFile).
-      unrefQmdChildProcess(child);
+      // FNXC:ProjectMemory 2026-07-08-00:00 / 2026-07-11-09:15: unref synchronously
+      // right after spawn for the fire-and-forget background path — see the doc
+      // comment above this function for why this must NOT go through
+      // promisify(execFile). Foreground callers opt out via keepProcessAlive so the
+      // awaited promise settles before the loop drains.
+      if (!keepProcessAlive) {
+        unrefQmdChildProcess(child);
+      }
 
       let stdout = "";
       let stderr = "";
       let settled = false;
       let killedForMaxBuffer = false;
-      const maxBuffer = options?.maxBuffer;
+      const maxBuffer = execOptions?.maxBuffer;
 
-      const timeoutHandle = options?.timeout
+      const timeoutHandle = execOptions?.timeout
         ? setTimeout(() => {
             child.kill("SIGTERM");
-          }, options.timeout)
+          }, execOptions.timeout)
         : undefined;
-      timeoutHandle?.unref?.();
+      if (!keepProcessAlive) {
+        timeoutHandle?.unref?.();
+      }
 
       const checkMaxBuffer = () => {
         if (maxBuffer && !killedForMaxBuffer && (stdout.length > maxBuffer || stderr.length > maxBuffer)) {
@@ -1301,7 +1327,10 @@ export function scheduleQmdAgentMemoryRefresh(rootDir: string, agentId: string):
 
 export async function isQmdAvailable(): Promise<boolean> {
   try {
-    const execFileAsync = await getDefaultExecFileAsync();
+    // Awaited foreground probe (FUSI-023) — keepProcessAlive so a short-lived caller
+    // (e.g. non-interactive `fn init`) doesn't have the event loop drain out from
+    // under this promise before the child's --help invocation settles.
+    const execFileAsync = await getDefaultExecFileAsync({ keepProcessAlive: true });
     await execFileAsync("qmd", ["--help"], {
       timeout: 3000,
       maxBuffer: 128 * 1024,
@@ -1315,7 +1344,9 @@ export async function isQmdAvailable(): Promise<boolean> {
 export async function installQmd(
   options?: { execFileAsync?: ExecFileAsync },
 ): Promise<boolean> {
-  const execFileAsync = options?.execFileAsync ?? await getDefaultExecFileAsync();
+  // Awaited foreground install (FUSI-023) — keepProcessAlive on the default
+  // executor; injected mock execFileAsync implementations are untouched.
+  const execFileAsync = options?.execFileAsync ?? await getDefaultExecFileAsync({ keepProcessAlive: true });
   const [command, ...args] = QMD_INSTALL_COMMAND.split(" ");
   if (!command || args.length === 0) {
     throw new MemoryBackendError("BACKEND_UNAVAILABLE", "qmd install command is not configured", "qmd");

@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { rm, mkdir } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import {
   MemoryBackendError,
   FileMemoryBackend,
@@ -1184,4 +1186,93 @@ describe("memory-backend", () => {
       expect(existsSync(longTermMemoryPath(nestedDir))).toBe(true);
     });
   });
+});
+
+/**
+ * FNXC:ProjectMemory 2026-07-11-09:15:
+ * Regression coverage for FUSI-023: the AWAITED foreground `isQmdAvailable()`
+ * probe (used by `runInit()` -> `warnIfQmdMissing()`) must keep the event loop
+ * alive until the spawned qmd child's `close`/`error` event fires, in BOTH the
+ * qmd-installed (exit 0) and qmd-absent (spawn error) states — otherwise a
+ * short-lived caller like non-interactive `fn init` can have Node drain the loop
+ * and exit 13 ("unsettled top-level await") with the promise still pending. This
+ * mirrors the FN-7706/FN-7707 fixture-based symptom-test pattern in
+ * qmd-refresh-unref.test.ts / qmd-search-unref.test.ts, which already proves the
+ * fire-and-forget BACKGROUND refresh path stays unref'd.
+ */
+describe("isQmdAvailable keeps a short-lived foreground caller alive until settlement (symptom)", () => {
+  const tempDirs: string[] = [];
+  const tsxPackageJsonPath = createRequire(import.meta.url).resolve("tsx/package.json");
+  const tsxCliPath = join(tsxPackageJsonPath, "..", "dist", "cli.mjs");
+
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function writeFastQmdStub(stubDir: string): void {
+    const stubPath = join(stubDir, "qmd");
+    // Use `#!/bin/sh` (an absolute path) rather than `#!/usr/bin/env bash` — the
+    // fixture below deliberately scopes the child's PATH to the stub dir only, and
+    // `env` resolving "bash" would itself need a PATH lookup that we've removed.
+    writeFileSync(
+      stubPath,
+      ["#!/bin/sh", 'if [ "$1" = "--help" ]; then', "  exit 0", "fi", "exit 1", ""].join("\n"),
+      "utf8",
+    );
+    chmodSync(stubPath, 0o755);
+  }
+
+  async function runFixture(pathDirOnly: string): Promise<{ code: number | null; stdout: string }> {
+    const fixturePath = join(import.meta.dirname, "fixtures", "qmd-available-keepalive-fixture.mjs");
+    return new Promise((resolvePromise, reject) => {
+      let stdout = "";
+      const child = spawn(process.execPath, [tsxCliPath, fixturePath], {
+        env: {
+          ...process.env,
+          // Deliberately scope PATH to ONLY the given directory (no fallback to the
+          // real process PATH) so a real `qmd` installed on the dev/CI host cannot
+          // resolve and mask the intended "qmd absent" branch.
+          PATH: pathDirOnly,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      child.stdout.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+      child.on("error", reject);
+      child.on("exit", (code) => {
+        resolvePromise({ code, stdout });
+      });
+    });
+  }
+
+  it("qmd available: the fixture process waits for the child to settle instead of exiting mid-await", async () => {
+    const stubDir = mkdtempSync(join(tmpdir(), "fusi-023-fg-stub-"));
+    tempDirs.push(stubDir);
+    writeFastQmdStub(stubDir);
+
+    const { code, stdout } = await runFixture(stubDir);
+
+    expect(stdout).toContain("qmd-available-keepalive-fixture:started");
+    // If the executor incorrectly unrefs the awaited foreground call, Node can
+    // drain the loop and exit 13 before this marker is ever printed — this is
+    // exactly the FUSI-023 symptom, reproduced here without needing the full CLI.
+    expect(stdout).toContain("qmd-available-keepalive-fixture:resolved:true");
+    expect(code).toBe(0);
+  }, 15_000);
+
+  it("qmd absent: the fixture process still waits for the spawn error to settle and exits cleanly", async () => {
+    // Empty stub dir on PATH so `qmd` cannot resolve at all — the executor's spawn
+    // rejects via the child's "error" event rather than "close".
+    const emptyStubDir = mkdtempSync(join(tmpdir(), "fusi-023-fg-empty-"));
+    tempDirs.push(emptyStubDir);
+
+    const { code, stdout } = await runFixture(emptyStubDir);
+
+    expect(stdout).toContain("qmd-available-keepalive-fixture:started");
+    expect(stdout).toContain("qmd-available-keepalive-fixture:resolved:false");
+    expect(code).toBe(0);
+  }, 15_000);
 });

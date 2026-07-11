@@ -34,8 +34,9 @@ const mockGetProjectByPath = vi.fn();
 const mockRegisterProject = vi.fn();
 const mockEnsureProjectForPath = vi.fn();
 const mockUpdateProject = vi.fn().mockResolvedValue({});
-const { mockIsValidSqliteDatabaseFile } = vi.hoisted(() => ({
+const { mockIsValidSqliteDatabaseFile, mockIsQmdAvailable } = vi.hoisted(() => ({
   mockIsValidSqliteDatabaseFile: vi.fn(),
+  mockIsQmdAvailable: vi.fn(() => Promise.resolve(true)),
 }));
 
 vi.mock("@fusion/core", async () => {
@@ -50,7 +51,7 @@ vi.mock("@fusion/core", async () => {
       ensureProjectForPath: mockEnsureProjectForPath,
       updateProject: mockUpdateProject,
     })),
-    isQmdAvailable: vi.fn(() => Promise.resolve(true)),
+    isQmdAvailable: mockIsQmdAvailable,
     QMD_INSTALL_COMMAND: "bun install -g @tobilu/qmd",
     resolveGlobalDir: vi.fn(),
     isValidSqliteDatabaseFile: (...args: Parameters<typeof mockIsValidSqliteDatabaseFile>) =>
@@ -122,6 +123,8 @@ describe("init command", () => {
       const content = readFileSync(dbPath);
       return content.subarray(0, 15).toString("utf8") === "SQLite format 3";
     });
+    mockIsQmdAvailable.mockReset();
+    mockIsQmdAvailable.mockResolvedValue(true);
   });
 
   afterEach(() => {
@@ -161,6 +164,36 @@ describe("init command", () => {
 
     expect(existsSync(dbPath)).toBe(true);
     expect(statSync(dbPath).size).toBeGreaterThan(0);
+  });
+
+  it("creates fusion.db and registers even when the qmd probe throws (FUSI-023: probe must never gate board-DB creation)", async () => {
+    const dbPath = join(tempProjectDir, ".fusion", "fusion.db");
+    mockIsQmdAvailable.mockRejectedValue(new Error("simulated qmd probe failure"));
+
+    await runInit({ path: tempProjectDir });
+
+    expect(existsSync(dbPath)).toBe(true);
+    expect(statSync(dbPath).size).toBeGreaterThan(0);
+    expect(mockEnsureProjectForPath).toHaveBeenCalled();
+  });
+
+  it("creates fusion.db and registers even when the qmd probe is slow (FUSI-023: probe must never gate board-DB creation)", async () => {
+    const dbPath = join(tempProjectDir, ".fusion", "fusion.db");
+    let dbExistedWhenProbeRan = false;
+    mockIsQmdAvailable.mockImplementation(async () => {
+      // By the time the (deliberately slow) qmd probe actually runs, fusion.db
+      // must already be on disk — proving runInit's critical path writes the
+      // board DB and registers BEFORE the informational qmd probe, not after.
+      dbExistedWhenProbeRan = existsSync(dbPath);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+      return true;
+    });
+
+    await runInit({ path: tempProjectDir });
+
+    expect(dbExistedWhenProbeRan).toBe(true);
+    expect(existsSync(dbPath)).toBe(true);
+    expect(mockEnsureProjectForPath).toHaveBeenCalled();
   });
 
   it("should reject existing invalid fusion.db files", async () => {
