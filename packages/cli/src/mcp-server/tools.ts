@@ -217,8 +217,6 @@ import {
   buildManualRetryResetPatch,
   isEphemeralAgent,
   RESEARCH_RUN_STATUSES,
-  registerBuiltInZaiProvider,
-  registerBuiltInGrokProvider,
   aggregateTokenAnalytics,
   type Task,
   type ColumnId,
@@ -233,7 +231,13 @@ import {
 import { scaffoldFusionProject } from "../commands/init.js";
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { workflowDeleteParams, isInReviewMissingWorktreeSessionStartFailure, traitListParams, createFusionAuthStorage } from "@fusion/engine";
+import {
+  workflowDeleteParams,
+  isInReviewMissingWorktreeSessionStartFailure,
+  traitListParams,
+  createFusionAuthStorage,
+  buildExecutionModelRegistry,
+} from "@fusion/engine";
 import {
   createWorkflowAuthoringTools,
   workflowListParams,
@@ -248,8 +252,6 @@ import {
   workflowRemoveEdgeParams,
 } from "@fusion/engine";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { getModelRegistryModelsPath } from "../commands/auth-paths.js";
 import { fetchAllProviderUsage, type ProviderUsage, type UsageWindow } from "@fusion/dashboard";
 import {
   getFusionDir,
@@ -1075,43 +1077,51 @@ const fnAgentSetInstructions: McpToolDefinition = {
 // ── Model registry tools (read-only) ────────────────────────────────────────
 
 /*
-FNXC:McpServer 2026-07-11-16:00:
-FUSI-052: fn_models_list is net-new (no pi-extension precedent) — it closes
-the "which provider/model ids are actually registered" discoverability gap
-(the motivating cursor-cli "not found in registry" incident, and FUSI-050).
-Constructs a ModelRegistry the SAME way packages/cli/src/commands/dashboard.ts
-(~1507) and daemon.ts/serve.ts do: `ModelRegistry.create(createFusionAuthStorage(),
-getModelRegistryModelsPath())`, then `registerBuiltInZaiProvider`/
-`registerBuiltInGrokProvider`. IMPORTANT: unlike daemon.ts's `console.log`
-provider log callback, this handler's callback MUST be stderr-or-no-op —
-fn mcp serve's stdout IS the MCP protocol transport channel, so a
-console.log here would corrupt every in-flight response. Read-only,
-base-tier; response walked through redactSecretsDeep defensively (model
-records are not expected to carry secret material, but the registry is
-free-form enough that a future field could).
+FNXC:McpServer 2026-07-11-19:30:
+FUSI-067: fn_models_list originally built a BUILT-IN-ONLY ModelRegistry
+(`ModelRegistry.create(...)` + `registerBuiltInZaiProvider`/
+`registerBuiltInGrokProvider`), so it never ran plugin-runtime provider
+discovery (cursor-cli, hermes, openclaw, paperclip, droid, acp) and
+under-reported the resolvable model set — recreating the exact
+"Configured model X was not found in the pi model registry" confusion
+FUSI-050/FUSI-052 aimed to prevent. Fixed by reusing `@fusion/engine`'s
+`buildExecutionModelRegistry(cwd)` (introduced by FUSI-050 for save-time
+model-slot validation): it runs `registerExtensionProviders` (the SAME
+plugin-runtime discovery path `createFnAgent` uses at execution time),
+registers custom providers, and merges supplemental Anthropic/OpenAI-Codex
+models — so this tool now enumerates the SAME resolvable provider set the
+engine execution path resolves, without duplicating any of that
+registration logic here. Graceful degradation is inherited for free:
+`buildExecutionModelRegistry` registers each provider inside its own
+try/catch and logs a warning on failure, so an absent/unauthenticated
+plugin yields zero rows for THAT provider only — it never fails the whole
+list. Stdout stays clean: `registerExtensionProviders` and the supplemental
+merges route all logging through `piLog`/`extensionsLog` (stderr loggers),
+never `console.log` — critical here because fn mcp serve's stdout IS the
+MCP JSON-RPC transport channel, so any stdout write would corrupt every
+in-flight response. Read-only, base-tier; response walked through
+redactSecretsDeep defensively (model records are not expected to carry
+secret material, but the registry is free-form enough that a future field
+could).
 */
 const fnModelsList: McpToolDefinition = {
   name: "fn_models_list",
   description:
-    "List the provider/model ids currently registered in Fusion's model registry (built-in models plus any " +
-    "configured custom/provider models). Use this to discover valid model ids before setting a workflow's " +
-    "per-phase model lane via fn_workflow_settings, or an agent's model configuration.",
+    "List the provider/model ids in Fusion's resolvable execution model registry — the SAME set createFnAgent " +
+    "resolves against at runtime, including built-in providers, configured custom/provider models, and any " +
+    "plugin-runtime providers (e.g. cursor-cli, hermes, openclaw, paperclip, droid, acp) whose plugin is " +
+    "installed and enabled for this project. An absent/unauthenticated plugin simply contributes zero models " +
+    "for that provider rather than failing the call. Use this to discover valid model ids before setting a " +
+    "workflow's per-phase model lane via fn_workflow_settings, or an agent's model configuration.",
   inputSchema: {
     type: "object",
     properties: {
-      provider: { type: "string", description: "Optional provider id to narrow the list (e.g. 'anthropic', 'zai', 'grok-cli')" },
+      provider: { type: "string", description: "Optional provider id to narrow the list (e.g. 'anthropic', 'zai', 'grok-cli', 'cursor-cli')" },
     },
   },
-  async handler(_store, args) {
+  async handler(_store, args, ctx) {
     try {
-      const authStorage = createFusionAuthStorage();
-      const modelRegistry = ModelRegistry.create(authStorage, getModelRegistryModelsPath());
-      // FNXC:McpServer 2026-07-11-16:00: stderr-or-no-op ONLY — stdout is the MCP protocol channel.
-      const logCb = (message: string) => {
-        console.error(`[fn mcp serve] fn_models_list: ${message}`);
-      };
-      registerBuiltInZaiProvider(modelRegistry, logCb);
-      registerBuiltInGrokProvider(modelRegistry, logCb);
+      const modelRegistry = await buildExecutionModelRegistry(ctx.cwd);
 
       const providerFilter = typeof args.provider === "string" ? args.provider.trim() : undefined;
       const all = modelRegistry

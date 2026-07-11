@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore, AgentStore, type WorkflowIr } from "@fusion/core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { ModelRegistry, AuthStorage } from "@earendil-works/pi-coding-agent";
 
 /*
 FNXC:McpServer 2026-07-11-10:00:
@@ -119,6 +120,35 @@ const { fakeProviderUsageResult } = vi.hoisted(() => ({
 vi.mock("@fusion/dashboard", async () => {
   const actual = await vi.importActual<typeof import("@fusion/dashboard")>("@fusion/dashboard");
   return { ...actual, fetchAllProviderUsage: vi.fn(async () => fakeProviderUsageResult.value) };
+});
+
+/*
+FNXC:McpServer 2026-07-11-19:30:
+FUSI-067 regression coverage: fn_models_list now sources its registry from
+`@fusion/engine`'s `buildExecutionModelRegistry(cwd)`, which internally runs
+plugin-runtime discovery (real filesystem/plugin scanning) and reads the
+SAME real home-dir `~/.fusion/agent/models.json` state the memory note
+above flags as environment-dependent. Tests that need to PROVE a
+plugin-runtime provider surfaces (or is absent) stub this seam directly
+rather than installing/authenticating a real plugin — `fakeExecutionModelRegistryOverride`
+defaults to `undefined` (pass through to the real `buildExecutionModelRegistry`,
+exercised by the pre-existing built-in/provider-filter tests below) and is
+set per-test to a synthetic `ModelRegistry.inMemory(...)` instance so the
+omission-then-fix invariant can be asserted deterministically.
+*/
+const { fakeExecutionModelRegistryOverride } = vi.hoisted(() => ({
+  fakeExecutionModelRegistryOverride: { value: undefined as unknown },
+}));
+
+vi.mock("@fusion/engine", async () => {
+  const actual = await vi.importActual<typeof import("@fusion/engine")>("@fusion/engine");
+  return {
+    ...actual,
+    buildExecutionModelRegistry: vi.fn(async (cwd: string) => {
+      if (fakeExecutionModelRegistryOverride.value !== undefined) return fakeExecutionModelRegistryOverride.value;
+      return actual.buildExecutionModelRegistry(cwd);
+    }),
+  };
 });
 
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -320,6 +350,7 @@ describe("fn mcp serve — in-memory server smoke test", () => {
   beforeEach(async () => {
     fakeCentralRegistry.clear();
     fakeProviderUsageResult.value = [];
+    fakeExecutionModelRegistryOverride.value = undefined;
     tmpDir = await mkdtemp(join(tmpdir(), "fn-fusi-001-mcp-"));
     await mkdir(join(tmpDir, ".fusion"), { recursive: true });
     store = new TaskStore(tmpDir);
@@ -2228,6 +2259,84 @@ describe("fn mcp serve — in-memory server smoke test", () => {
         const none = await client.callTool({ name: "fn_models_list", arguments: { provider: "definitely-not-a-real-provider" } });
         const noneModels = (none.structuredContent as { models?: unknown[] } | undefined)?.models ?? [];
         expect(noneModels).toEqual([]);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    /*
+    FNXC:McpServer 2026-07-11-19:30:
+    FUSI-067 symptom verification. Original symptom: fn_models_list built its
+    own built-in-only ModelRegistry and never ran plugin-runtime provider
+    discovery, so an installed/enabled plugin-runtime provider (e.g.
+    cursor-cli) was invisible to the tool. Reproduction below stubs the
+    `buildExecutionModelRegistry` engine seam with a synthetic registry that
+    HAS a `cursor-cli` model registered (mirroring what plugin-runtime
+    discovery would produce for an installed+enabled plugin) and asserts it
+    surfaces in `fn_models_list` output — the assertion that is gone once the
+    fix lands (on the pre-fix built-in-only construction, this model could
+    never appear since it never runs plugin-runtime discovery at all).
+    */
+    it("fn_models_list surfaces a plugin-runtime provider (cursor-cli) when the execution registry resolves it, without writing to stdout", async () => {
+      const fakeAuthStorage = AuthStorage.inMemory();
+      const fakeRegistry = ModelRegistry.inMemory(fakeAuthStorage);
+      fakeRegistry.registerProvider("cursor-cli", {
+        baseUrl: "http://localhost:0/fake-cursor-cli",
+        apiKey: "fake-cursor-cli-key",
+        models: [
+          {
+            id: "cursor-fast",
+            name: "Cursor Fast",
+            api: "openai-completions",
+            reasoning: false,
+            input: ["text"],
+            cost: { input: 0, output: 0 },
+            contextWindow: 128000,
+            maxTokens: 8192,
+          },
+        ],
+      });
+      fakeExecutionModelRegistryOverride.value = fakeRegistry;
+
+      const { client, mcpServer } = await connectClient();
+      const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      try {
+        const all = await client.callTool({ name: "fn_models_list", arguments: {} });
+        expect(all.isError).not.toBe(true);
+        const allModels = (all.structuredContent as { models?: Array<{ id: string; provider: string }> } | undefined)?.models ?? [];
+        expect(allModels.some((m) => m.provider === "cursor-cli" && m.id === "cursor-fast")).toBe(true);
+        // Built-in providers must not regress when the execution registry also carries a plugin provider.
+        expect(allModels.some((m) => m.provider === "grok-cli" || m.provider === "zai")).toBe(true);
+
+        const filtered = await client.callTool({ name: "fn_models_list", arguments: { provider: "cursor-cli" } });
+        const filteredModels = (filtered.structuredContent as { models?: Array<{ provider: string }> } | undefined)?.models ?? [];
+        expect(filteredModels.length).toBeGreaterThan(0);
+        expect(filteredModels.every((m) => m.provider === "cursor-cli")).toBe(true);
+
+        expect(stdoutSpy).not.toHaveBeenCalled();
+      } finally {
+        stdoutSpy.mockRestore();
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_models_list degrades an absent/unauthenticated plugin-runtime provider to zero rows for that provider without failing the whole call", async () => {
+      const fakeAuthStorage = AuthStorage.inMemory();
+      const fakeRegistry = ModelRegistry.inMemory(fakeAuthStorage);
+      // No cursor-cli provider registered — simulates the plugin being absent/unauthenticated.
+      fakeExecutionModelRegistryOverride.value = fakeRegistry;
+
+      const { client, mcpServer } = await connectClient();
+      try {
+        const all = await client.callTool({ name: "fn_models_list", arguments: {} });
+        expect(all.isError).not.toBe(true);
+
+        const filtered = await client.callTool({ name: "fn_models_list", arguments: { provider: "cursor-cli" } });
+        expect(filtered.isError).not.toBe(true);
+        const filteredModels = (filtered.structuredContent as { models?: unknown[] } | undefined)?.models ?? [];
+        expect(filteredModels).toEqual([]);
       } finally {
         await client.close();
         await mcpServer.close();
