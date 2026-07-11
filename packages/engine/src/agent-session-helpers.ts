@@ -600,6 +600,24 @@ export async function createResolvedAgentSession(
     );
   }
 
+  /*
+  FNXC:ModelFallback 2026-07-11-00:00:
+  FUSI-050: fold the pi runtime's fallback-degrade signal (AgentResult/AgentSessionResult
+  `fallbackModelDegraded`, set when a configured fallback provider/model could not be resolved
+  against the execution ModelRegistry) into this same FN-7787 warning/audit channel instead of a
+  separate seam, so operators see one consistent "runtime is using its built-in fallback model"
+  signal regardless of whether it was triggered by a fully-unconfigured slot or an unresolvable
+  configured fallback slot (e.g. a plugin-gated provider whose plugin isn't enabled).
+  */
+  const fallbackModelDegraded = (result as { fallbackModelDegraded?: { provider: string; modelId: string; reason: string } }).fallbackModelDegraded;
+  if (fallbackModelDegraded) {
+    sessionLog.warn(
+      `[${sessionPurpose}] configured fallback model "${fallbackModelDegraded.provider}/${fallbackModelDegraded.modelId}" `
+      + `was not found in the pi model registry; runtime "${resolved.runtimeId}" degraded to its built-in fallback model. `
+      + fallbackModelDegraded.reason,
+    );
+  }
+
   try {
     await runAuditor?.database({
       type: "session:runtime-resolved",
@@ -613,6 +631,7 @@ export async function createResolvedAgentSession(
         mockProviderActive,
         testModeActive,
         ...(noModelResolved ? { noModelResolved: true, runtimeBuiltInFallbackModel } : {}),
+        ...(fallbackModelDegraded ? { fallbackModelDegraded: true, fallbackModelDegradedProvider: fallbackModelDegraded.provider, fallbackModelDegradedModelId: fallbackModelDegraded.modelId, fallbackModelDegradedReason: fallbackModelDegraded.reason } : {}),
         ...(effectiveRuntimeHint ? { runtimeHint: effectiveRuntimeHint } : {}),
         ...(autoGrokRuntimeHint ? { reason: "grok-cli-no-visible-key" } : {}),
         ...(!autoGrokRuntimeHint && "fallbackReason" in resolved && resolved.fallbackReason ? { reason: resolved.fallbackReason } : {}),

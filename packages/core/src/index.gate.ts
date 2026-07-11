@@ -1371,6 +1371,16 @@ export type {
   RouterEscalation,
   ModelGovernancePredicate,
 } from "./model-router.js";
+export {
+  KNOWN_PLUGIN_GATED_MODEL_PROVIDERS,
+  validateModelSlotSelection,
+} from "./model-slot-validation.js";
+export type {
+  ModelSlotRegistryEntry,
+  ModelSlotRegistryLike,
+  ModelSlotSelectionInput,
+  ModelSlotValidationOutcome,
+} from "./model-slot-validation.js";
 
 // ── Memory Compaction ─────────────────────────────────────────────────
 

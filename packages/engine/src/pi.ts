@@ -164,6 +164,15 @@ export interface AgentResult {
   session: AgentSession;
   /** Path to the persisted session file (undefined for in-memory sessions). */
   sessionFile?: string;
+  /*
+   * FNXC:ModelFallback 2026-07-11-00:00:
+   * Set when a configured fallback provider/model was unresolvable against the
+   * execution pi model registry and was degraded to the runtime's built-in
+   * fallback instead of hard-failing the task (FUSI-050). Callers that surface
+   * the FN-7787 `noModelResolved`/`runtimeBuiltInFallbackModel` warning (e.g.
+   * `agent-session-helpers.ts`) should fold this into the same channel.
+   */
+  fallbackModelDegraded?: { provider: string; modelId: string; reason: string };
 }
 
 /**
@@ -2081,6 +2090,48 @@ function withMcpPromptOptions(promptOptions: unknown, mcpServers: ResolvedMcpSer
   return { mcpServers };
 }
 
+/*
+ * FNXC:ModelSlotValidation 2026-07-11-00:00:
+ * FUSI-050 Fix #1: save-time validation of a model-slot selection (project
+ * settings, global settings, workflow settings) must validate against the SAME
+ * live execution `ModelRegistry` that `createFnAgent` resolves against at
+ * runtime -- not `/api/models` picker visibility (that mismatch was the root
+ * cause of the FN-7711/incident confusion this task corrects). This helper
+ * builds that registry (auth storage, extension providers via
+ * `registerExtensionProviders`, custom providers, supplemental model merges)
+ * without creating a full agent session, so save-time callers (dashboard
+ * settings routes) can pass the result to `@fusion/core`'s
+ * `validateModelSlotSelection`.
+ */
+export async function buildExecutionModelRegistry(cwd: string): Promise<ModelRegistry> {
+  const authStorage = createFusionAuthStorage();
+  const modelRegistry = ModelRegistry.create(authStorage, getModelRegistryModelsPath());
+  const resolvedProjectRoot = getProjectRootFromWorktree(cwd) ?? resolvePiExtensionProjectRoot(cwd);
+  await registerExtensionProviders(resolvedProjectRoot, modelRegistry);
+
+  const customProviders = readCustomProviders();
+  for (const provider of customProviders) {
+    try {
+      const registryKey = customProviderRegistryKey(provider, customProviders);
+      const api = resolveCustomProviderApiType(provider.apiType);
+      modelRegistry.registerProvider(registryKey, {
+        baseUrl: provider.baseUrl,
+        api,
+        apiKey: provider.apiKey,
+        models: buildCustomProviderModels(provider, api),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const registryKey = customProviderRegistryKey(provider, customProviders);
+      piLog.warn(`Failed to register custom provider "${provider.name}" for model-slot validation (key=${registryKey}, id=${provider.id}): ${message}`);
+    }
+  }
+  modelRegistry.refresh();
+  mergeSupplementalAnthropicModels(modelRegistry, (message) => extensionsLog.warn(message));
+  mergeSupplementalOpenAiCodexModels(modelRegistry, (message) => extensionsLog.warn(message));
+  return modelRegistry;
+}
+
 export async function createFnAgent(options: AgentOptions): Promise<AgentResult> {
   piLog.log(`createFnAgent called (tools=${options.tools}, provider=${options.defaultProvider}, model=${options.defaultModelId})`);
   // FNXC:McpConfig 2026-06-25-22:02:
@@ -2198,8 +2249,57 @@ export async function createFnAgent(options: AgentOptions): Promise<AgentResult>
   // Resolve explicit model selection if provider and model ID are specified.
   // If the primary configured model cannot be resolved but a fallback model is
   // configured, prefer the fallback as the initial model selection.
-  let selectedModel;
-  let fallbackModel;
+  let selectedModel: ReturnType<typeof resolveConfiguredModel>;
+  let fallbackModel: ReturnType<typeof resolveConfiguredModel>;
+  let fallbackModelDegraded: { provider: string; modelId: string; reason: string } | undefined;
+
+  /*
+   * FNXC:ModelFallback 2026-07-11-00:00:
+   * FUSI-050: a fallback slot only fires under rate-limit/overload, so a
+   * fallback pointing at a provider/model absent from the execution
+   * ModelRegistry (e.g. a plugin-gated provider like cursor-cli/grok-cli
+   * whose runtime plugin/extension isn't registered) stayed invisible until a
+   * real incident forced the swap and hard-failed every task using it
+   * (2026-07-11: a 5-hour Claude subscription rate limit forced a fallback to
+   * cursor-cli/gpt-5.3-codex-high, which threw "... (fallback selection) was
+   * not found in the pi model registry" for several in-flight tasks at once).
+   * Degrade instead of hard-failing: leave `fallbackModel` unresolved so
+   * `createSessionWithModel`'s `modelOverride` guard falls through to the pi
+   * runtime's own built-in default model, and record the reason so callers
+   * (see the `fallbackModelDegraded` field on `AgentResult`) can surface a
+   * warning through the same FN-7787 `noModelResolved` audit channel. Only the
+   * registry-not-found case degrades — any other resolution error still
+   * throws, and a primary failure with no fallback configured still throws
+   * unchanged.
+   */
+  const resolveFallbackModel = (): void => {
+    if (fallbackModel || fallbackModelDegraded) {
+      return;
+    }
+    try {
+      fallbackModel = resolveConfiguredModel(
+        modelRegistry,
+        "fallback",
+        options.fallbackProvider,
+        options.fallbackModelId,
+      );
+    } catch (fallbackResolutionError) {
+      const message = fallbackResolutionError instanceof Error ? fallbackResolutionError.message : String(fallbackResolutionError);
+      if (!message.includes("was not found in the pi model registry")) {
+        throw fallbackResolutionError;
+      }
+      fallbackModelDegraded = {
+        provider: options.fallbackProvider!,
+        modelId: options.fallbackModelId!,
+        reason: message,
+      };
+      piLog.warn(
+        `[ModelFallback] configured fallback model ${options.fallbackProvider}/${options.fallbackModelId} `
+        + `not found in the pi model registry; degrading to the runtime's built-in fallback model. ${message}`,
+      );
+    }
+  };
+
   try {
     selectedModel = resolveConfiguredModel(
       modelRegistry,
@@ -2211,22 +2311,12 @@ export async function createFnAgent(options: AgentOptions): Promise<AgentResult>
     if (!options.fallbackProvider || !options.fallbackModelId) {
       throw primaryResolutionError;
     }
-    fallbackModel = resolveConfiguredModel(
-      modelRegistry,
-      "fallback",
-      options.fallbackProvider,
-      options.fallbackModelId,
-    );
+    resolveFallbackModel();
     selectedModel = fallbackModel;
   }
 
   if (!fallbackModel) {
-    fallbackModel = resolveConfiguredModel(
-      modelRegistry,
-      "fallback",
-      options.fallbackProvider,
-      options.fallbackModelId,
-    );
+    resolveFallbackModel();
   }
 
   // Resolve skill selection: explicit skillSelection wins over convenience `skills`
@@ -2755,5 +2845,9 @@ export async function createFnAgent(options: AgentOptions): Promise<AgentResult>
     }
   });
 
-  return { session: promptableSession, sessionFile: promptableSession.sessionFile };
+  return {
+    session: promptableSession,
+    sessionFile: promptableSession.sessionFile,
+    ...(fallbackModelDegraded ? { fallbackModelDegraded } : {}),
+  };
 }

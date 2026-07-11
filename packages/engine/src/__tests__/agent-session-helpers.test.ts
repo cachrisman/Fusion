@@ -566,6 +566,62 @@ describe("createResolvedAgentSession", () => {
     });
   });
 
+  /*
+   * FNXC:ModelFallback 2026-07-11-00:00:
+   * FUSI-050 Fix #2: when the runtime's `createSession` reports a
+   * `fallbackModelDegraded` signal (a configured fallback provider/model that
+   * was unresolvable against the execution ModelRegistry), it must fold into
+   * the same FN-7787 warning/audit channel as `noModelResolved` rather than a
+   * separate seam.
+   */
+  it("folds fallbackModelDegraded from the runtime session result into the session:runtime-resolved audit", async () => {
+    const mockSession = { prompt: vi.fn() } as any;
+    const createSessionMock = vi.fn().mockResolvedValue({
+      session: mockSession,
+      fallbackModelDegraded: {
+        provider: "cursor-cli",
+        modelId: "gpt-5.3-codex-high",
+        reason: "Configured model cursor-cli/gpt-5.3-codex-high (fallback selection) was not found in the pi model registry.",
+      },
+    });
+    const auditDatabaseMock = vi.fn().mockResolvedValue(undefined);
+    resolveRuntimeMock.mockResolvedValue({
+      runtime: {
+        id: "pi",
+        name: "Default PI Runtime",
+        createSession: createSessionMock,
+        promptWithFallback: vi.fn(),
+        describeModel: vi.fn(() => "anthropic/claude-sonnet-4-5"),
+      },
+      runtimeId: "pi",
+      wasConfigured: false,
+    });
+
+    const { createResolvedAgentSession } = await import("../agent-session-helpers.js");
+
+    await createResolvedAgentSession({
+      sessionPurpose: "executor",
+      cwd: "/tmp/project",
+      systemPrompt: "system",
+      defaultProvider: "anthropic",
+      defaultModelId: "claude-sonnet-4-5",
+      runAuditor: { database: auditDatabaseMock } as any,
+    });
+
+    expect(auditDatabaseMock).toHaveBeenCalledTimes(1);
+    expect(auditDatabaseMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "session:runtime-resolved",
+        metadata: expect.objectContaining({
+          fallbackModelDegraded: true,
+          fallbackModelDegradedProvider: "cursor-cli",
+          fallbackModelDegradedModelId: "gpt-5.3-codex-high",
+          fallbackModelDegradedReason: expect.stringContaining("not found in the pi model registry"),
+        }),
+      }),
+    );
+  });
+
   it("succeeds when runAuditor is omitted", async () => {
     const mockSession = { prompt: vi.fn() } as any;
     const createSessionMock = vi.fn().mockResolvedValue({

@@ -2,6 +2,7 @@ import type { WorkflowDefinition, WorkflowDefinitionKind, WorkflowIr, WorkflowIr
 import { ColumnTraitValidationError, OccupiedColumnsError, InvalidRehomeTargetError, WorkflowIrError, ColumnAgentBindingError, WorkflowSettingRejectionError, SCHEMA_VERSION, assertColumnTraitsValid, layoutForIr, listTraits, listStepParsers, parseWorkflowIr, resolvePlanningSettingsModel, stripApprovalBypassFlags, resolveWorkflowIrById, resolveEffectiveSettingValues, findOrphanedSettingValues, isBuiltinWorkflowId, getBuiltinWorkflow, BUILTIN_WORKFLOW_SETTINGS, AgentStore, validateColumnAgentBindings, resolveWorkflowOptionalSteps, enumeratePromptBearingWorkflowNodes, normalizeWorkflowIcon } from "@fusion/core";
 import { buildSessionSkillContextSync, createFnAgent as engineCreateFnAgent, validateCodeNodeSources } from "@fusion/engine";
 import { ApiError, badRequest, conflict, notFound, rateLimited } from "../api-error.js";
+import { deriveWorkflowModelSlotFieldPairs, validateModelSlotsInPayload } from "../model-slot-save-validation.js";
 import { emitWorkflowSseEvent } from "../sse.js";
 import type { ApiRoutesContext } from "./types.js";
 
@@ -133,7 +134,7 @@ at this boundary regardless.`;
  * through @fusion/core's TaskStore; none touch the engine's scheduler/executor.
  */
 export function registerWorkflowRoutes(ctx: ApiRoutesContext): void {
-  const { router, getProjectContext, rethrowAsApiError, options } = ctx;
+  const { router, getProjectContext, rethrowAsApiError, options, runtimeLogger } = ctx;
 
   function requireIr(body: unknown): WorkflowIr {
     const ir = (body as { ir?: unknown })?.ir;
@@ -481,6 +482,29 @@ export function registerWorkflowRoutes(ctx: ApiRoutesContext): void {
       await assertWorkflowExists(store, workflowId);
       const projectId = store.getWorkflowSettingsProjectId();
       try {
+        /*
+         * FNXC:ModelSlotValidation 2026-07-11-00:00:
+         * FUSI-050 Fix #1: workflow-declared model lanes (executionProvider/executionModelId,
+         * planningProvider/..., planningFallbackProvider/..., validatorProvider/...,
+         * validatorFallbackProvider/...) are a real save-time surface for the same misconfig class
+         * as project/global settings — U4 moved these lanes OUT of project settings and into
+         * per-(workflow, project) workflow setting VALUES (see MOVED_SETTINGS_KEYS,
+         * packages/core/src/moved-settings.ts), so this route is now the only save path for them.
+         * Validate the EFFECTIVE pair (this patch merged over the currently stored value) for every
+         * provider/modelId pair declared by this workflow before persisting — an unresolvable slot
+         * must never be written, and a plugin-gated-not-enabled slot must warn.
+         */
+        const preWriteDeclarations = await resolveSettingDeclarations(store, workflowId);
+        const modelSlotPairs = deriveWorkflowModelSlotFieldPairs(preWriteDeclarations);
+        const storedBeforeValidation = store.getWorkflowSettingValues(workflowId, projectId);
+        const mergedForValidation: Record<string, unknown> = { ...storedBeforeValidation, ...(values as Record<string, unknown>) };
+        const workflowModelSlotValidation = await validateModelSlotsInPayload(
+          () => store.getRootDir(),
+          mergedForValidation,
+          modelSlotPairs,
+          (message) => runtimeLogger.warn(message),
+        );
+
         // FNXC:ModelLaneDrift 2026-07-08-07:24:
         // Capture `before` INSIDE the write transaction (paired with `stored`)
         // so a concurrent patch of the same row cannot pair a stale baseline
@@ -510,6 +534,7 @@ export function registerWorkflowRoutes(ctx: ApiRoutesContext): void {
           effective: resolveEffectiveSettingValues(declarations, stored),
           orphaned: findOrphanedSettingValues(declarations, stored),
           ...(modelDrift.length > 0 ? { modelDrift } : {}),
+          ...(workflowModelSlotValidation.warnings.length > 0 ? { modelSlotWarnings: workflowModelSlotValidation.warnings } : {}),
         });
       } catch (writeErr: unknown) {
         // Typed rejection → 400 with the structured rejections so the client can

@@ -50,6 +50,11 @@ import {
   probeWorktrunk,
   resolveWorktrunkBinary,
 } from "@fusion/engine";
+import {
+  GLOBAL_MODEL_SLOT_FIELD_PAIRS,
+  PROJECT_MODEL_SLOT_FIELD_PAIRS,
+  validateModelSlotsInPayload,
+} from "../model-slot-save-validation.js";
 import QRCode from "qrcode";
 import crypto from "node:crypto";
 import { createReadStream } from "node:fs";
@@ -604,6 +609,22 @@ export function registerSettingsMemoryRoutes(ctx: ApiRoutesContext, deps: Settin
       if (Object.prototype.hasOwnProperty.call(clientSettings, "modelPresets")) {
         clientSettings.modelPresets = validateModelPresets(clientSettings.modelPresets);
       }
+
+      /*
+       * FNXC:ModelSlotValidation 2026-07-11-00:00:
+       * FUSI-050 Fix #1: validate every project-scope model-slot field pair present in this
+       * payload against the LIVE pi execution model registry (not the /api/models picker list)
+       * before persisting. An unresolvable provider/model is rejected outright; a known
+       * plugin-gated provider (cursor-cli, grok-cli) whose plugin isn't currently registered
+       * warns instead of blocking (the plugin may simply not be loaded in this process yet).
+       */
+      const projectModelSlotValidation = await validateModelSlotsInPayload(
+        () => scopedStore.getRootDir(),
+        clientSettings,
+        PROJECT_MODEL_SLOT_FIELD_PAIRS,
+        (message) => runtimeLogger.warn(message),
+      );
+
       if (Object.prototype.hasOwnProperty.call(clientSettings, "ignoreHiddenOverlapPaths")) {
         clientSettings.ignoreHiddenOverlapPaths = sanitizeBooleanSetting("ignoreHiddenOverlapPaths", clientSettings.ignoreHiddenOverlapPaths);
       }
@@ -739,7 +760,10 @@ export function registerSettingsMemoryRoutes(ctx: ApiRoutesContext, deps: Settin
         }
       }
       
-      res.json(settings);
+      res.json({
+        ...settings,
+        ...(projectModelSlotValidation.warnings.length > 0 ? { modelSlotWarnings: projectModelSlotValidation.warnings } : {}),
+      });
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         throw err;
@@ -1917,6 +1941,19 @@ export function registerSettingsMemoryRoutes(ctx: ApiRoutesContext, deps: Settin
         // Best-effort: on read failure assume false so a flip-on still fires.
       }
 
+      /*
+       * FNXC:ModelSlotValidation 2026-07-11-00:00:
+       * FUSI-050 Fix #1: same save-time model-slot validation as PUT /settings, scoped to the
+       * global-only lanes (default/fallback/model-router-cheap/*Global). Runs before the write so
+       * an unresolvable slot never persists.
+       */
+      const globalModelSlotValidation = await validateModelSlotsInPayload(
+        () => store.getRootDir(),
+        (req.body ?? {}) as Record<string, unknown>,
+        GLOBAL_MODEL_SLOT_FIELD_PAIRS,
+        (message) => runtimeLogger.warn(message),
+      );
+
       const settings = await store.updateGlobalSettings(req.body);
       // Invalidate global settings caches in all project-scoped stores so the
       // next GET /settings?projectId=xxx reads fresh values from disk rather
@@ -1966,7 +2003,10 @@ export function registerSettingsMemoryRoutes(ctx: ApiRoutesContext, deps: Settin
         }
       }
 
-      res.json(settings);
+      res.json({
+        ...settings,
+        ...(globalModelSlotValidation.warnings.length > 0 ? { modelSlotWarnings: globalModelSlotValidation.warnings } : {}),
+      });
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         throw err;

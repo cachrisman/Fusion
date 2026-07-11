@@ -1771,14 +1771,24 @@ describe("createFnAgent", () => {
     });
   });
 
-  it("throws when the configured fallback model cannot be resolved", async () => {
+  /*
+   * FNXC:ModelFallback 2026-07-11-00:00:
+   * FUSI-050 Fix #2 symptom verification: before the fix, an unresolvable configured
+   * fallback hard-failed session creation with "... (fallback selection) was not found
+   * in the pi model registry" even though the PRIMARY model resolved fine (a fallback
+   * only fires under rate-limit/overload, so this silently broke the fallback safety net
+   * until an incident forced the swap). After the fix the session still creates
+   * successfully on the primary model; the fallback is left unresolved (degraded to the
+   * runtime's built-in fallback) rather than throwing.
+   */
+  it("degrades instead of throwing when the configured fallback model cannot be resolved (primary still resolves)", async () => {
     findMock.mockImplementation((provider: string, modelId: string) => (
       provider === "openai-codex" && modelId === "missing-model" ? undefined : { provider, id: modelId }
     ));
 
     const { createFnAgent } = await import("../pi.js");
 
-    await expect(createFnAgent({
+    const result = await createFnAgent({
       cwd: "/tmp",
       systemPrompt: "test",
       tools: "coding",
@@ -1786,7 +1796,72 @@ describe("createFnAgent", () => {
       defaultModelId: "gpt-5.4",
       fallbackProvider: "openai-codex",
       fallbackModelId: "missing-model",
-    })).rejects.toThrow("Configured model openai-codex/missing-model (fallback selection) was not found in the pi model registry");
+    });
+
+    expect(createAgentSessionMock).toHaveBeenCalledTimes(1);
+    expect(createAgentSessionMock.mock.calls[0]?.[0]).toMatchObject({
+      model: { provider: "openai-codex", id: "gpt-5.4" },
+    });
+    expect(result.fallbackModelDegraded).toEqual({
+      provider: "openai-codex",
+      modelId: "missing-model",
+      reason: expect.stringContaining("Configured model openai-codex/missing-model (fallback selection) was not found in the pi model registry"),
+    });
+  });
+
+  /*
+   * FNXC:ModelFallback 2026-07-11-00:00:
+   * FUSI-050 Fix #2 symptom verification (exact incident reproduction): a PRIMARY model
+   * that fails to resolve AND a configured fallback that is also unresolvable in the
+   * execution registry (e.g. a plugin-gated provider whose plugin isn't enabled) must
+   * NOT hard-fail the task. Before the fix this threw "... (fallback selection) was not
+   * found in the pi model registry"; after the fix the session is created via the
+   * runtime's built-in default model instead.
+   */
+  it("degrades instead of throwing when both the primary and the configured fallback are unresolvable", async () => {
+    findMock.mockImplementation((provider: string, modelId: string) => (
+      (provider === "zai" && modelId === "glm-5.1") || (provider === "cursor-cli" && modelId === "gpt-5.3-codex-high")
+        ? undefined
+        : { provider, id: modelId }
+    ));
+    getAllMock.mockReturnValue([]);
+
+    const { createFnAgent } = await import("../pi.js");
+
+    const result = await createFnAgent({
+      cwd: "/tmp",
+      systemPrompt: "test",
+      tools: "readonly",
+      defaultProvider: "zai",
+      defaultModelId: "glm-5.1",
+      fallbackProvider: "cursor-cli",
+      fallbackModelId: "gpt-5.3-codex-high",
+    });
+
+    expect(createAgentSessionMock).toHaveBeenCalledTimes(1);
+    // No model override — the pi runtime falls through to its own built-in default.
+    expect(createAgentSessionMock.mock.calls[0]?.[0]).not.toHaveProperty("model");
+    expect(result.fallbackModelDegraded).toEqual({
+      provider: "cursor-cli",
+      modelId: "gpt-5.3-codex-high",
+      reason: expect.stringContaining("Configured model cursor-cli/gpt-5.3-codex-high (fallback selection) was not found in the pi model registry"),
+    });
+  });
+
+  it("still throws a primary resolution error when no fallback is configured", async () => {
+    findMock.mockImplementation((provider: string, modelId: string) => (
+      provider === "zai" && modelId === "glm-5.1" ? undefined : { provider, id: modelId }
+    ));
+
+    const { createFnAgent } = await import("../pi.js");
+
+    await expect(createFnAgent({
+      cwd: "/tmp",
+      systemPrompt: "test",
+      tools: "readonly",
+      defaultProvider: "zai",
+      defaultModelId: "glm-5.1",
+    })).rejects.toThrow("Configured model zai/glm-5.1 (primary selection) was not found in the pi model registry");
 
     expect(createAgentSessionMock).not.toHaveBeenCalled();
   });

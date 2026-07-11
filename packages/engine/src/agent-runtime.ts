@@ -171,6 +171,15 @@ export interface AgentSessionResult {
   session: AgentSession;
   /** Path to the persisted session file (undefined for in-memory sessions) */
   sessionFile?: string;
+  /*
+   * FNXC:ModelFallback 2026-07-11-00:00:
+   * Mirrors `AgentResult.fallbackModelDegraded` (pi.ts) through the runtime
+   * adapter boundary so `resolveAgentSession` (agent-session-helpers.ts) can
+   * surface the FUSI-050 fallback-degrade warning through the same FN-7787
+   * `session:runtime-resolved` audit channel regardless of which AgentRuntime
+   * produced the session.
+   */
+  fallbackModelDegraded?: { provider: string; modelId: string; reason: string };
 }
 
 /**
