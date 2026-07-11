@@ -145,6 +145,51 @@ describe("describeModel", () => {
 
     expect(describeModel(fakeSession)).toBe("openai/gpt-4o");
   });
+
+  /*
+  FNXC:DelegatedRuntimeCompletion 2026-07-11-23:52 (test):
+  FUSI-071 Step 4 — a plugin-runtime session's `model` is a plain string
+  (e.g. cursor's "auto"), which produced the misleading "undefined/undefined"
+  marker when read via the pi-native `model.provider`/`.id` fallback below.
+  Assert the session-attached `describeModel` dispatch hook wins when present,
+  and that the pi-native fallback is preserved when absent (regression guard).
+  */
+  it("dispatches to a session-attached describeModel override when present (plugin-runtime session)", () => {
+    const fakeSession = {
+      model: "auto",
+      describeModel: () => "cursor/auto",
+    } as unknown as AgentSession;
+
+    expect(describeModel(fakeSession)).toBe("cursor/auto");
+  });
+
+  it("falls back to the pi-native model.provider/.id description when the session-attached describeModel throws", () => {
+    const fakeSession = {
+      model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+      describeModel: () => {
+        throw new Error("boom");
+      },
+    } as unknown as AgentSession;
+
+    expect(describeModel(fakeSession)).toBe("anthropic/claude-sonnet-4-5");
+  });
+
+  it("ignores a session-attached describeModel that returns an empty string", () => {
+    const fakeSession = {
+      model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+      describeModel: () => "",
+    } as unknown as AgentSession;
+
+    expect(describeModel(fakeSession)).toBe("anthropic/claude-sonnet-4-5");
+  });
+
+  it("pi-native sessions without a session-attached describeModel keep the existing model.provider/.id behavior (regression guard)", () => {
+    const fakeSession = {
+      model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+    } as unknown as AgentSession;
+
+    expect(describeModel(fakeSession)).toBe("anthropic/claude-sonnet-4-5");
+  });
 });
 
 describe("formatModelMarkerDetails", () => {

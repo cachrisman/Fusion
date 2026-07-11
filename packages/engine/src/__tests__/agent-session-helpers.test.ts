@@ -678,6 +678,72 @@ describe("createResolvedAgentSession", () => {
 
     warnSpy.mockRestore();
   });
+
+  /*
+  FNXC:DelegatedRuntimeCompletion 2026-07-11-23:50 (test):
+  FUSI-071 Step 4 — assert the describeModel dispatch-attach gating: a
+  non-default (plugin) runtime session gets the runtime's own describeModel
+  bound so pi.ts's describeModel dispatch reports the plugin's description
+  (e.g. "cursor/auto") instead of reading the pi-native model.provider/.id
+  shape. The default pi runtime session must NOT get this attached (it would
+  recurse into pi.ts's describeModel, which itself checks this same dispatch
+  hook) — regression guard for the pi-native path.
+  */
+  it("attaches the resolved runtime's describeModel on a non-default (plugin) runtime session", async () => {
+    const mockSession = { prompt: vi.fn(), model: "auto" } as any;
+    const createSessionMock = vi.fn().mockResolvedValue({ session: mockSession });
+    const runtimeDescribeModel = vi.fn(() => "cursor/auto");
+    resolveRuntimeMock.mockResolvedValue({
+      runtime: {
+        id: "cursor",
+        name: "Cursor Runtime",
+        createSession: createSessionMock,
+        promptWithFallback: vi.fn(),
+        describeModel: runtimeDescribeModel,
+      },
+      runtimeId: "cursor",
+      wasConfigured: true,
+    });
+
+    const { createResolvedAgentSession } = await import("../agent-session-helpers.js");
+
+    const { session } = await createResolvedAgentSession({
+      sessionPurpose: "executor",
+      runtimeHint: "cursor",
+      cwd: "/tmp/project",
+      systemPrompt: "system",
+    });
+
+    expect(typeof (session as any).describeModel).toBe("function");
+    expect((session as any).describeModel()).toBe("cursor/auto");
+    expect(runtimeDescribeModel).toHaveBeenCalledWith(mockSession);
+  });
+
+  it("does not attach describeModel on the default pi runtime session (avoids infinite recursion into pi.ts's dispatch)", async () => {
+    const mockSession = { prompt: vi.fn(), model: { provider: "anthropic", id: "claude-sonnet-4-5" } } as any;
+    const createSessionMock = vi.fn().mockResolvedValue({ session: mockSession });
+    resolveRuntimeMock.mockResolvedValue({
+      runtime: {
+        id: "pi",
+        name: "Default PI Runtime",
+        createSession: createSessionMock,
+        promptWithFallback: vi.fn(),
+        describeModel: vi.fn(() => "anthropic/claude-sonnet-4-5"),
+      },
+      runtimeId: "pi",
+      wasConfigured: false,
+    });
+
+    const { createResolvedAgentSession } = await import("../agent-session-helpers.js");
+
+    const { session } = await createResolvedAgentSession({
+      sessionPurpose: "executor",
+      cwd: "/tmp/project",
+      systemPrompt: "system",
+    });
+
+    expect((session as any).describeModel).toBeUndefined();
+  });
 });
 
 describe("resolveMergerSessionModel", () => {

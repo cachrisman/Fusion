@@ -80,6 +80,7 @@ import { createStreamingDeltaNormalizer } from "./streaming-delta.js";
 import { isModelAuthTierIncompatibilityError, isProviderModelNotFoundError, isUnsupportedMessageRoleError } from "./transient-error-detector.js";
 import { isUsageLimitError } from "./usage-limit-detector.js";
 import type { PluginRunner } from "./plugin-runner.js";
+import type { AgentPromptResult } from "./agent-runtime.js";
 import type { CliProviderContribution } from "@fusion/core";
 import { logMcpForwardingSkipped, runtimeSupportsMcp } from "./mcp-runtime-support.js";
 import { connectMcpSessionTools, type McpClientFactory, type McpSessionToolset } from "./mcp-session-tools.js";
@@ -451,9 +452,21 @@ export async function promptSessionAndCheck(session: AgentSession, prompt: strin
 // top-level export with the same session.
 const promptWithFallbackInFlight = new WeakSet<object>();
 
-export async function promptWithFallback(session: AgentSession, prompt: string, options?: unknown): Promise<void> {
+/*
+FNXC:DelegatedRuntimeCompletion 2026-07-11-23:45:
+FUSI-071 (plan-review point carried over from FUSI-063): a delegated CLI plugin
+runtime's `promptWithFallback` resolves an `AgentPromptResult` (`{stopReason,
+usage}`) on terminal success (e.g. cursor's `result.usage`), but this dispatcher
+previously discarded that return value entirely (`await ...; return;`). Threading
+it through lets the executor capture `result.usage` into task token usage and
+treat a delegated runtime's terminal-success as the completion signal — see
+executor.ts's delegated-CLI-runtime completion gate. The default pi-native path
+below still returns `void`/`undefined` (pi's own token accounting flows through
+`accumulateSessionTokenUsage`'s `session.getSessionStats()` seam instead).
+*/
+export async function promptWithFallback(session: AgentSession, prompt: string, options?: unknown): Promise<void | AgentPromptResult> {
   const sessionWithDispatch = session as AgentSession & {
-    promptWithFallback?: (prompt: string, options?: unknown) => Promise<void>;
+    promptWithFallback?: (prompt: string, options?: unknown) => Promise<void | AgentPromptResult>;
   };
   if (
     typeof sessionWithDispatch.promptWithFallback === "function" &&
@@ -461,8 +474,7 @@ export async function promptWithFallback(session: AgentSession, prompt: string, 
   ) {
     promptWithFallbackInFlight.add(session as unknown as object);
     try {
-      await sessionWithDispatch.promptWithFallback(prompt, options);
-      return;
+      return await sessionWithDispatch.promptWithFallback(prompt, options);
     } finally {
       promptWithFallbackInFlight.delete(session as unknown as object);
     }
@@ -527,7 +539,31 @@ export async function promptWithFallback(session: AgentSession, prompt: string, 
  * Returns `"<provider>/<modelId>"` (e.g. `"anthropic/claude-sonnet-4-5"`)
  * or `"unknown model"` when the session has no model set.
  */
+/*
+FNXC:DelegatedRuntimeCompletion 2026-07-11-23:52:
+FUSI-071 Step 4: a plugin-runtime session's `model` is a plain string (e.g.
+cursor's `"auto"`), not the pi-native `{provider,id}` shape read below, so
+reading `model.provider`/`.id` on such a session produces the misleading
+"undefined/undefined" marker even though the runtime executed successfully.
+Dispatch to a session-attached `describeModel` override first (attached by
+`createResolvedAgentSession` in agent-session-helpers.ts, parallel to the
+`promptWithFallback` dispatch hook) so a plugin-runtime session reports its
+own description (e.g. "cursor/auto"); the pi-native fallback below is
+unchanged for sessions with no override attached.
+*/
 export function describeModel(session: AgentSession): string {
+  const sessionWithDispatch = session as AgentSession & { describeModel?: () => string };
+  if (typeof sessionWithDispatch.describeModel === "function") {
+    try {
+      const described = sessionWithDispatch.describeModel();
+      if (typeof described === "string" && described.trim().length > 0) {
+        return described;
+      }
+    } catch {
+      // fall through to the pi-native description below
+    }
+  }
+
   const model = session.model;
   if (!model) return "unknown model";
   return `${model.provider}/${model.id}`;

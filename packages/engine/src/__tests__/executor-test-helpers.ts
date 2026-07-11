@@ -17,12 +17,18 @@ vi.mock("../pi.js", () => ({
     }
     return null;
   }),
+  // FNXC:DelegatedRuntimeCompletion 2026-07-12-00:20:
+  // FUSI-071: return `session.prompt(...)`'s resolved value (previously
+  // discarded) so tests can simulate a delegated CLI runtime's terminal
+  // `AgentPromptResult` (e.g. `{stopReason,usage}`) by controlling
+  // `session.prompt`'s mocked resolution — existing tests that never assert on
+  // the return value are unaffected (mocked `session.prompt` there resolves
+  // `undefined`).
   promptWithFallback: vi.fn(async (session, prompt, options) => {
     if (options === undefined) {
-      await session.prompt(prompt);
-    } else {
-      await session.prompt(prompt, options);
+      return await session.prompt(prompt);
     }
+    return await session.prompt(prompt, options);
   }),
 }));
 /*
@@ -67,6 +73,15 @@ vi.mock("../merger.js", () => ({
   aiMergeTask: vi.fn(),
   findWorktreeUser: vi.fn().mockResolvedValue(null),
 }));
+// FNXC:DelegatedRuntimeCompletion 2026-07-12-00:22:
+// FUSI-071: mutable module-level override so a test can simulate a delegated
+// CLI plugin runtime (cursor/droid/grok) being resolved by
+// `createResolvedAgentSession`, without needing a real plugin runner /
+// registered plugin runtime. Defaults to "pi" (the existing behavior every
+// other executor test relies on) and reset by `resetExecutorMocks()` so tests
+// that opt in do not leak state to later tests.
+export const resolvedRuntimeIdOverride = { current: "pi" as string, wasConfigured: false as boolean };
+
 vi.mock("../agent-session-helpers.js", async () => {
   const { createFnAgent } = await import("../pi.js");
   return {
@@ -75,8 +90,8 @@ vi.mock("../agent-session-helpers.js", async () => {
       return {
         session: result.session,
         sessionFile: result.sessionFile,
-        runtimeId: "pi",
-        wasConfigured: false,
+        runtimeId: resolvedRuntimeIdOverride.current,
+        wasConfigured: resolvedRuntimeIdOverride.wasConfigured,
       };
     },
     extractRuntimeHint: (runtimeConfig: Record<string, unknown> | undefined) => {
@@ -503,4 +518,9 @@ export function resetExecutorMocks() {
   // FNXC:ExecutorTests 2026-06-24-21:09: Executor liveness guards are process-wide module state, so test reset must clear both executing locks and active-session registry paths; otherwise earlier tests' claims can block later execute() calls with duplicate-execution or foreign active-session path symptoms.
   executingTaskLock._clearForTest();
   activeSessionRegistry.clear();
+  // FNXC:DelegatedRuntimeCompletion 2026-07-12-00:24: reset to the default
+  // pi-runtime resolution so tests that don't opt into delegated-runtime
+  // simulation aren't affected by a prior test's override.
+  resolvedRuntimeIdOverride.current = "pi";
+  resolvedRuntimeIdOverride.wasConfigured = false;
 }

@@ -7,7 +7,7 @@
  * creation and prompting.
  */
 
-import type { AgentRuntimeOptions } from "./agent-runtime.js";
+import type { AgentPromptResult, AgentRuntimeOptions } from "./agent-runtime.js";
 import type { SkillSelectionContext } from "./skill-resolver.js";
 import type { PluginRunner } from "./plugin-runner.js";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -705,7 +705,7 @@ export async function createResolvedAgentSession(
   //
   // The default pi runtime's createFnAgent (pi.ts:1143) already attaches
   // promptWithFallback to the session, so we only attach when it is absent.
-  const session = result.session as AgentSession & { promptWithFallback?: unknown };
+  const session = result.session as AgentSession & { promptWithFallback?: unknown; describeModel?: unknown };
   if (typeof session.promptWithFallback !== "function") {
     const runtime = resolved.runtime;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -713,6 +713,31 @@ export async function createResolvedAgentSession(
       prompt: string,
       options?: unknown,
     ) => runtime.promptWithFallback(session, prompt, options);
+  }
+
+  /*
+  FNXC:DelegatedRuntimeCompletion 2026-07-11-23:50:
+  FUSI-071 Step 4: the "Executor using model: undefined/undefined" marker was
+  caused by pi.ts's top-level describeModel(session) always reading
+  session.model.provider/.id (a pi-native AgentSession field), even for a
+  plugin-runtime session whose `model` is a plain string (e.g. cursor's
+  "auto"). Attach the resolved runtime's own describeModel as a bound method
+  on the session (parallel to the promptWithFallback dispatch hook above) so
+  pi.ts's describeModel can dispatch to it and report "cursor/auto" instead.
+  Only attach when absent so createFnAgent's own pi-native session is
+  untouched (characterization parity — pi-session markers unchanged).
+  */
+  // Only attach for a non-default runtime: the default pi runtime's
+  // describeModel (runtime-resolution.ts DefaultPiRuntime) delegates BACK to
+  // pi.ts's top-level describeModel(), which itself checks this dispatch hook
+  // — attaching unconditionally would recurse infinitely for pi-native
+  // sessions. resolved.runtimeId==="pi" is exactly the pi-native/no-hint case
+  // (runtime-resolution.ts resolveRuntime), so gate on that instead of a
+  // reentry guard.
+  if (resolved.runtimeId !== "pi" && typeof session.describeModel !== "function") {
+    const runtime = resolved.runtime;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (session as any).describeModel = () => runtime.describeModel(session);
   }
 
   return {
@@ -736,7 +761,7 @@ export async function promptWithAutoRetry(
   session: AgentSession,
   prompt: string,
   options?: unknown,
-): Promise<void> {
+): Promise<void | AgentPromptResult> {
   return promptWithFallback(session, prompt, options);
 }
 

@@ -164,6 +164,76 @@ export async function accumulateSessionTokenUsage(
 }
 
 /**
+ * FNXC:DelegatedRuntimeCompletion 2026-07-11-23:55:
+ * FUSI-071 Step 3: a delegated CLI runtime session (cursor/droid/grok) does not
+ * implement `session.getSessionStats()` (the seam `accumulateSessionTokenUsage`
+ * reads), so that function is a silent no-op for these sessions and their token
+ * usage was never captured. The runtime's terminal `AgentPromptResult.usage`
+ * (e.g. cursor's `mapUsage(result.usage)`) carries per-turn totals instead of a
+ * cumulative counter, so this sibling helper ADDS the reported delta directly
+ * onto `task.tokenUsage` rather than diffing against a session baseline.
+ */
+export async function applyDelegatedRuntimeUsage(
+  store: TaskStore,
+  taskId: string,
+  usage: { inputTokens: number; outputTokens: number; cachedTokens: number; cacheWriteTokens: number; totalTokens: number },
+  model: TokenUsageModelSnapshot,
+  options?: { agentId?: string; role?: AgentRole },
+): Promise<void> {
+  try {
+    if (
+      usage.inputTokens === 0 &&
+      usage.outputTokens === 0 &&
+      usage.cachedTokens === 0 &&
+      usage.cacheWriteTokens === 0
+    ) {
+      return;
+    }
+
+    const task = await store.getTask(taskId);
+    const now = new Date().toISOString();
+    const newInput = (task.tokenUsage?.inputTokens ?? 0) + usage.inputTokens;
+    const newOutput = (task.tokenUsage?.outputTokens ?? 0) + usage.outputTokens;
+    const newCached = (task.tokenUsage?.cachedTokens ?? 0) + usage.cachedTokens;
+    const newCacheWrite = (task.tokenUsage?.cacheWriteTokens ?? 0) + usage.cacheWriteTokens;
+
+    const tokenUsage = {
+      inputTokens: newInput,
+      outputTokens: newOutput,
+      cachedTokens: newCached,
+      cacheWriteTokens: newCacheWrite,
+      totalTokens: newInput + newOutput + newCached + newCacheWrite,
+      firstUsedAt: task.tokenUsage?.firstUsedAt ?? now,
+      lastUsedAt: now,
+      modelProvider: model?.provider ?? task.tokenUsage?.modelProvider,
+      modelId: model?.id ?? task.tokenUsage?.modelId,
+      perModel: mergeTokenUsagePerModel(task.tokenUsage?.perModel, {
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cachedTokens: usage.cachedTokens,
+        cacheWriteTokens: usage.cacheWriteTokens,
+        totalTokens: usage.inputTokens + usage.outputTokens + usage.cachedTokens + usage.cacheWriteTokens,
+      }, model, now),
+    };
+
+    cacheMetricsLog.log(JSON.stringify({
+      taskId,
+      agentId: options?.agentId,
+      role: options?.role ?? "executor",
+      inputTokens: tokenUsage.inputTokens,
+      cachedTokens: tokenUsage.cachedTokens,
+      cacheWriteTokens: tokenUsage.cacheWriteTokens,
+      hitRatio: computeCacheHitRatio(tokenUsage.inputTokens, tokenUsage.cachedTokens),
+    }));
+
+    await store.updateTask(taskId, { tokenUsage });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn(`${taskId}: delegated runtime usage accumulate failed: ${message}`);
+  }
+}
+
+/**
  * Compute the cache hit ratio: `cachedTokens / (inputTokens + cachedTokens)`.
  * Returns a number in [0, 1], or 0 when both arguments are 0.
  *

@@ -82,7 +82,9 @@ import { resolveTaskWorktreePath, resolveWorktreesDir } from "./worktree-paths.j
 import { Type, type Static } from "@earendil-works/pi-ai";
 import { describeModel, formatModelMarkerDetails, promptWithFallback, compactSessionContext } from "./pi.js";
 import { buildAgentGatedActionSummary } from "./permanent-agent-gating.js";
-import { accumulateSessionTokenUsage, mergeTokenUsagePerModel } from "./session-token-usage.js";
+import { accumulateSessionTokenUsage, mergeTokenUsagePerModel, applyDelegatedRuntimeUsage } from "./session-token-usage.js";
+import { isDelegatedCliRuntime } from "./runtime-resolution.js";
+import type { AgentPromptResult } from "./agent-runtime.js";
 import {
   createResolvedAgentSession,
   extractRuntimeHint,
@@ -10748,6 +10750,15 @@ export class TaskExecutor {
         // sessionFile must be let because it's assigned before downstream retry-session reassignment.
         let session: AgentSession;
         let sessionFile: string | null | undefined;
+        /*
+        FNXC:DelegatedRuntimeCompletion 2026-07-11-23:58:
+        FUSI-071: the resolved runtimeId drives the completion gate below. Key
+        off THIS resolved id, never `executorRuntimeHint` — FUSI-069's
+        `deriveCursorRuntimeHint` auto-routes a bare `cursor-cli/*` model
+        selection to the cursor plugin runtime even when `executorRuntimeHint`
+        is empty, so the hint alone cannot distinguish delegated from pi/mock.
+        */
+        let resolvedRuntimeId: string = "pi";
         try {
           const createdSession = await createResolvedAgentSession({
             sessionPurpose: "executor",
@@ -10795,6 +10806,7 @@ export class TaskExecutor {
           });
           session = createdSession.session;
           sessionFile = createdSession.sessionFile;
+          resolvedRuntimeId = createdSession.runtimeId;
         } catch (sessionStartError) {
           if (await this.recoverMissingWorktreeSessionStartFailure(task, worktreePath, sessionStartError, audit)) {
             return;
@@ -10862,10 +10874,11 @@ export class TaskExecutor {
           stuckDetector?.recordActivity(task.id);
 
           executorLog.log(`${task.id}: calling promptWithFallback()...`);
+          let primaryPromptResult: void | AgentPromptResult;
           if (isResuming) {
             // Session already has full conversation history — just tell the
             // agent it was paused and should pick up where it left off.
-            await promptWithFallback(session, [
+            primaryPromptResult = await promptWithFallback(session, [
               "Your session was paused and has now been resumed.",
               "Continue working on the task from where you left off.",
               "Review the current state of your worktree and proceed with the next pending step.",
@@ -10886,7 +10899,7 @@ export class TaskExecutor {
                 pluginTaskContributions,
               },
             );
-            await promptWithFallback(session, agentPrompt);
+            primaryPromptResult = await promptWithFallback(session, agentPrompt);
           }
 
           // Re-raise errors that pi-coding-agent swallowed after exhausting retries.
@@ -10897,6 +10910,44 @@ export class TaskExecutor {
             agentId: task.assignedAgentId ?? undefined,
             role: "executor",
           });
+
+          /*
+          FNXC:DelegatedRuntimeCompletion 2026-07-12-00:05:
+          FUSI-071 Step 2: a delegated CLI runtime (cursor/droid/grok — anything
+          isDelegatedCliRuntime() returns true for) never calls Fusion's injected
+          fn_task_done tool because it runs its own self-contained agentic loop.
+          Its OWN terminal-success signal — promptWithFallback resolving without
+          throwing (checkSessionError above already re-raises any swallowed error) —
+          is therefore the completion signal instead, satisfied on the FIRST
+          session so the no-fn_task_done retry loop below is never entered. A
+          terminal-error (e.g. cursor `result.is_error:true`) throws out of
+          promptWithFallback/checkSessionError and is caught by this try's catch
+          block — a REAL failure, never a silent retry. pi/mock sessions
+          (isDelegatedCliRuntime===false) are completely unaffected: taskDone stays
+          exactly as fn_task_done left it, preserving the existing retry-on-missing
+          behavior.
+          */
+          if (!taskDone && isDelegatedCliRuntime(resolvedRuntimeId)) {
+            taskDone = true;
+            executorLog.log(`✓ ${task.id} delegated runtime (${resolvedRuntimeId}) terminal-success — treating as fn_task_done`);
+            await this.store.logEntry(
+              task.id,
+              `Delegated CLI runtime "${resolvedRuntimeId}" completed without calling fn_task_done — its own terminal-success signal satisfies the completion gate`,
+              undefined,
+              this.getRunContextFor(task.id),
+            );
+            this.scheduleCompletedTaskWatchdog(task.id, "delegated-runtime-terminal-success");
+            if (primaryPromptResult?.usage) {
+              const sessionModel = (session as unknown as { model?: unknown }).model;
+              const modelSnapshot = typeof sessionModel === "string"
+                ? { provider: resolvedRuntimeId, id: sessionModel }
+                : (sessionModel as { provider?: string; id?: string } | undefined);
+              await applyDelegatedRuntimeUsage(this.store, task.id, primaryPromptResult.usage, modelSnapshot, {
+                agentId: task.assignedAgentId ?? undefined,
+                role: "executor",
+              });
+            }
+          }
 
           // Check if proactive context compaction is needed based on token cap setting.
           // This runs after the main prompt completes to avoid interrupting active work.
@@ -11214,6 +11265,7 @@ export class TaskExecutor {
                   taskId: task.id,
                 });
                 retrySession = createdRetrySession.session;
+                resolvedRuntimeId = createdRetrySession.runtimeId;
                 if (createdRetrySession.sessionFile) {
                   this.store.updateTask(task.id, { sessionFile: createdRetrySession.sessionFile }).catch((err: unknown) => {
                     const msg = err instanceof Error ? err.message : String(err);
@@ -11296,12 +11348,41 @@ export class TaskExecutor {
                 }
 
                 stuckDetector?.recordActivity(task.id);
-                await promptWithFallback(retrySession, retryPrompt);
+                const retryPromptResult = await promptWithFallback(retrySession, retryPrompt);
                 checkSessionError(retrySession);
                 await accumulateSessionTokenUsage(this.store, task.id, retrySession, {
                   agentId: task.assignedAgentId ?? undefined,
                   role: "executor",
                 });
+
+                // FNXC:DelegatedRuntimeCompletion 2026-07-12-00:08:
+                // FUSI-071: defense-in-depth parity with the primary session's
+                // delegated-completion check above. The primary-session check
+                // already sets taskDone=true before this loop can be entered for a
+                // delegated runtime, so this branch is not expected to fire in
+                // practice — kept for parity should a future retry-loop entry path
+                // ever apply to a delegated runtime.
+                if (!taskDone && isDelegatedCliRuntime(resolvedRuntimeId)) {
+                  taskDone = true;
+                  executorLog.log(`✓ ${task.id} delegated runtime (${resolvedRuntimeId}) terminal-success on retry — treating as fn_task_done`);
+                  await this.store.logEntry(
+                    task.id,
+                    `Delegated CLI runtime "${resolvedRuntimeId}" completed without calling fn_task_done — its own terminal-success signal satisfies the completion gate`,
+                    undefined,
+                    this.getRunContextFor(task.id),
+                  );
+                  this.scheduleCompletedTaskWatchdog(task.id, "delegated-runtime-terminal-success");
+                  if (retryPromptResult?.usage) {
+                    const sessionModel = (retrySession as unknown as { model?: unknown }).model;
+                    const modelSnapshot = typeof sessionModel === "string"
+                      ? { provider: resolvedRuntimeId, id: sessionModel }
+                      : (sessionModel as { provider?: string; id?: string } | undefined);
+                    await applyDelegatedRuntimeUsage(this.store, task.id, retryPromptResult.usage, modelSnapshot, {
+                      agentId: task.assignedAgentId ?? undefined,
+                      role: "executor",
+                    });
+                  }
+                }
               } catch (retryError) {
                 this.deleteActiveSession(task.id);
                 this.tokenUsageBaselines.delete(task.id);

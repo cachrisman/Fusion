@@ -7,7 +7,7 @@
  * 3. Provides structured logging for debugging runtime selection decisions
  */
 
-import type { AgentRuntime, AgentRuntimeOptions, AgentSessionResult } from "./agent-runtime.js";
+import type { AgentPromptResult, AgentRuntime, AgentRuntimeOptions, AgentSessionResult } from "./agent-runtime.js";
 import { normalizeAgentRuntimeMcpServers } from "./agent-runtime.js";
 import type { PluginRunner } from "./plugin-runner.js";
 import * as fusionCore from "@fusion/core";
@@ -26,6 +26,29 @@ const MOCK_PROVIDER_ID = (() => {
 
 export function isMockProviderId(provider: string | undefined): boolean {
   return provider?.trim().toLowerCase() === MOCK_PROVIDER_ID;
+}
+
+/**
+ * FNXC:DelegatedRuntimeCompletion 2026-07-11-23:40:
+ * Delegated CLI plugin runtimes (cursor/droid/grok/...) run a self-contained
+ * external CLI agent that does NOT carry Fusion's injected `fn_task_done`
+ * tool, so the executor's "did the agent call fn_task_done?" completion gate
+ * can never be satisfied by them. For those runtimes the runtime's OWN
+ * terminal-success signal (e.g. cursor stream-json `{"type":"result",
+ * "is_error":false}` resolving `promptWithFallback` without throwing) is the
+ * completion signal instead, and must be treated as implicit fn_task_done.
+ * This predicate is generic (option (b) from FUSI-071): ANY resolved
+ * runtimeId that is neither the default pi runtime ("pi") nor the scripted
+ * mock runtime (MOCK_PROVIDER_ID) is "delegated" — pi and mock sessions
+ * genuinely call fn_task_done via Fusion's injected tool and must keep the
+ * existing retry-on-missing-fn_task_done behavior unchanged.
+ */
+export function isDelegatedCliRuntime(runtimeId: string | undefined | null): boolean {
+  const normalized = runtimeId?.trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized === "pi" || normalized === "default") return false;
+  if (normalized === MOCK_PROVIDER_ID) return false;
+  return true;
 }
 
 /** Logger for the runtime resolution subsystem */
@@ -114,7 +137,7 @@ export class DefaultPiRuntime implements AgentRuntime {
     });
   }
 
-  async promptWithFallback(session: AgentSession, prompt: string, options?: unknown): Promise<void> {
+  async promptWithFallback(session: AgentSession, prompt: string, options?: unknown): Promise<void | AgentPromptResult> {
     return promptWithFallback(session, prompt, options);
   }
 

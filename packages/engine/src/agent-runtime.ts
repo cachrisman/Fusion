@@ -171,10 +171,34 @@ export interface AgentRuntimeOptions {
 }
 
 /**
+ * Token usage for a single delegated-runtime prompt turn, structurally
+ * mirroring `@fusion/core`'s `TaskTokenUsage` numeric fields (minus the
+ * task-level accumulation timestamps a single-turn adapter never owns).
+ *
+ * FNXC:DelegatedRuntimeCompletion 2026-07-12-00:10:
+ * FUSI-071 Step 3 (carried over from a FUSI-063 plan-review point): a
+ * delegated CLI runtime's terminal `AgentPromptResult` can report the turn's
+ * token usage here (e.g. cursor's `mapUsage(result.usage)`), which the
+ * executor threads into `applyDelegatedRuntimeUsage` (session-token-usage.ts)
+ * on delegated completion — these sessions don't implement
+ * `getSessionStats()`, so `accumulateSessionTokenUsage`'s baseline-diff seam
+ * is otherwise a silent no-op for them.
+ */
+export interface AgentPromptTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+}
+
+/**
  * Result of creating an agent session.
  */
 export interface AgentPromptResult {
   stopReason?: string;
+  /** Per-turn token usage reported by a delegated CLI runtime's terminal event, when available. */
+  usage?: AgentPromptTokenUsage;
 }
 
 export interface AgentSessionResult {

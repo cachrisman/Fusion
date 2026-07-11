@@ -12,6 +12,7 @@ import type { AgentRuntime, AgentRuntimeOptions, AgentSessionResult } from "../a
 import {
   resolveRuntime,
   getDefaultPiRuntime,
+  isDelegatedCliRuntime,
   type RuntimeResolutionContext,
   type ResolvedRuntime,
 } from "../runtime-resolution.js";
@@ -412,6 +413,42 @@ describe("runtime-resolution", () => {
       expect(typeof runtime.createSession).toBe("function");
       expect(typeof runtime.promptWithFallback).toBe("function");
       expect(typeof runtime.describeModel).toBe("function");
+    });
+  });
+
+  /*
+  FNXC:DelegatedRuntimeCompletion 2026-07-11-23:40 (test):
+  FUSI-071 Step 1 — pi and mock sessions genuinely call Fusion's injected
+  fn_task_done tool and MUST NOT be treated as delegated (regression guard
+  for the Surface Enumeration checklist's "Runtimes / execution paths" row).
+  Every other resolved runtimeId (cursor, droid, grok, and any future plugin
+  CLI runtime) is "delegated" — generic option (b), no cursor-only special
+  case.
+  */
+  describe("isDelegatedCliRuntime", () => {
+    it("excludes the default pi runtime", () => {
+      expect(isDelegatedCliRuntime("pi")).toBe(false);
+      expect(isDelegatedCliRuntime("default")).toBe(false);
+      expect(isDelegatedCliRuntime("PI")).toBe(false);
+    });
+
+    it("excludes the scripted mock runtime", () => {
+      expect(isDelegatedCliRuntime("mock")).toBe(false);
+      expect(isDelegatedCliRuntime("MOCK")).toBe(false);
+    });
+
+    it("includes cursor, droid, grok, and other plugin CLI runtimes generically", () => {
+      expect(isDelegatedCliRuntime("cursor")).toBe(true);
+      expect(isDelegatedCliRuntime("droid")).toBe(true);
+      expect(isDelegatedCliRuntime("grok")).toBe(true);
+      expect(isDelegatedCliRuntime("some-future-plugin-runtime")).toBe(true);
+    });
+
+    it("treats missing/empty runtimeId as not delegated", () => {
+      expect(isDelegatedCliRuntime(undefined)).toBe(false);
+      expect(isDelegatedCliRuntime(null)).toBe(false);
+      expect(isDelegatedCliRuntime("")).toBe(false);
+      expect(isDelegatedCliRuntime("   ")).toBe(false);
     });
   });
 });
