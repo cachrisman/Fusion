@@ -19,6 +19,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { request as httpRequest } from "node:http";
+import { connect as netConnect } from "node:net";
 import { TaskStore } from "@fusion/core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -77,6 +79,38 @@ describe("startHttpMcpTransport (FUSI-003)", () => {
 
   function baseUrl(h: HttpMcpTransportHandle): URL {
     return new URL(`http://${h.address.host}:${h.address.port}/`);
+  }
+
+  /**
+   * FNXC:McpServer 2026-07-11-00:05: `fetch`/undici refuses to let callers
+   * override the `Host` request header (it always derives Host from the
+   * URL being fetched), so forging a DNS-rebinding-style foreign `Host`
+   * header requires the raw `node:http` client instead of `fetch`. This
+   * mirrors exactly what a rebound browser connection looks like on the
+   * wire: a TCP connection to the loopback listener carrying a `Host`
+   * header for a different hostname.
+   */
+  function rawRequest(
+    h: HttpMcpTransportHandle,
+    options: { path?: string; headers?: Record<string, string>; body?: string },
+  ): Promise<{ status: number }> {
+    return new Promise((resolvePromise, rejectPromise) => {
+      const req = httpRequest(
+        {
+          host: h.address.host,
+          port: h.address.port,
+          path: options.path ?? "/mcp",
+          method: "POST",
+          headers: { "content-type": "application/json", ...options.headers },
+        },
+        (res) => {
+          res.resume();
+          res.on("end", () => resolvePromise({ status: res.statusCode ?? 0 }));
+        },
+      );
+      req.on("error", rejectPromise);
+      req.end(options.body ?? JSON.stringify({ jsonrpc: "2.0", method: "ping", id: 1 }));
+    });
   }
 
   async function connectAuthedClient(h: HttpMcpTransportHandle, token: string): Promise<Client> {
@@ -196,5 +230,100 @@ describe("startHttpMcpTransport (FUSI-003)", () => {
     await h.close();
     handle = undefined;
     await expect(fetch(new URL("mcp", url), { method: "GET" })).rejects.toThrow();
+  });
+
+  describe("DNS-rebinding protection (FUSI-047)", () => {
+    it("rejects a foreign Host header on a loopback no-token server (403)", async () => {
+      const h = await startServer({});
+      const res = await rawRequest(h, { headers: { Host: "evil.example:1234" } });
+      expect(res.status).toBe(403);
+    });
+
+    it("rejects a foreign Host header on a loopback WITH-token server (403, independent of token check)", async () => {
+      const h = await startServer({ token: TEST_TOKEN });
+      const res = await rawRequest(h, {
+        headers: { Host: "evil.example:1234", authorization: `Bearer ${TEST_TOKEN}` },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("allows a legitimate loopback Host header through (no regression)", async () => {
+      const h = await startServer({ token: TEST_TOKEN });
+      const res = await rawRequest(h, {
+        headers: { Host: `127.0.0.1:${h.address.port}`, authorization: `Bearer ${TEST_TOKEN}` },
+      });
+      expect(res.status).not.toBe(403);
+    });
+
+    /**
+     * FNXC:McpServer 2026-07-11-00:10: A well-formed HTTP/1.1 client
+     * always sends `Host` (Node's own HTTP/1.1 parser rejects a request
+     * without one with 400 before our handler even runs), so to reach
+     * this module's own "missing Host" branch this test speaks raw
+     * HTTP/1.0 over a socket (HTTP/1.0 does not require `Host`), landing
+     * on `req.headers.host === undefined` and exercising our explicit
+     * treat-absent-as-untrusted guard rather than Node's parser-level 400.
+     */
+    it("rejects a missing Host header on a loopback bind (403)", async () => {
+      const h = await startServer({});
+      const status = await new Promise<number>((resolvePromise, rejectPromise) => {
+        const socket = netConnect(h.address.port, h.address.host, () => {
+          socket.write('POST /mcp HTTP/1.0\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}');
+        });
+        let statusLine = "";
+        socket.on("data", (chunk) => {
+          if (!statusLine) statusLine = chunk.toString();
+        });
+        socket.on("close", () => {
+          const match = statusLine.match(/^HTTP\/1\.\d (\d{3})/);
+          resolvePromise(match ? Number(match[1]) : 0);
+        });
+        socket.on("error", rejectPromise);
+      });
+      expect(status).toBe(403);
+    });
+
+    it("rejects a foreign Origin header on a loopback bind (403)", async () => {
+      const h = await startServer({});
+      const res = await rawRequest(h, {
+        headers: { Host: `127.0.0.1:${h.address.port}`, origin: "http://evil.example" },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("allows an absent Origin header on a loopback bind (native MCP clients omit Origin)", async () => {
+      const h = await startServer({ token: TEST_TOKEN });
+      const res = await rawRequest(h, {
+        headers: { Host: `127.0.0.1:${h.address.port}`, authorization: `Bearer ${TEST_TOKEN}` },
+      });
+      expect(res.status).not.toBe(403);
+    });
+
+    it("allows a loopback Origin header through", async () => {
+      const h = await startServer({ token: TEST_TOKEN });
+      const res = await rawRequest(h, {
+        headers: {
+          Host: `127.0.0.1:${h.address.port}`,
+          origin: `http://127.0.0.1:${h.address.port}`,
+          authorization: `Bearer ${TEST_TOKEN}`,
+        },
+      });
+      expect(res.status).not.toBe(403);
+    });
+
+    it("does NOT apply the Host allow-list on a non-loopback bind (existing --host + token path preserved)", async () => {
+      mcpServer = buildMcpServer({ cwd: tmpDir, store, version: "test" });
+      handle = await startHttpMcpTransport({
+        server: mcpServer,
+        host: "0.0.0.0",
+        port: 0,
+        token: TEST_TOKEN,
+        logger,
+      });
+      const res = await rawRequest(handle, {
+        headers: { Host: "evil.example:1234", authorization: `Bearer ${TEST_TOKEN}` },
+      });
+      expect(res.status).not.toBe(403);
+    });
   });
 });

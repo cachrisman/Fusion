@@ -69,6 +69,54 @@ function isLoopbackHost(host: string): boolean {
 }
 
 /**
+ * FNXC:McpServer 2026-07-11-00:00:
+ * DNS-rebinding protection: a browser page the operator visits can resolve
+ * a foreign domain (`evil.example`) to `127.0.0.1` and issue a same-origin
+ * XHR/fetch to it. The TCP connection lands on this loopback listener, but
+ * the request's `Host` header still carries the foreign hostname (browsers
+ * do not rewrite `Host` to match the resolved IP). Because the default
+ * loopback mode requires no bearer token, that request would otherwise be
+ * dispatched straight to `transport.handleRequest`, letting a malicious
+ * page drive operator tools (create tasks/agents/workflows) with zero
+ * auth. `extractHostnameFromHeader` strips the port and any IPv6 brackets
+ * so both `Host` ("127.0.0.1:4041", "[::1]:4041") and `Origin`
+ * ("http://127.0.0.1:4041") headers can be checked against the same
+ * `LOOPBACK_HOSTS` allow-list already used for the bind-host guard above.
+ * This check is gated to loopback binds only — an operator who explicitly
+ * passes `--host 0.0.0.0` (and therefore must also supply a token) has
+ * opted into a networked deployment and the Host allow-list must not
+ * reject that legitimate traffic.
+ */
+function extractHostnameFromHeader(headerValue: string): string | undefined {
+  const trimmed = headerValue.trim();
+  if (trimmed.length === 0) return undefined;
+  // Origin headers carry a scheme ("http://host:port"); Host headers do not.
+  const withoutScheme = trimmed.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "");
+  // IPv6 literal in brackets, e.g. "[::1]:4041" or "[::1]".
+  const ipv6Match = withoutScheme.match(/^\[([^\]]+)\]/);
+  if (ipv6Match) return ipv6Match[1];
+  // Otherwise strip a trailing ":<port>" (host may itself contain no colon).
+  const colonIndex = withoutScheme.lastIndexOf(":");
+  if (colonIndex === -1) return withoutScheme.length > 0 ? withoutScheme : undefined;
+  const hostname = withoutScheme.slice(0, colonIndex);
+  return hostname.length > 0 ? hostname : undefined;
+}
+
+/** True only when `headerValue` is present, parseable, and its hostname is a loopback alias. */
+function isAllowedLoopbackHostHeader(headerValue: string | undefined): boolean {
+  if (!headerValue) return false;
+  const hostname = extractHostnameFromHeader(headerValue);
+  return hostname !== undefined && isLoopbackHost(hostname);
+}
+
+/** True when `originValue` is absent (native MCP clients omit Origin) or resolves to a loopback hostname. */
+function isAllowedLoopbackOrigin(originValue: string | undefined): boolean {
+  if (!originValue) return true;
+  const hostname = extractHostnameFromHeader(originValue);
+  return hostname !== undefined && isLoopbackHost(hostname);
+}
+
+/**
  * Constant-time bearer-token compare, mirroring
  * packages/dashboard/src/auth-middleware.ts's `constantTimeEqual`: reject
  * up front on length mismatch (a length check is not a meaningful timing
@@ -118,6 +166,12 @@ function sendUnauthorized(res: ServerResponse): void {
   res.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ error: "Unauthorized" }));
 }
 
+function sendForbidden(res: ServerResponse): void {
+  // FNXC:McpServer 2026-07-11-00:00: No body leakage on 403 either — do not
+  // echo back the offending Host/Origin header or the allow-list contents.
+  res.writeHead(403, { "content-type": "application/json" }).end(JSON.stringify({ error: "Forbidden" }));
+}
+
 /**
  * Starts a Node HTTP listener that serves the given Fusion `McpServer` over
  * `StreamableHTTPServerTransport`, enforcing the loopback-default +
@@ -154,6 +208,23 @@ export async function startHttpMcpTransport(options: StartHttpMcpTransportOption
     // stderr only — MCP protocol bytes for the HTTP transport flow over
     // the HTTP response body, never stdout (stdout is reserved for the
     // stdio transport's JSON-RPC framing and must stay clean).
+    // FNXC:McpServer 2026-07-11-00:00: DNS-rebinding guard runs BEFORE the
+    // token check and before transport.handleRequest, and only when this
+    // listener is bound to loopback. A forged foreign Host/Origin header
+    // is rejected 403 independent of whether a token is configured or
+    // supplied — the default loopback-no-token mode is exactly the mode
+    // DNS rebinding targets, so the Host check cannot be skipped there.
+    if (loopback) {
+      if (!isAllowedLoopbackHostHeader(req.headers.host)) {
+        sendForbidden(res);
+        return;
+      }
+      const originHeader = req.headers.origin;
+      if (!isAllowedLoopbackOrigin(typeof originHeader === "string" ? originHeader : undefined)) {
+        sendForbidden(res);
+        return;
+      }
+    }
     if (token && !constantTimeTokenEqual(extractBearerToken(req) ?? "", token)) {
       sendUnauthorized(res);
       return;
