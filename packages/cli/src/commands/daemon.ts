@@ -78,7 +78,7 @@ import { resolveSelfExtension } from "./self-extension.js";
 import { wrapAuthStorageWithApiKeyProviders } from "./provider-auth.js";
 import { getModelRegistryModelsPath, getPackageManagerAgentDir } from "./auth-paths.js";
 import { resolveProject } from "../project-context.js";
-import { ensureBundledDependencyGraphPluginInstalled, ensureBundledGrokRuntimePluginInstalled } from "../plugins/bundled-plugin-install.js";
+import { ensureBundledCursorRuntimePluginInstalled, ensureBundledDependencyGraphPluginInstalled, ensureBundledGrokRuntimePluginInstalled } from "../plugins/bundled-plugin-install.js";
 import { handleOpencodeGoApiKeySaved, syncStartupModels } from "./startup-model-sync.js";
 import { registerCustomProviders, reregisterCustomProviders } from "./custom-provider-registry.js";
 import { ensureCwdProjectRegistered } from "./ensure-project-registered.js";
@@ -536,6 +536,21 @@ export async function runDaemon(opts: DaemonOptions = {}) {
     }
   } catch (err) {
     console.warn(`[plugins] Failed to auto-install bundled Grok CLI runtime plugin: ${err instanceof Error ? err.message : err}`);
+  }
+
+  /*
+   * FNXC:CursorCliRouting 2026-07-11-00:00:
+   * FUSI-070: packaged daemon sessions must load the bundled Cursor CLI runtime before executors/reviewers create sessions, mirroring the FN-7761 Grok bootstrap above, so cursor-cli/<id> routing resolves to the CursorRuntimeAdapter instead of throwing the missing-runtime error.
+   */
+  try {
+    const installStatus = await ensureBundledCursorRuntimePluginInstalled(pluginStore, pluginLoader);
+    if (installStatus === "installed") {
+      console.log("[plugins] Installed bundled Cursor CLI runtime plugin");
+    } else if (installStatus === "missing-bundle") {
+      console.warn("[plugins] Bundled Cursor CLI runtime plugin was not found in this build");
+    }
+  } catch (err) {
+    console.warn(`[plugins] Failed to auto-install bundled Cursor CLI runtime plugin: ${err instanceof Error ? err.message : err}`);
   }
 
   // Auto-load all enabled plugins so runtime UI (NewAgentDialog, AgentDetailView)

@@ -29,3 +29,23 @@ describe("Grok CLI runtime packaged bootstrap", () => {
     });
   }
 });
+
+/*
+ * FNXC:CursorCliRouting 2026-07-11-00:00:
+ * FUSI-070 regression guard for packaged host bootstrap, mirroring the FN-7761 Grok guard above. The Cursor helper must run before loadAllPlugins() in each long-lived CLI host so the enabled bundled runtime is loaded and getRuntimeById("cursor") can resolve before executor/reviewer/merger sessions try to route cursor-cli/<id> work to the CursorRuntimeAdapter.
+ */
+describe("Cursor CLI runtime packaged bootstrap", () => {
+  for (const command of ["serve", "daemon", "dashboard"] as const) {
+    it(`${command} eagerly ensures the bundled Cursor runtime before loading enabled plugins`, () => {
+      const source = readCommand(command);
+      const importIndex = source.indexOf("ensureBundledCursorRuntimePluginInstalled");
+      const ensureIndex = source.indexOf("ensureBundledCursorRuntimePluginInstalled(pluginStore, pluginLoader)");
+      const loadIndex = source.indexOf("pluginLoader.loadAllPlugins()");
+
+      expect(importIndex).toBeGreaterThanOrEqual(0);
+      expect(ensureIndex).toBeGreaterThanOrEqual(0);
+      expect(loadIndex).toBeGreaterThanOrEqual(0);
+      expect(ensureIndex).toBeLessThan(loadIndex);
+    });
+  }
+});

@@ -80,7 +80,7 @@ import {
 import { resolveSelfExtension } from "./self-extension.js";
 import { registerCustomProviders, reregisterCustomProviders } from "./custom-provider-registry.js";
 import { handleOpencodeGoApiKeySaved, syncStartupModels } from "./startup-model-sync.js";
-import { ensureBundledDependencyGraphPluginInstalled, ensureBundledGrokRuntimePluginInstalled, ensureBundledPluginInstalled, isBundledPluginId } from "../plugins/bundled-plugin-install.js";
+import { ensureBundledCursorRuntimePluginInstalled, ensureBundledDependencyGraphPluginInstalled, ensureBundledGrokRuntimePluginInstalled, ensureBundledPluginInstalled, isBundledPluginId } from "../plugins/bundled-plugin-install.js";
 import { ensureCwdProjectRegistered } from "./ensure-project-registered.js";
 
 const DIAGNOSTIC_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
@@ -561,6 +561,21 @@ export async function runServe(
     }
   } catch (err) {
     console.warn(`[plugins] Failed to auto-install bundled Grok CLI runtime plugin: ${err instanceof Error ? err.message : err}`);
+  }
+
+  /*
+   * FNXC:CursorCliRouting 2026-07-11-00:00:
+   * FUSI-070: packaged `fn serve` must make the bundled Cursor CLI runtime discoverable before any message-sending lane starts, mirroring the FN-7761 Grok bootstrap above. Otherwise cursor-cli/<id> selections resolve (FUSI-069) but fail at step-execute with the missing-runtime error because getRuntimeById('cursor') returns undefined.
+   */
+  try {
+    const installStatus = await ensureBundledCursorRuntimePluginInstalled(pluginStore, pluginLoader);
+    if (installStatus === "installed") {
+      console.log("[plugins] Installed bundled Cursor CLI runtime plugin");
+    } else if (installStatus === "missing-bundle") {
+      console.warn("[plugins] Bundled Cursor CLI runtime plugin was not found in this build");
+    }
+  } catch (err) {
+    console.warn(`[plugins] Failed to auto-install bundled Cursor CLI runtime plugin: ${err instanceof Error ? err.message : err}`);
   }
 
   // Lazy-install hook for bundled runtime plugins (Hermes/OpenClaw/Paperclip/Grok).
