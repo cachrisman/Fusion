@@ -3755,8 +3755,12 @@ export interface ProjectSettings {
    *  global emergency stop for the entire AI engine.
    *  Individual per-task pause flags are unaffected. */
   globalPause?: boolean;
-  /** Tracks why globalPause was activated. "rate-limit" for automatic pauses,
-   *  "manual" for user-initiated. Cleared on unpause. */
+  /** Tracks why globalPause was activated. Recognized values: `"rate-limit"` for
+   *  automatic pauses on a detected provider rate limit, `"manual"` for
+   *  user-initiated pauses, and `"usage-threshold"` (reserved for FUSI-058) for a
+   *  future automatic pause triggered by `usagePauseThresholdPercent`. Cleared on
+   *  unpause. Stays typed as `string` (not a literal union) so other reasons can
+   *  be recorded without a type change. */
   globalPauseReason?: string;
   /** Default custom workflow (WF-…) applied to newly created tasks when the
    *  caller does not specify enabledWorkflowSteps. Overridable per task. */
@@ -3814,6 +3818,21 @@ export interface ProjectSettings {
    *  will not exceed this limit. Applies to triage, execution, and merge.
    *  Default: 4. When undefined, falls back to CentralCore default (4). */
   globalMaxConcurrent?: number;
+  /*
+  FNXC:UsageControl 2026-07-11-00:00 (FUSI-057):
+  Scaffolding for two downstream usage-control behaviors that read the engine-consumable
+  `UsageControlSnapshot` (see `packages/dashboard/src/usage.ts` `resolveUsageControlSnapshot`,
+  and `getUsageControlSnapshot` on `SelfHealingOptions`). This task ships NO pause/throttle
+  behavior — undefined on either setting means that feature stays off, exactly as it is today.
+  */
+  /** When set (0-100), FUSI-058's downstream global-pause trigger fires as the worst-case
+   *  usage percent crosses this threshold, BEFORE a hard 429 is hit (`globalPauseReason`
+   *  is set to the reserved `"usage-threshold"` value). Undefined = feature off. Example: 90. */
+  usagePauseThresholdPercent?: number;
+  /** When set (0-100), FUSI-059's downstream adaptive-concurrency dispatcher begins
+   *  throttling new agent launches as the worst-case usage percent crosses this threshold.
+   *  Undefined = feature off. Example: 75. */
+  usageThrottleThresholdPercent?: number;
   maxWorktrees: number;
   pollIntervalMs: number;
   /** Global multiplier applied to all agent heartbeat intervals.

@@ -42,7 +42,7 @@ import { runtimeLog } from "../logger.js";
 import { getActiveNotificationService } from "../notifier.js";
 import { StuckTaskDetector } from "../stuck-task-detector.js";
 import type { UsageLimitPauser } from "../usage-limit-detector.js";
-import { SelfHealingManager, VALIDATOR_RUN_STALE_MAX_AGE_MS } from "../self-healing.js";
+import { SelfHealingManager, VALIDATOR_RUN_STALE_MAX_AGE_MS, type UsageControlSnapshot } from "../self-healing.js";
 import { RestartRecoveryCoordinator } from "../restart-recovery-coordinator.js";
 import { MeshLeaseManager } from "../mesh-lease-manager.js";
 import { PluginRunner } from "../plugin-runner.js";
@@ -198,6 +198,8 @@ export class InProcessRuntime
    */
   private cliAgentRuntime?: BootstrappedCliAgentRuntime;
   private usageLimitPauser?: UsageLimitPauser;
+  /** FUSI-057: dashboard-injected live-usage-snapshot provider; see `setUsageControlSnapshotProvider`. */
+  private usageControlSnapshotProvider?: () => Promise<UsageControlSnapshot | null>;
   private selfHealingManager?: SelfHealingManager;
   private leaseManager?: MeshLeaseManager;
   private leaseCentralClaimStore?: ReturnType<typeof createCentralDatabase>;
@@ -920,6 +922,7 @@ export class InProcessRuntime
       this.selfHealingManager = new SelfHealingManager(this.taskStore, {
         rootDir: this.config.workingDirectory,
         agentStore: this.agentStore,
+        getUsageControlSnapshot: this.usageControlSnapshotProvider,
         isWorktreeResumeReserved: this.cliAgentRuntime?.isWorktreeResumeReserved,
         recoverCompletedTask: (task) => this.executor.recoverCompletedTask(task),
         recoverFailedPreMergeStep: (task) => this.executor.recoverFailedPreMergeWorkflowStep(task),
@@ -1642,6 +1645,19 @@ export class InProcessRuntime
    */
   setUsageLimitPauser(pauser: UsageLimitPauser): void {
     this.usageLimitPauser = pauser;
+  }
+
+  /**
+   * FUSI-057: mirrors `setUsageLimitPauser` — lets the dashboard inject (or rewire) the
+   * live-usage-snapshot DI callback for the control plane. Stored on the runtime so it
+   * survives even if the caller wires it before `start()` builds the SelfHealingManager;
+   * if the manager already exists, it is also pushed there immediately so a post-start
+   * rewire (the dashboard's actual timing, once `authStorage` becomes available) takes
+   * effect without a restart. Consuming this for pause/throttle behavior is FUSI-058/FUSI-059.
+   */
+  setUsageControlSnapshotProvider(provider: (() => Promise<UsageControlSnapshot | null>) | undefined): void {
+    this.usageControlSnapshotProvider = provider;
+    this.selfHealingManager?.setUsageControlSnapshotProvider(provider);
   }
 
   /**

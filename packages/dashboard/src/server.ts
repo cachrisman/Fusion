@@ -38,7 +38,7 @@ import { WebSocketManager, type BadgeSnapshot } from "./websocket.js";
 import type { BadgePubSub } from "./badge-pubsub.js";
 import { createBadgePubSub, type BadgePubSubMessage } from "./badge-pubsub.js";
 import { createRuntimeLogger, type RuntimeLogger } from "./runtime-logger.js";
-import { fetchAllProviderUsage, resolveRateLimitResetAt } from "./usage.js";
+import { fetchAllProviderUsage, resolveRateLimitResetAt, resolveUsageControlSnapshot } from "./usage.js";
 import { registerGithubTrackingHook } from "./github-tracking-hook.js";
 import { registerBeforeExitCleanup } from "./process-lifecycle.js";
 import { createTerminalWebSocketDiagnostics } from "./terminal-websocket-diagnostics.js";
@@ -879,6 +879,23 @@ export function createServer(store: TaskStore, options?: ServerOptions): ReturnT
           return resolveRateLimitResetAt(providers);
         });
       }
+    }
+    /*
+    FNXC:UsageControl 2026-07-11-00:00 (FUSI-057):
+    Wire the engine control-plane's `getUsageControlSnapshot` DI callback here, where
+    `authStorage` (resolved above, explicit-or-engine-derived) and `engine` are both in
+    scope — the only place both are guaranteed available together. The provider re-fetches
+    through `fetchAllProviderUsage`, which already carries its own 30s cache, so this does
+    NOT add a second poller or new provider API pressure. This is DI-only in this task: the
+    callback is stored on `SelfHealingOptions` but not consumed for pause/throttle behavior
+    (that's FUSI-058/FUSI-059).
+    */
+    if (options!.authStorage) {
+      const authStorageForUsage = options!.authStorage;
+      engine.getRuntime().setUsageControlSnapshotProvider(async () => {
+        const providers = await fetchAllProviderUsage(authStorageForUsage);
+        return resolveUsageControlSnapshot(providers);
+      });
     }
     if (!options!.routineStore) {
       const rs = engine.getRoutineStore();

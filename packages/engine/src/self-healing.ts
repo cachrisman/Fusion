@@ -286,6 +286,33 @@ function matchesScope(filePath: string, scopePatterns: string[]): boolean {
   return false;
 }
 
+/*
+FNXC:UsageControl 2026-07-11-00:00 (FUSI-057):
+The engine must never import `@fusion/dashboard` (that's where `packages/dashboard/src/usage.ts`
+and its `UsageControlSnapshot` / `resolveUsageControlSnapshot` live), so this is a STRUCTURAL
+mirror of the dashboard type — same field shape, independent declaration — passed in via a
+dashboard-injected DI callback rather than a shared import. This generalizes FUSI-053's
+`getRateLimitResetAt` seam: `soonestResetAt`/`soonestResetMs` here subsume that reset time, so a
+future refactor could derive `getRateLimitResetAt`'s return from this snapshot instead of
+maintaining a parallel reducer. `getRateLimitResetAt` (when present) and `getUsageControlSnapshot`
+both read from the SAME dashboard-side `fetchAllProviderUsage` 30s cache — neither callback should
+be wired to trigger a second poller or extra provider API pressure.
+*/
+export interface UsageControlSnapshot {
+  /** Highest percentUsed across the considered Claude windows (5h + weekly). */
+  worstPercentUsed: number;
+  /** percentLeft of that same worst-case window. */
+  worstPercentLeft: number;
+  /** ISO 8601 timestamp of the soonest FUTURE reset across usable windows, or null. */
+  soonestResetAt: string | null;
+  /** Milliseconds until the soonest future reset, or null. */
+  soonestResetMs: number | null;
+  /** Weekly-window pace passthrough, or null when unavailable. */
+  pace: "ahead" | "on-track" | "behind" | null;
+  /** Label of the window that produced the worst-case percentages. */
+  worstWindowLabel: string;
+}
+
 export interface SelfHealingOptions {
   /** Project root directory (parent of .worktrees/) */
   rootDir: string;
@@ -437,6 +464,15 @@ export interface SelfHealingOptions {
    * engine/self-healing manager has already been constructed.
    */
   getRateLimitResetAt?: () => Promise<{ resetAt: string; resetMs: number } | null>;
+  /**
+   * FUSI-057: injected by the dashboard (the resolver lives in `usage.ts`, which the
+   * engine must not import) — returns the current compact live-usage snapshot, or
+   * `null` when unknown/unavailable. This task stores the callback only; it does NOT
+   * add pause/throttle behavior — consuming it for a global pause is FUSI-058, and for
+   * adaptive concurrency/pace-aware dispatch is FUSI-059. See {@link UsageControlSnapshot}
+   * for the field shape and its relationship to FUSI-053's `getRateLimitResetAt`.
+   */
+  getUsageControlSnapshot?: () => Promise<UsageControlSnapshot | null>;
 }
 
 const APPROVED_TRIAGE_RECOVERY_GRACE_MS = 60_000;
@@ -892,6 +928,17 @@ export class SelfHealingManager {
    */
   setRateLimitResetProvider(provider: () => Promise<{ resetAt: string; resetMs: number } | null>): void {
     this.rateLimitResetProvider = provider;
+  }
+
+  /**
+   * FUSI-057: mirrors `InProcessRuntime.setUsageLimitPauser` — lets the dashboard wire
+   * (or rewire) the usage-snapshot DI callback after this manager has already been
+   * constructed, which is when `authStorage` typically becomes available at the
+   * dashboard bootstrap site (`packages/dashboard/src/server.ts`). Stores no
+   * pause/throttle behavior itself; see {@link SelfHealingOptions.getUsageControlSnapshot}.
+   */
+  setUsageControlSnapshotProvider(provider: SelfHealingOptions["getUsageControlSnapshot"]): void {
+    this.options.getUsageControlSnapshot = provider;
   }
 
   private classifyPausedAbortWorkflowRecovery(

@@ -405,11 +405,13 @@ Security-sensitive file-browser escape hatches are project-only. `allowAbsoluteF
 | Setting | Type | Default | Description |
 |---|---|---:|---|
 | `globalPause` | `boolean` | `false` | Hard stop: terminate active engine sessions and pause scheduling immediately. |
-| `globalPauseReason` | `string` | `undefined` | Optional reason for `globalPause` (`"rate-limit"` for automatic pauses, `"manual"` for user-triggered pauses). Cleared on unpause. |
+| `globalPauseReason` | `string` | `undefined` | Optional reason for `globalPause` (`"rate-limit"` for automatic pauses, `"manual"` for user-triggered pauses, and `"usage-threshold"` — reserved for FUSI-058, a future automatic pause triggered by `usagePauseThresholdPercent`). Cleared on unpause. |
 | `enginePaused` | `boolean` | `false` | Soft pause: stop dispatching new work while letting active sessions finish. While paused (including shared pause windows with `globalPause`), stuck-task polling/timers are suspended so paused wall-clock time does not count against `taskStuckTimeoutMs`. Clearing pause state resumes runtime scheduling and gives tracked active sessions a fresh stuck-task grace window before normal detection resumes; when `autoMerge` is enabled, eligible `in-review` tasks are re-swept into the auto-merge queue (paused/blocked/failed review tasks remain skipped). |
 | `maxConcurrent` | `number` | `2` | Max concurrent task-lane AI agents (planning, executor, merge). Editable from Settings and the Command Center Overview controls dashboard. |
 | `maxTriageConcurrent` | `number` | `2` | Max concurrent planning agents. Editable from Settings and the Command Center Overview controls dashboard. |
 | `globalMaxConcurrent` | `number` | `4` | System-wide max concurrent agents across all projects. |
+| `usagePauseThresholdPercent` | `number` | `undefined` | FUSI-057 scaffolding, consumed by FUSI-058: when set (0-100), the downstream global-pause trigger fires as worst-case usage (see `UsageControlSnapshot`) crosses this percent, before a hard 429. `undefined` = feature off. |
+| `usageThrottleThresholdPercent` | `number` | `undefined` | FUSI-057 scaffolding, consumed by FUSI-059: when set (0-100), the downstream adaptive-concurrency dispatcher begins throttling as worst-case usage crosses this percent. `undefined` = feature off. |
 | `maxWorktrees` | `number` | `4` | Max git worktrees. Editable from Settings and the Command Center Overview controls dashboard. |
 | `pollIntervalMs` | `number` | `15000` | Scheduler poll interval (ms). |
 | `heartbeatMultiplier` | `number` | `1` | Global multiplier applied to agent heartbeat timing: both heartbeat intervals and unresponsive timeout bases. Configured from the Agents screen (not Settings). |

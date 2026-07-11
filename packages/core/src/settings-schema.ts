@@ -332,6 +332,11 @@ export const DEFAULT_PROJECT_SETTINGS = {
   maxConcurrent: 2,
   maxTriageConcurrent: 2,
   globalMaxConcurrent: 4,
+  // FNXC:UsageControl 2026-07-11-00:00 (FUSI-057): scaffolding consumed by FUSI-058 (pause)
+  // and FUSI-059 (throttle) — undefined means the feature is off; 'usage-threshold' is a
+  // reserved globalPauseReason value these thresholds may produce once wired.
+  usagePauseThresholdPercent: undefined,
+  usageThrottleThresholdPercent: undefined,
   maxWorktrees: 4,
   pollIntervalMs: 15000,
   heartbeatMultiplier: 1,

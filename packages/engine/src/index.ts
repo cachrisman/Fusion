@@ -791,7 +791,7 @@ export { RoutineScheduler, type RoutineSchedulerOptions } from "./routine-schedu
 export { StuckTaskDetector, type StuckTaskDetectorOptions, type DisposableSession } from "./stuck-task-detector.js";
 export { HeartbeatMonitor, HeartbeatTriggerScheduler, type WakeContext } from "./agent-heartbeat.js";
 export { TokenCapDetector, type TokenCapCheckResult } from "./token-cap-detector.js";
-export { SelfHealingManager, type SelfHealingOptions, type RebindResult } from "./self-healing.js";
+export { SelfHealingManager, type SelfHealingOptions, type RebindResult, type UsageControlSnapshot } from "./self-healing.js";
 export { PluginRunner, type PluginRunnerOptions } from "./plugin-runner.js";
 export {
   registerPluginTraits,

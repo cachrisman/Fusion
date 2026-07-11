@@ -2113,3 +2113,102 @@ export function resolveRateLimitResetAt(
 
   return best;
 }
+
+/*
+FNXC:UsageControl 2026-07-11-00:00 (FUSI-057):
+The engine (scheduler, self-healing) needs a worst-case read on live Anthropic-subscription
+usage to gate future pause/throttle behavior (FUSI-058, FUSI-059), but `@fusion/engine` must
+never import `@fusion/dashboard`. `UsageControlSnapshot` + `resolveUsageControlSnapshot` are
+the single engine-consumable reduction of the display-only `ProviderUsage[]` shape: a pure,
+display-agnostic function with no I/O, no cache access, and no `Date.now()` reliance beyond
+what the windows already encode. The dashboard wires a DI callback (`getUsageControlSnapshot`
+on `SelfHealingOptions`, see `packages/engine/src/self-healing.ts`) that calls
+`fetchAllProviderUsage(authStorage)` then this resolver, so the engine can read a compact
+snapshot without ever importing this file. This generalizes FUSI-053's `resolveRateLimitResetAt`
+/ `getRateLimitResetAt` seam: `soonestResetAt`/`soonestResetMs` here subsume that reset time, so
+a future refactor could derive `getRateLimitResetAt`'s return from this snapshot instead of
+maintaining a parallel reducer. As of this task, FUSI-053 had NOT landed on this branch's base
+(its commits exist in git history but are not an ancestor of HEAD), so this seam was added
+alongside rather than by extending FUSI-053's code directly; FUSI-053's `getRateLimitResetAt`
+path is untouched by this change.
+*/
+
+/**
+ * Compact, engine-consumable reduction of live Anthropic-subscription usage.
+ * Display-agnostic: contains only the fields downstream usage-control behaviors
+ * (threshold pause, adaptive concurrency) need, not the full display shape
+ * (`resetText`, `windowDurationMs`, per-window labels for every window, etc.)
+ * that `UsageIndicator.tsx` renders.
+ */
+export interface UsageControlSnapshot {
+  /** Highest `percentUsed` across the considered Claude windows (5h + weekly). */
+  worstPercentUsed: number;
+  /** `percentLeft` of the same worst-case window (not simply `100 - worstPercentUsed`;
+   *  derived directly from that window so any provider-side rounding is preserved). */
+  worstPercentLeft: number;
+  /** ISO 8601 timestamp of the soonest FUTURE reset across usable windows, or `null`. */
+  soonestResetAt: string | null;
+  /** Milliseconds until the soonest future reset, or `null`. */
+  soonestResetMs: number | null;
+  /** Weekly-window pace passthrough (`ahead`/`on-track`/`behind`), or `null` when unavailable. */
+  pace: "ahead" | "on-track" | "behind" | null;
+  /** Label of the window that produced the worst-case percentages (e.g. "Session (5h)", "Weekly"). */
+  worstWindowLabel: string;
+}
+
+/**
+ * Reduce `ProviderUsage[]` to a compact `UsageControlSnapshot` for engine consumption.
+ * PURE: no I/O, no cache access, no hidden `Date.now()` dependence beyond what the
+ * windows already encode (their `resetMs`/`resetAt` were computed at fetch time).
+ *
+ * Selects the `"Claude"` provider with `status === "ok"`, considers its `"Session (5h)"`
+ * and `"Weekly"` windows (per-model weekly windows, e.g. `"Weekly (Sonnet)"`, are also
+ * included for worst-case percent selection, but the `pace` field only reads the
+ * aggregate `"Weekly"` window). Returns `null` when there is no Claude provider with
+ * `status === "ok"`, or when it has no usable window.
+ */
+export function resolveUsageControlSnapshot(providers: ProviderUsage[]): UsageControlSnapshot | null {
+  const claude = providers.find((p) => p.name === "Claude" && p.status === "ok");
+  if (!claude || claude.windows.length === 0) {
+    return null;
+  }
+
+  const candidateWindows = claude.windows.filter(
+    (w) => w.label === "Session (5h)" || w.label === "Weekly" || w.label.startsWith("Weekly ("),
+  );
+  if (candidateWindows.length === 0) {
+    return null;
+  }
+
+  // Worst-case: highest percentUsed wins; ties keep the first (stable) match.
+  let worst = candidateWindows[0]!;
+  for (const w of candidateWindows) {
+    if (w.percentUsed > worst.percentUsed) {
+      worst = w;
+    }
+  }
+
+  // Soonest future reset across ALL candidate windows (only positive resetMs counts).
+  let soonestResetMs: number | null = null;
+  let soonestResetAt: string | null = null;
+  for (const w of candidateWindows) {
+    if (typeof w.resetMs === "number" && w.resetMs > 0) {
+      if (soonestResetMs === null || w.resetMs < soonestResetMs) {
+        soonestResetMs = w.resetMs;
+        soonestResetAt = w.resetAt ?? null;
+      }
+    }
+  }
+
+  const weeklyWindow = claude.windows.find((w) => w.label === "Weekly");
+  const pace = weeklyWindow?.pace?.status ?? null;
+
+  return {
+    worstPercentUsed: worst.percentUsed,
+    worstPercentLeft: worst.percentLeft,
+    soonestResetAt,
+    soonestResetMs,
+    pace,
+    worstWindowLabel: worst.label,
+  };
+}
