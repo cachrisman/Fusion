@@ -98,7 +98,7 @@
  * cross-project `CentralCore` registry — base tool count forty-one →
  * forty-three) plus `fn_project_create`/`fn_project_update`/
  * `fn_project_remove` (DESTRUCTIVE tier — with --allow-destructive:
- * forty-nine → fifty-two). See the FNXC:McpServer 2026-07-11-10:00 comments
+ * forty-nine → fifty-four). See the FNXC:McpServer 2026-07-11-10:00 comments
  * above the project read/write tool sections for the cross-project
  * blast-radius rationale.
  * `--allow-destructive` flag as the rest of the tier — no second gate) is a
@@ -110,6 +110,32 @@
  * bearing). See the FNXC:McpServer 2026-07-11-09:30 comment above
  * `fnSettingsUpdate` in the destructive-tools section for the full
  * rationale.
+ *
+ * FNXC:McpServer 2026-07-11-11:00:
+ * FUSI-021 is the consolidating quality gate after FUSI-017…020 — it adds NO
+ * new tool and no new domain logic. It pins the six invariants documented
+ * above STRUCTURALLY, over the WHOLE resolved registry (base + destructive),
+ * in `packages/cli/src/mcp-server/__tests__/registry-invariants.test.ts`:
+ * (A) `buildMcpToolRegistry` is the ONLY base+destructive combine point and
+ * the two tiers never share a tool name; (B) every `*_delete` tool plus the
+ * known powerful non-`_delete` mutations (`fn_settings_update`,
+ * `fn_project_create`/`update`/`remove`) live ONLY in
+ * {@link DESTRUCTIVE_TOOL_TIER}; (C) every destructive description is
+ * `DESTRUCTIVE:`-prefixed, no base description is; (D) every destructive
+ * invocation writes an ids/counts/outcomes-only {@link auditDestructiveInvocation}
+ * line to stderr, never stdout; (E) every tool response — base or
+ * destructive — is {@link redactSecretsDeep}-clean of secret-shaped
+ * plaintext; (F) no release/publish/version-tag/changeset tooling is ever
+ * declared. A future tool addition that violates any of these fails that
+ * suite with no per-task edit required here. It also reconciles every
+ * stale tool-count reference this task found (docs/mcp.md's "Destructive
+ * tools" section undercounted the tier at "seven" instead of the real
+ * eleven) and confirms `tools.test.ts`'s hardcoded allow-lists,
+ * `http-transport.test.ts`'s source-derived expectation, and the FUSI-013
+ * boot-smoke's `tsImport`-sourced expected set all still match
+ * `MCP_TOOL_REGISTRY`/`DESTRUCTIVE_TOOL_TIER` at HEAD. After merging with
+ * FUSI-018's mission/goal mutation base tools, the current sizes are
+ * 43 base / 11 destructive / 54 combined.
  */
 import {
   TaskStore,
