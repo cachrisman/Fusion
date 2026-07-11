@@ -2913,20 +2913,26 @@ PATCH — `scope: "project"` calls `store.updateSettings(patch)` (the
 project-config writer, which already filters out global-only keys and
 treats a `null` value as an explicit key-delete); `scope: "global"` calls
 `store.updateGlobalSettings(patch)` (merges into the global store and emits
-`settings:updated`). It NEVER reads the whole settings object and writes it
-back — the patch is passed straight through to the store, so the store's
-own key-filtering/null-delete/merge semantics are the single source of
-truth (no duplicated validation here). There is no `scope: "effective"`
+`settings:updated`). There is no `scope: "effective"`
 write target — an effective read is a merge of two independently-owned
 writable scopes, so writing to it would be ambiguous.
 
-Key-scope choice: rather than rejecting a patch that mixes in a key
-belonging to the other scope, this handler surfaces which keys were
-APPLIED vs DROPPED in both the audit line and the tool result (using
-`isGlobalSettingsKey`/`isProjectSettingsKey` purely for that informational
-split) and still lets the underlying store's own silent filter run —
-matching `updateSettings`'s existing behavior elsewhere in Fusion (see the
-changeset `dev:` note for the recorded rationale). The stderr audit line
+FNXC:McpServer 2026-07-11-12:00:
+Fixed (FUSI-048): the handler now filters the patch to IN-SCOPE keys
+(via `isProjectSettingsKey`/`isGlobalSettingsKey`) BEFORE calling
+`store.updateSettings`/`store.updateGlobalSettings` — it no longer passes
+the raw full patch through. Previously the raw patch was written straight
+to the store, which only strips `MOVED_SETTINGS_KEYS`; a wrong-scope key
+that was NOT a moved key got silently persisted into the row (inert,
+since it is stripped on read) even though the response reported it as
+"dropped". Now `appliedKeys` is computed FIRST and is exactly the set of
+keys handed to the store, so applied === written and `droppedKeys`
+accurately reflects keys that were genuinely excluded from the write —
+no wrong-scope junk ever lands in the settings row. If every key is
+dropped (empty filtered patch), the store is NOT called at all — the
+handler still returns an informational (non-error) result reporting all
+keys as dropped and none applied, so the client gets an accurate report
+without Fusion issuing a pointless empty write. The stderr audit line
 carries the patched key NAMES only, never values — patch values may be
 secret-bearing (e.g. an `mcpServers` secret ref) and must never be echoed
 back to the client either in the audit line or in `structuredContent`.
@@ -2963,21 +2969,42 @@ const fnSettingsUpdate: McpToolDefinition = {
       return errorResult("patch must contain at least one key.");
     }
 
+    const belongsToScope = scope === "project" ? isProjectSettingsKey : isGlobalSettingsKey;
+    const appliedKeys = patchKeys.filter((key) => belongsToScope(key));
+    const droppedKeys = patchKeys.filter((key) => !belongsToScope(key));
+
+    // FNXC:McpServer 2026-07-11-12:00: filter to in-scope keys BEFORE writing,
+    // so the store never sees (and never persists) a wrong-scope key.
+    const rawPatch = patch as Record<string, unknown>;
+    const filteredPatch: Record<string, unknown> = {};
+    for (const key of appliedKeys) {
+      filteredPatch[key] = rawPatch[key];
+    }
+
+    if (appliedKeys.length === 0) {
+      // Every key in the patch belonged to the other scope — do not issue an
+      // empty write to the store. Still return an accurate, non-error report.
+      auditDestructiveInvocation({ tool: "fn_settings_update", resourceId: scope, outcome: "no-op" });
+      console.error(`[fn mcp serve] DESTRUCTIVE fn_settings_update scope=${scope} keys=${patchKeys.join(",")} outcome=no-op`);
+
+      return textResult(
+        `No changes made to ${scope} settings — every key in the patch belongs to the other scope.\n` +
+          `Dropped keys (not valid for ${scope} scope): ${droppedKeys.join(", ")}`,
+        { structuredContent: redactSecretsDeep({ scope, appliedKeys, droppedKeys, outcome: "no-op" }) },
+      );
+    }
+
     try {
       if (scope === "project") {
-        await store.updateSettings(patch as Record<string, unknown>);
+        await store.updateSettings(filteredPatch);
       } else {
-        await store.updateGlobalSettings(patch as Record<string, unknown>);
+        await store.updateGlobalSettings(filteredPatch);
       }
     } catch (error) {
       auditDestructiveInvocation({ tool: "fn_settings_update", resourceId: scope, outcome: "error" });
       if (error instanceof Error) return errorResult(error.message);
       throw error;
     }
-
-    const belongsToScope = scope === "project" ? isProjectSettingsKey : isGlobalSettingsKey;
-    const appliedKeys = patchKeys.filter((key) => belongsToScope(key));
-    const droppedKeys = patchKeys.filter((key) => !belongsToScope(key));
 
     auditDestructiveInvocation({ tool: "fn_settings_update", resourceId: scope, outcome: "updated" });
     console.error(`[fn mcp serve] DESTRUCTIVE fn_settings_update scope=${scope} keys=${patchKeys.join(",")}`);

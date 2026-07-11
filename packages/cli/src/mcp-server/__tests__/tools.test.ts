@@ -1620,6 +1620,104 @@ describe("fn mcp serve — in-memory server smoke test", () => {
       }
     });
 
+    it("fn_settings_update (FUSI-048) drops a global-only key from a project-scope patch, applies it not, and never persists it into the project row", async () => {
+      const { client, mcpServer } = await connectClient({ allowDestructive: true });
+      try {
+        const result = await client.callTool({
+          name: "fn_settings_update",
+          arguments: { scope: "project", patch: { themeMode: "dark" } },
+        });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { appliedKeys: string[]; droppedKeys: string[] };
+        expect(structured.appliedKeys).not.toContain("themeMode");
+        expect(structured.droppedKeys).toContain("themeMode");
+
+        // Confirm it was never persisted into the raw project settings row.
+        const row = (
+          store as unknown as { db: { prepare: (sql: string) => { get: (...args: unknown[]) => { settings?: string } | undefined } } }
+        ).db
+          .prepare("SELECT settings FROM config WHERE id = 1")
+          .get();
+        const rawSettings = row?.settings ? (JSON.parse(row.settings) as Record<string, unknown>) : {};
+        expect(Object.prototype.hasOwnProperty.call(rawSettings, "themeMode")).toBe(false);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_settings_update (FUSI-048) drops a project-only key from a global-scope patch, applies it not, and never persists it into the global row", async () => {
+      const { client, mcpServer } = await connectClient({ allowDestructive: true });
+      try {
+        const result = await client.callTool({
+          name: "fn_settings_update",
+          arguments: { scope: "global", patch: { globalPause: true } },
+        });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { appliedKeys: string[]; droppedKeys: string[] };
+        expect(structured.appliedKeys).not.toContain("globalPause");
+        expect(structured.droppedKeys).toContain("globalPause");
+
+        // Confirm it was never persisted into the raw global settings store.
+        const rawGlobal = await store.getGlobalSettingsStore().readRaw();
+        expect(Object.prototype.hasOwnProperty.call(rawGlobal, "globalPause")).toBe(false);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_settings_update (FUSI-048) applies only the in-scope key from a mixed-scope patch and drops the wrong-scope key", async () => {
+      const { client, mcpServer } = await connectClient({ allowDestructive: true });
+      try {
+        const result = await client.callTool({
+          name: "fn_settings_update",
+          arguments: { scope: "project", patch: { globalPause: true, themeMode: "dark" } },
+        });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { appliedKeys: string[]; droppedKeys: string[] };
+        expect(structured.appliedKeys).toEqual(["globalPause"]);
+        expect(structured.droppedKeys).toEqual(["themeMode"]);
+
+        const settings = await store.getSettings();
+        expect(settings.globalPause).toBe(true);
+
+        const row = (
+          store as unknown as { db: { prepare: (sql: string) => { get: (...args: unknown[]) => { settings?: string } | undefined } } }
+        ).db
+          .prepare("SELECT settings FROM config WHERE id = 1")
+          .get();
+        const rawSettings = row?.settings ? (JSON.parse(row.settings) as Record<string, unknown>) : {};
+        expect(Object.prototype.hasOwnProperty.call(rawSettings, "themeMode")).toBe(false);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_settings_update (FUSI-048) reports all-dropped and skips the store write when every key is wrong-scope", async () => {
+      const { client, mcpServer } = await connectClient({ allowDestructive: true });
+      const updateSettingsSpy = vi.spyOn(store, "updateSettings");
+      try {
+        const result = await client.callTool({
+          name: "fn_settings_update",
+          arguments: { scope: "project", patch: { themeMode: "dark" } },
+        });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { appliedKeys: string[]; droppedKeys: string[]; outcome: string };
+        expect(structured.appliedKeys).toEqual([]);
+        expect(structured.droppedKeys).toEqual(["themeMode"]);
+        expect(structured.outcome).toBe("no-op");
+        expect(updateSettingsSpy).not.toHaveBeenCalled();
+        const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+        expect(text).toMatch(/no changes/i);
+      } finally {
+        updateSettingsSpy.mockRestore();
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
     it("fn_settings_update rejects a missing/empty patch or an invalid scope", async () => {
       const { client, mcpServer } = await connectClient({ allowDestructive: true });
       try {
