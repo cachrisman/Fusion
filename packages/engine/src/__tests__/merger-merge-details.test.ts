@@ -572,7 +572,15 @@ describe("aiMergeTask — usage limit detection", () => {
     setupFailingTheirsStrategy();
   });
 
-  it("triggers global pause when merger catches a usage-limit error", async () => {
+  /*
+   * FUSI-064: a usage-limit/429 must short-circuit immediately out of the
+   * attempt-1/2/3 retry ladder (see the FNXC:RateLimitResume comment in
+   * runAiAgentForCommit's catch) instead of burning all 3 attempts and
+   * surfacing as the unrelated "AI merge failed: all 3 attempts exhausted"
+   * terminal message. These tests now assert the RAW usage-limit error
+   * propagates after exactly one attempt, not the generic exhaustion wrapper.
+   */
+  it("triggers global pause when merger catches a usage-limit error and propagates the raw error after one attempt", async () => {
     const store = createMockStore(
       { id: "FN-050", worktree: "/tmp/root/.worktrees/KB-050" },
       [{ id: "FN-050", worktree: "/tmp/root/.worktrees/KB-050", column: "in-review" } as Task],
@@ -589,8 +597,10 @@ describe("aiMergeTask — usage limit detection", () => {
 
     await expect(
       aiMergeTask(store, "/tmp/root", "FN-050", { usageLimitPauser: pauser }),
-    ).rejects.toThrow("AI merge failed");
+    ).rejects.toThrow("rate_limit_error: Rate limit exceeded");
 
+    // Only ONE attempt ran (no burning attempts 2/3 on a persistent usage limit).
+    expect(onUsageLimitHitSpy).toHaveBeenCalledTimes(1);
     expect(onUsageLimitHitSpy).toHaveBeenCalledWith(
       "merger",
       "FN-050",
@@ -602,7 +612,7 @@ describe("aiMergeTask — usage limit detection", () => {
     });
   });
 
-  it("triggers global pause when session.prompt() resolves with exhausted-retry error on state.error", async () => {
+  it("triggers global pause when session.prompt() resolves with exhausted-retry error on state.error and propagates the raw error", async () => {
     const store = createMockStore(
       { id: "FN-050", worktree: "/tmp/root/.worktrees/KB-050" },
       [{ id: "FN-050", worktree: "/tmp/root/.worktrees/KB-050", column: "in-review" } as Task],
@@ -620,9 +630,10 @@ describe("aiMergeTask — usage limit detection", () => {
 
     await expect(
       aiMergeTask(store, "/tmp/root", "FN-050", { usageLimitPauser: pauser }),
-    ).rejects.toThrow("AI merge failed");
+    ).rejects.toThrow("429 Too Many Requests");
 
-    // UsageLimitPauser should be called with "merger" agent type
+    // UsageLimitPauser should be called with "merger" agent type, exactly once
+    expect(onUsageLimitHitSpy).toHaveBeenCalledTimes(1);
     expect(onUsageLimitHitSpy).toHaveBeenCalledWith(
       "merger",
       "FN-050",
@@ -650,6 +661,8 @@ describe("aiMergeTask — usage limit detection", () => {
       },
     } as any);
 
+    // Non-usage-limit errors still exhaust all 3 attempts and surface the
+    // generic exhaustion wrapper — unaffected by the FUSI-064 short-circuit.
     await expect(
       aiMergeTask(store, "/tmp/root", "FN-050", { usageLimitPauser: pauser }),
     ).rejects.toThrow("AI merge failed");
@@ -670,10 +683,11 @@ describe("aiMergeTask — usage limit detection", () => {
       },
     } as any);
 
-    // Should not crash — just re-throw
+    // Should not crash — just re-throw the raw usage-limit error (still
+    // short-circuits out of the retry ladder even with no pauser configured).
     await expect(
       aiMergeTask(store, "/tmp/root", "FN-050"),
-    ).rejects.toThrow("AI merge failed");
+    ).rejects.toThrow("rate_limit_error: Rate limit exceeded");
   });
 
   it("triggers global pause for overloaded error", async () => {
@@ -693,8 +707,9 @@ describe("aiMergeTask — usage limit detection", () => {
 
     await expect(
       aiMergeTask(store, "/tmp/root", "FN-050", { usageLimitPauser: pauser }),
-    ).rejects.toThrow("AI merge failed");
+    ).rejects.toThrow("overloaded_error: Overloaded");
 
+    expect(onUsageLimitHitSpy).toHaveBeenCalledTimes(1);
     expect(onUsageLimitHitSpy).toHaveBeenCalledWith(
       "merger",
       "FN-050",

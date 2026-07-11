@@ -73,6 +73,7 @@ import {
 } from "./verification-followup-dedup.js";
 import { finalizeProvenAutoMergeTask } from "./auto-merge-finalization.js";
 import { isTransientError } from "./transient-error-detector.js";
+import { isUsageLimitError, type UsageLimitPauser } from "./usage-limit-detector.js";
 import { classifyTransientMergeError } from "./transient-merge-error-classifier.js";
 import { TunnelProcessManager } from "./remote-access/tunnel-process-manager.js";
 import type {
@@ -2535,6 +2536,10 @@ export class ProjectEngine {
         // don't start a merge whose queue entry was cleared by stop().
         if (this.shuttingDown) break;
         const hasManualResolver = this.hasMergeResolvers(taskId);
+        // FNXC:RateLimitResume 2026-07-11-00:00 (FUSI-064): hoisted to try-block scope
+        // (not the nested "Direct merge via AI agent" else-block below) so the outer
+        // catch's usage-limit classification can read it.
+        let usageLimitPauser: UsageLimitPauser | undefined;
         try {
           // Manual merges (onMerge) skip auto-merge eligibility checks
           if (!hasManualResolver) {
@@ -3055,7 +3060,7 @@ export class ProjectEngine {
 
             const agentStore = (this.runtime as any).agentStore;
 
-            const usageLimitPauser = (this.runtime as any).usageLimitPauser;
+            usageLimitPauser = (this.runtime as any).usageLimitPauser;
 
             const rawMerge = async () => {
               this.activeMergeTaskId = taskId;
@@ -3188,6 +3193,34 @@ export class ProjectEngine {
           if (mergeWasAborted) {
             runtimeLog.log(`${hasManualResolver ? "Manual" : "Auto"}-merge aborted for ${taskId}: ${errorMsg}`);
             this.mergeAbortController = null;
+            if (hasManualResolver) {
+              this.rejectMergeResolvers(taskId, err instanceof Error ? err : new Error(errorMsg));
+            } else {
+              await store.updateTask(taskId, { status: null }).catch(() => undefined);
+            }
+            continue;
+          }
+
+          /*
+           * FNXC:RateLimitResume 2026-07-11-00:00:
+           * A usage-limit/429 during merge must never be a terminal task failure
+           * (FUSI-064). This is the chokepoint every non-workspace `runAiMerge`
+           * throw funnels through before the workspace-specific / verification /
+           * generic mergeRetries-exhaustion park logic below — classify it FIRST so
+           * a usage-limit condition never burns a mergeRetry or parks status:"failed".
+           * `usageLimitPauser.onUsageLimitHit` triggers globalPause('rate-limit'),
+           * which halts all further merge dispatch; clearing status to null (not
+           * failed) leaves the in-review task eligible for the normal cooldown
+           * sweep to re-attempt once self-healing auto-unpauses. Respects FN-5147:
+           * an `autoMerge:false` manual merge rejects its resolver (surfacing the
+           * pause to the operator) instead of being force-merged or moved backward.
+           */
+          if (usageLimitPauser && isUsageLimitError(errorMsg)) {
+            await usageLimitPauser.onUsageLimitHit("merger", taskId, errorMsg).catch(() => undefined);
+            await store
+              .logEntry(taskId, `Merge paused — usage limit detected: ${errorMsg}`, "UsageLimit")
+              .catch(() => undefined);
+            runtimeLog.warn(`${hasManualResolver ? "Manual" : "Auto"}-merge paused for ${taskId} — usage limit detected, will auto-resume after rate limit clears`);
             if (hasManualResolver) {
               this.rejectMergeResolvers(taskId, err instanceof Error ? err : new Error(errorMsg));
             } else {

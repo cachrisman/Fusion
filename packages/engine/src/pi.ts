@@ -78,6 +78,7 @@ import type { SystemPromptLayers } from "./prompt-layers.js";
 import { READONLY_ALLOWLIST, filterCustomToolsForReadonly, isReadonlyAllowed } from "./workflow-step-tool-policy.js";
 import { createStreamingDeltaNormalizer } from "./streaming-delta.js";
 import { isModelAuthTierIncompatibilityError, isProviderModelNotFoundError, isUnsupportedMessageRoleError } from "./transient-error-detector.js";
+import { isUsageLimitError } from "./usage-limit-detector.js";
 import { logMcpForwardingSkipped, runtimeSupportsMcp } from "./mcp-runtime-support.js";
 import { connectMcpSessionTools, type McpClientFactory, type McpSessionToolset } from "./mcp-session-tools.js";
 export { isModelAuthTierIncompatibilityError } from "./transient-error-detector.js";
@@ -2572,6 +2573,35 @@ export async function createFnAgent(options: AgentOptions): Promise<AgentResult>
     });
   };
 
+  /*
+   * FNXC:RateLimitResume 2026-07-11-00:00:
+   * A usage-limit/429 underlying error (rate limit, quota, overloaded, billing —
+   * see isUsageLimitError) must NEVER surface as a terminal ModelFallbackExhaustedError,
+   * even when it is the reason a distinct fallback model also failed. Every AI lane's
+   * catch block classifies isUsageLimitError() on the raw underlying error to trigger a
+   * pause-and-auto-resume (UsageLimitPauser -> globalPause('rate-limit') -> self-healing
+   * auto-unpause), not a task failure. Wrapping the usage-limit reason inside
+   * ModelFallbackExhaustedError's composed message shadowed that classification in
+   * exactly the same string-matching lanes rely on when a genuinely distinct fallback
+   * ALSO hit a limit (FUSI-064). Fix at the source: when the underlying reason is a
+   * usage-limit condition, re-throw it unchanged instead of wrapping — every lane's
+   * isUsageLimitError(err.message) check then classifies it correctly. A genuine
+   * non-usage-limit model-selection failure (auth-tier incompatibility, 404 model not
+   * found, unsupported role, etc.) is unaffected and still produces the terminal,
+   * operator-actionable ModelFallbackExhaustedError.
+   */
+  const throwFallbackExhausted = (
+    triggerPoint: "session-creation" | "prompt-time",
+    attempts: number,
+    underlying: unknown,
+  ): never => {
+    const underlyingMessage = underlying instanceof Error ? underlying.message : String(underlying);
+    if (isUsageLimitError(underlyingMessage)) {
+      throw underlying instanceof Error ? underlying : new Error(underlyingMessage);
+    }
+    throw makeFallbackExhaustedError(triggerPoint, attempts, underlying);
+  };
+
   const emitFallbackUsed = async (triggerPoint: "session-creation" | "prompt-time"): Promise<void> => {
     if (!options.onFallbackModelUsed || !selectedModel || !fallbackModel || !hasDistinctFallback) {
       return;
@@ -2605,7 +2635,7 @@ export async function createFnAgent(options: AgentOptions): Promise<AgentResult>
     try {
       sessionResult = await createSessionWithModel(fallbackModel);
     } catch (fallbackErr: unknown) {
-      throw makeFallbackExhaustedError("session-creation", 2, fallbackErr);
+      throw throwFallbackExhausted("session-creation", 2, fallbackErr);
     }
     await emitFallbackUsed("session-creation");
     piLog.log("Fallback session created successfully");
@@ -2757,7 +2787,7 @@ export async function createFnAgent(options: AgentOptions): Promise<AgentResult>
         throw err;
       }
       if (!hasDistinctFallback) {
-        throw makeFallbackExhaustedError("prompt-time", 1, err);
+        throw throwFallbackExhausted("prompt-time", 1, err);
       }
 
       usingFallback = true;
@@ -2811,7 +2841,7 @@ export async function createFnAgent(options: AgentOptions): Promise<AgentResult>
             throw fallbackErr;
           }
         }
-        throw makeFallbackExhaustedError("prompt-time", 2, fallbackErr);
+        throw throwFallbackExhausted("prompt-time", 2, fallbackErr);
       }
     }
   };

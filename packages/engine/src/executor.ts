@@ -10299,7 +10299,18 @@ export class TaskExecutor {
             stuckRequeue = this.stuckAborted.get(task.id) ?? true;
             this.stuckAborted.delete(task.id);
           } else if (this.options.usageLimitPauser && isUsageLimitError(errorMessage)) {
+            /*
+             * FNXC:RateLimitResume 2026-07-11-00:00:
+             * A usage-limit/429 must never be a terminal task failure (FUSI-064).
+             * Fire the pauser (globalPause('rate-limit')) and leave the task
+             * resumable in todo with progress/step state preserved, mirroring the
+             * sibling pausedAborted branch above, instead of falling through to the
+             * generic "execution failed" terminal handling below.
+             */
             await this.options.usageLimitPauser.onUsageLimitHit("executor", task.id, errorMessage);
+            await this.store.logEntry(task.id, "Usage limit hit — paused for auto-resume after rate limit clears", undefined, this.getRunContextFor(task.id));
+            this.markGraphExecuteSelfRequeued(task.id);
+            await this.store.moveTask(task.id, "todo", { preserveResumeState: true });
           } else if (isTransientError(errorMessage)) {
             const decision = computeRecoveryDecision({
               recoveryRetryCount: task.recoveryRetryCount,
@@ -12034,7 +12045,23 @@ export class TaskExecutor {
         } else if (await this.handleNonContinuableSessionRetry(task, errorMessage)) {
           return;
         } else if (this.options.usageLimitPauser && isUsageLimitError(errorMessage)) {
+          /*
+           * FNXC:RateLimitResume 2026-07-11-00:00:
+           * A usage-limit/429 must never be a terminal task failure (FUSI-064).
+           * Without an explicit `return` here, control fell through the rest of
+           * this if/else-if chain to the generic "execution failed" terminal
+           * handling a few lines below, which marked the task `status: "failed"`
+           * even though the pauser had already fired — the literal reproduction of
+           * the reported symptom. Fire the pauser, log, and requeue to todo with
+           * resume state preserved (matching the sibling transient-retry/paused
+           * branches), then return before the terminal fallthrough.
+           */
           await this.options.usageLimitPauser.onUsageLimitHit("executor", task.id, errorMessage);
+          await this.store.logEntry(task.id, "Usage limit hit — paused for auto-resume after rate limit clears", undefined, this.getRunContextFor(task.id));
+          await this.persistTokenUsage(task.id);
+          this.markGraphExecuteSelfRequeued(task.id);
+          await this.store.moveTask(task.id, "todo", { preserveResumeState: true });
+          return;
         } else if (isTransientError(errorMessage)) {
           // Transient network/infrastructure error — use bounded recovery policy
           const decision = computeRecoveryDecision({

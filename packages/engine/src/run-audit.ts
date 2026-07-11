@@ -601,6 +601,14 @@ export type DatabaseMutationType =
   /** Metadata: { taskId, repo, worktreePath, success, reason } */
   | "task:reconcile-orphaned-workspace-worktree"
   /**
+   * FNXC:RateLimitResume 2026-07-11-00:00 (FUSI-064):
+   * Self-healing's auto-unpause emits this when clearing a `globalPauseReason:"rate-limit"`
+   * pause, so tasks parked by usage-limit/429 hits across every AI lane are re-driven via
+   * the normal triage-poll/executor-scheduler/auto-merge-cooldown seams (no bespoke
+   * lifecycle transition). Metadata: { reason }.
+   */
+  | "task:reconcile-rate-limit-redrive"
+  /**
    * FNXC:AgentTaskStateDrift 2026-06-23-08:50:
    * Self-healing must leave file-scope lease queues intact while recording when stale durable Agent.taskId/state drift is cleared. Metadata: { agentId, taskId, taskColumn, agentState, status, blockedBy, overlapBlockedBy, hadFreshRun, hadActiveExecution, reason }.
    */

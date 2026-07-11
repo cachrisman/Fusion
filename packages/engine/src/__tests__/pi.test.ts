@@ -1205,7 +1205,11 @@ describe("piLog structured diagnostics", () => {
     const onFallbackModelUsed = vi.fn();
     const primarySession = {
       model: { provider: "openai", id: "gpt-4o" },
-      prompt: vi.fn().mockRejectedValue(new Error("429 Too Many Requests")),
+      // FUSI-064: not a usage-limit message — a raw 429/rate-limit underlying
+      // reason short-circuits fallback-exhaustion into a pause signal instead
+      // (see pi-fallback-usage-limit.test.ts), so this genuine-model-selection-
+      // exhaustion fixture uses an unrelated retryable error (invalid api key).
+      prompt: vi.fn().mockRejectedValue(new Error("invalid api key")),
       subscribe: vi.fn(),
       dispose: vi.fn(),
       setThinkingLevel: vi.fn(),

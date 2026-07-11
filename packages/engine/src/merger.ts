@@ -9968,6 +9968,28 @@ export async function aiMergeTask(
         throw error;
       }
 
+      /*
+       * FNXC:RateLimitResume 2026-07-11-00:00:
+       * A usage-limit/429 must never be a terminal task failure (FUSI-064).
+       * `runAiAgentForCommit`'s catch already fires `onUsageLimitHit` before
+       * re-throwing the raw underlying error. Without this short-circuit, that
+       * raw error fell through to the generic "clean up and retry" tail below,
+       * burning attempts 2 and 3 (a deterministic -X ours/theirs fallback that
+       * has nothing to do with the AI usage limit) and ultimately surfacing as
+       * the unrelated "AI merge failed for TASK: all 3 attempts exhausted"
+       * terminal message — the literal reproduction of the reported symptom.
+       * Re-throw the raw usage-limit error immediately so callers see the real
+       * (pausable) reason instead of a misleading exhausted-attempts wrapper.
+       */
+      if (error instanceof Error && isUsageLimitError(error.message)) {
+        try {
+          execSync("git reset --merge", { cwd: rootDir, stdio: "pipe" });
+        } catch {
+          // best-effort cleanup
+        }
+        throw error;
+      }
+
       // Out-of-scope verification failure: the failing tests are in files that
       // this branch never touched. Retrying will not help. Mark the task failed
       // immediately with a clear message so it does not enter limbo recovery.
@@ -11853,6 +11875,23 @@ export async function executeMergeAttempt(
       } catch {
         // best-effort abort cleanup
       }
+      throw error;
+    }
+
+    /*
+     * FNXC:RateLimitResume 2026-07-11-00:00:
+     * A usage-limit/429 must never be a terminal task failure (FUSI-064).
+     * Without this short-circuit, the raw usage-limit error thrown by
+     * `runAiAgentForCommit` reached this catch and fell through to the
+     * generic "return false" retry path a few lines below — burning
+     * attempts 2 and 3 (which have nothing to do with the AI usage limit,
+     * e.g. a deterministic -X ours/theirs fallback) before ultimately
+     * surfacing as the unrelated "AI merge failed: all 3 attempts exhausted"
+     * message. Re-throw immediately so `mergeAttempt`'s catch (which also
+     * short-circuits on `isUsageLimitError`) sees the RAW error on the very
+     * first attempt.
+     */
+    if (error instanceof Error && isUsageLimitError(error.message)) {
       throw error;
     }
 

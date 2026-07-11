@@ -1686,6 +1686,20 @@ export class SelfHealingManager {
     }, delayMs);
   }
 
+  /*
+   * FNXC:RateLimitResume 2026-07-11-00:00:
+   * FUSI-064 invariant: a usage-limit/429 must never be a terminal task failure across
+   * any AI lane — it pauses (globalPause('rate-limit')) and auto-re-drives after reset.
+   * With the FUSI-064 lane fixes (triage/executor/merger), every task parked by a usage-
+   * limit hit is left in a normally-schedulable state (triage: status cleared in the
+   * triage column; executor: todo with preserveResumeState; merger/in-review: status
+   * cleared, merge-eligible) rather than `failed`. Clearing `globalPause` here is
+   * therefore sufficient to re-drive those tasks: the existing triage poll / executor
+   * scheduler / auto-merge cooldown sweep seams pick them back up on their normal
+   * cadence — no bespoke per-task lifecycle transition is introduced. This emits a
+   * run-audit event (matching the `task:reconcile-*` naming convention) purely for
+   * operator visibility into the re-drive-after-rate-limit action.
+   */
   private async attemptUnpause(): Promise<void> {
     try {
       const settings = await this.store.getSettings();
@@ -1697,9 +1711,25 @@ export class SelfHealingManager {
         return;
       }
 
+      const wasRateLimitPause = settings.globalPauseReason === "rate-limit";
+
       log.warn("Auto-unpause: clearing globalPause");
       this.lastUnpauseAt = Date.now();
       await this.store.updateSettings({ globalPause: false, globalPauseReason: undefined });
+
+      if (wasRateLimitPause) {
+        const auditor = createRunAuditor(this.store, {
+          runId: generateSyntheticRunId("self-healing", "rate-limit-redrive"),
+          agentId: "self-healing",
+          taskId: "rate-limit-redrive",
+          phase: "maintenance",
+        });
+        await auditor.database({
+          type: "task:reconcile-rate-limit-redrive",
+          target: "global",
+          metadata: { reason: "auto-unpause-cleared-rate-limit-pause" },
+        }).catch(() => undefined);
+      }
 
       // Note: if the rate limit is still active, the next agent session will
       // hit it again → UsageLimitPauser triggers globalPause → our listener
