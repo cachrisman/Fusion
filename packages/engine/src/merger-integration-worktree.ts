@@ -275,6 +275,141 @@ export async function gitDirtyFingerprintLocal(rootDir: string): Promise<string>
   }
 }
 
+/**
+ * FNXC:MergeIsolation 2026-07-11-14:20:
+ * Classification of a target checkout's git state before any merge op runs
+ * against it. The 2026-07-11 incident left UU/AA unmerged-stage index
+ * entries in the operator's primary checkout with no MERGE_HEAD, so
+ * `git merge --abort` had nothing to abort and `git stash` refused with
+ * "unmerged paths" -- the merger's autostash path must never run `git add
+ * -A` / `git stash create` / `git reset --hard` over an already-conflicted
+ * index (git stash refuses on unmerged paths). Any code path that reaches
+ * for autostash must classify first and refuse fail-soft on unmerged-index
+ * / unsafe-dirty state BEFORE attempting to stash.
+ */
+export type TargetCheckoutDirtyState =
+  | { state: "clean" }
+  | { state: "dirty-autostashable"; dirtyPaths: string[] }
+  | {
+    state: "unmerged-index";
+    unmergedPaths: string[];
+    porcelainSample: string[];
+    mergeHeadPresent: boolean;
+  }
+  | { state: "unsafe-dirty"; reason: string; porcelainSample: string[] };
+
+/** Porcelain XY codes indicating an unresolved merge conflict stage: both
+ *  modified (UU), both added (AA), both deleted (DD), and the add/delete
+ *  combinations (AU/UA/DU/UD). See `git status --porcelain` docs. */
+const UNMERGED_PORCELAIN_CODES: ReadonlySet<string> = new Set([
+  "UU", "AA", "DD", "AU", "UA", "DU", "UD",
+]);
+
+/**
+ * FNXC:MergeIsolation 2026-07-11-14:20:
+ * Pre-merge dirty/unmerged-index guard. Reads `git status -z --porcelain`
+ * once and classifies the checkout so callers can refuse fail-soft on an
+ * unmerged-index or otherwise-unsafe-dirty tree instead of blindly
+ * autostashing (which corrupts/loses conflict-stage entries -- the reported
+ * 2026-07-11 incident). Also detects an in-progress merge/rebase/
+ * cherry-pick (via MERGE_HEAD / rebase-merge / rebase-apply /
+ * CHERRY_PICK_HEAD marker files) as unsafe-dirty: autostash-then-reset
+ * would abandon that in-progress operation's state.
+ */
+export async function classifyTargetCheckoutState(rootDir: string): Promise<TargetCheckoutDirtyState> {
+  let porcelainOut: string;
+  try {
+    const { stdout } = await execFileAsync("git", ["status", "-z", "--porcelain"], {
+      cwd: rootDir,
+      encoding: "utf-8",
+    });
+    porcelainOut = stdout;
+  } catch (err: unknown) {
+    // Can't read status at all: treat as unsafe-dirty so callers refuse
+    // rather than proceed blind against an unreadable checkout.
+    return {
+      state: "unsafe-dirty",
+      reason: `git-status-failed: ${err instanceof Error ? err.message : String(err)}`,
+      porcelainSample: [],
+    };
+  }
+
+  const entries = porcelainOut.split("\0").filter(Boolean);
+  const unmergedPaths: string[] = [];
+  const dirtyPaths: string[] = [];
+  for (const entry of entries) {
+    const code = entry.slice(0, 2);
+    const entryPath = entry.slice(3);
+    if (UNMERGED_PORCELAIN_CODES.has(code)) {
+      if (entryPath) unmergedPaths.push(entryPath);
+    } else if (entryPath) {
+      dirtyPaths.push(entryPath);
+    }
+  }
+
+  /*
+   * FNXC:MergeIsolation 2026-07-11-14:20:
+   * Detect an in-progress merge/cherry-pick via `git rev-parse -q --verify
+   * <ref>` rather than stat'ing marker files under .git directly — this
+   * keeps the guard on the same git-plumbing seam as the rest of the file
+   * (single mockable surface for tests) instead of introducing a second,
+   * harder-to-fake fs dependency. Real git exits non-zero / empty stdout
+   * when the ref is absent.
+   */
+  let mergeHeadPresent = false;
+  let inProgressOpReason: string | null = null;
+  try {
+    const { stdout: mergeHeadOut } = await execFileAsync(
+      "git",
+      ["rev-parse", "-q", "--verify", "MERGE_HEAD"],
+      { cwd: rootDir, encoding: "utf-8" },
+    );
+    if (mergeHeadOut.trim()) {
+      mergeHeadPresent = true;
+      inProgressOpReason = "merge-in-progress";
+    }
+  } catch {
+    // Non-zero exit == no MERGE_HEAD (the common case); not itself unsafe.
+  }
+  if (!inProgressOpReason) {
+    try {
+      const { stdout: cherryPickOut } = await execFileAsync(
+        "git",
+        ["rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"],
+        { cwd: rootDir, encoding: "utf-8" },
+      );
+      if (cherryPickOut.trim()) {
+        inProgressOpReason = "cherry-pick-in-progress";
+      }
+    } catch {
+      // No CHERRY_PICK_HEAD; not itself unsafe.
+    }
+  }
+
+  if (unmergedPaths.length > 0) {
+    return {
+      state: "unmerged-index",
+      unmergedPaths,
+      porcelainSample: entries.slice(0, 20),
+      mergeHeadPresent,
+    };
+  }
+
+  if (inProgressOpReason) {
+    return {
+      state: "unsafe-dirty",
+      reason: inProgressOpReason,
+      porcelainSample: entries.slice(0, 20),
+    };
+  }
+
+  if (dirtyPaths.length === 0) {
+    return { state: "clean" };
+  }
+
+  return { state: "dirty-autostashable", dirtyPaths };
+}
+
 export interface IntegrationWorktreeProbeResult {
   userCheckout: {
     worktreePath: string;
@@ -384,6 +519,53 @@ export async function acquireReuseHandoff(input: ReuseHandoffInput): Promise<Han
       worktreePath,
     });
   }
+  /*
+   * FNXC:MergeIsolation 2026-07-11-14:20:
+   * Pre-merge dirty/unmerged-index guard (must run BEFORE the autostash
+   * below). `git stash` refuses on unmerged (conflict-stage) index paths,
+   * so blindly running `git add -A` / `git stash create` / `git reset
+   * --hard` against an unmerged-index checkout does not safely capture it
+   * -- this is exactly the 2026-07-11 incident that left UU/AA entries
+   * behind with no MERGE_HEAD. Refuse fail-soft instead of autostashing.
+   */
+  const targetState = await classifyTargetCheckoutState(worktreePath);
+  if (targetState.state === "unmerged-index") {
+    await input.auditEmit?.({
+      type: "merge:integration-root-unmerged-index-refused",
+      target: worktreePath,
+      metadata: {
+        taskId: input.task.id,
+        worktreePath,
+        unmergedPaths: targetState.unmergedPaths,
+        porcelainSample: targetState.porcelainSample,
+        mergeHeadPresent: targetState.mergeHeadPresent,
+      },
+    });
+    throw new MergeHandoffRefusedError("working-tree-dirty", "unmerged-index-refused", {
+      taskId: input.task.id,
+      worktreePath,
+      unmergedPaths: targetState.unmergedPaths,
+      mergeHeadPresent: targetState.mergeHeadPresent,
+    });
+  }
+  if (targetState.state === "unsafe-dirty") {
+    await input.auditEmit?.({
+      type: "merge:integration-root-unsafe-dirty-refused",
+      target: worktreePath,
+      metadata: {
+        taskId: input.task.id,
+        worktreePath,
+        reason: targetState.reason,
+        porcelainSample: targetState.porcelainSample,
+      },
+    });
+    throw new MergeHandoffRefusedError("working-tree-dirty", "unsafe-dirty-refused", {
+      taskId: input.task.id,
+      worktreePath,
+      reason: targetState.reason,
+    });
+  }
+
   const dirtyPaths = Array.from(await snapshotDirtyFilesLocal(worktreePath)).sort();
   const dirtyFingerprint = await gitDirtyFingerprintLocal(worktreePath);
   if (dirtyPaths.length > 0 || dirtyFingerprint) {

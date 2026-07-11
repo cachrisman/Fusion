@@ -208,6 +208,38 @@ export type GitMutationType =
   | "merge:reuse-handoff-released"
   | "merge:reuse-handoff-deferred-to-worktrunk"
   | "merge:reuse-handoff-autostash"
+  /**
+   * FNXC:MergeIsolation 2026-07-11-14:20:
+   * Emitted when the pre-merge dirty/unmerged-index guard refuses to run
+   * merge git ops (and refuses to autostash) because the target checkout
+   * has unmerged (conflict-stage) index entries. `git stash` refuses on
+   * unmerged paths, so autostashing here would corrupt/abandon the
+   * conflict stage — exactly the 2026-07-11 UU/AA-without-MERGE_HEAD
+   * incident. Metadata: `{ taskId, rootDir/worktreePath, unmergedPaths,
+   * porcelainSample, mergeHeadPresent }`.
+   */
+  | "merge:integration-root-unmerged-index-refused"
+  /**
+   * FNXC:MergeIsolation 2026-07-11-14:20:
+   * Emitted when the pre-merge guard refuses because the target checkout
+   * is in an otherwise-unsafe-dirty state (git-status read failure, or an
+   * in-progress merge/rebase/cherry-pick detected via marker files) that
+   * the autostash path cannot safely capture. Metadata: `{ taskId,
+   * rootDir/worktreePath, reason, porcelainSample }`.
+   */
+  | "merge:integration-root-unsafe-dirty-refused"
+  /**
+   * FNXC:MergeIsolation 2026-07-11-14:20:
+   * Emitted after an abort/failure/cleanup path in the isolated integration
+   * worktree runs its conflict-stage cleanup (`git merge --abort` when
+   * MERGE_HEAD was present, else `git reset --hard` + `git clean -fd`
+   * scoped to that worktree). Records whether MERGE_HEAD was present, which
+   * cleanup branch ran, and whether the checkout was verified clean of
+   * unmerged index entries afterward. Metadata: `{ taskId, rootDir,
+   * mergeHeadWasPresent, cleanupBranch: "merge-abort" | "reset-hard-clean",
+   * verifiedClean }`.
+   */
+  | "merge:conflict-stage-cleaned"
   | "merge:cwd-integration-fallback-removed"
   | "merge:reuse-fallback-new-worktree"
   | "merge:reuse-fallback-pruned-stale-registration"

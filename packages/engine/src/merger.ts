@@ -140,6 +140,7 @@ import { detectAlreadyLandedOnMain, type AlreadyMergedDetectionStrategy } from "
 import { decideAutoPrerebase, probeDivergence, runAutoPrerebase } from "./merger-auto-prerebase.js";
 import {
   acquireReuseHandoff,
+  classifyTargetCheckoutState,
   ensureUsableMergeIntegrationRoot,
   MergeHandoffRefusedError,
   probeIntegrationWorktreeState,
@@ -2180,13 +2181,100 @@ ${failureContext.output.slice(0, VERIFICATION_LOG_MAX_CHARS)}
   }
 }
 
+/** Porcelain XY codes indicating an unresolved merge conflict stage. Kept
+ *  in sync with the classifier in merger-integration-worktree.ts. */
+const CONFLICT_STAGE_PORCELAIN_CODES: ReadonlySet<string> = new Set([
+  "UU", "AA", "DD", "AU", "UA", "DU", "UD",
+]);
+
+/** Count unmerged (conflict-stage) index entries via `git status -z --porcelain`. */
+async function countUnmergedIndexEntries(rootDir: string): Promise<number> {
+  try {
+    const { stdout } = await execAsync("git status -z --porcelain", { cwd: rootDir, encoding: "utf-8" });
+    const entries = stdout.split("\0").filter(Boolean);
+    return entries.filter((entry) => CONFLICT_STAGE_PORCELAIN_CODES.has(entry.slice(0, 2))).length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * FNXC:MergeIsolation 2026-07-11-15:00:
+ * No-orphaned-conflict-stage invariant. Called after any merge
+ * abort/failure/cleanup op in `rootDir` (which by this point is proven to
+ * be the isolated integration worktree, never the operator's primary
+ * checkout — see the Step 1 `worktree-equals-project-root` guards). The
+ * 2026-07-11 incident left UU/AA unmerged-stage index entries behind with
+ * no MERGE_HEAD after a failed cleanup, so `git merge --abort` had nothing
+ * to abort and `git stash` refused. This verifies zero unmerged entries
+ * remain; if any do, it forces one more scoped `git reset --hard HEAD` +
+ * `git clean -fd` (never touching anything but `rootDir`) and re-verifies,
+ * then emits `merge:conflict-stage-cleaned` recording whether MERGE_HEAD
+ * was present and which cleanup branch ran.
+ */
+async function assertConflictStageCleaned(
+  rootDir: string,
+  taskId: string,
+  cleanupLabel: string,
+  auditor?: RunAuditor,
+): Promise<void> {
+  let mergeHeadWasPresent = false;
+  try {
+    const { stdout } = await execAsync("git rev-parse -q --verify MERGE_HEAD", { cwd: rootDir, encoding: "utf-8" });
+    mergeHeadWasPresent = Boolean(stdout.trim());
+  } catch {
+    // No MERGE_HEAD — the common case, not itself unsafe.
+  }
+
+  let unmergedCount = await countUnmergedIndexEntries(rootDir);
+  let cleanupBranch: "none" | "reset-hard-clean" = "none";
+  if (unmergedCount > 0) {
+    cleanupBranch = "reset-hard-clean";
+    try {
+      await execAsync("git reset --hard HEAD", { cwd: rootDir });
+      await execAsync("git clean -fd", { cwd: rootDir });
+    } catch (err: unknown) {
+      mergerLog.warn(
+        `${taskId}: conflict-stage cleanup (${cleanupLabel}) fallback reset failed in ${rootDir}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    unmergedCount = await countUnmergedIndexEntries(rootDir);
+  }
+
+  const verifiedClean = unmergedCount === 0;
+  if (!verifiedClean) {
+    mergerLog.warn(
+      `${taskId}: conflict-stage cleanup (${cleanupLabel}) left ${unmergedCount} unmerged index entr${unmergedCount === 1 ? "y" : "ies"} in ${rootDir} after cleanup`,
+    );
+  }
+
+  await auditor?.git({
+    type: "merge:conflict-stage-cleaned",
+    target: taskId,
+    metadata: {
+      taskId,
+      rootDir,
+      cleanupLabel,
+      mergeHeadWasPresent,
+      cleanupBranch,
+      verifiedClean,
+      remainingUnmergedCount: unmergedCount,
+    },
+  }).catch(() => undefined);
+}
+
 /**
  * Best-effort `git reset --merge` with a labeled warning on failure.
  * `label` describes the cleanup site so operators can correlate the warning
  * back to the merge phase that left state behind. The label is included in
  * the warning text so test assertions can match on it.
+ *
+ * FNXC:MergeIsolation 2026-07-11-15:00:
+ * After the reset, verifies (and if necessary force-completes) the
+ * no-orphaned-conflict-stage invariant via `assertConflictStageCleaned` —
+ * see that function for the full rationale.
  */
-function resetMergeWithWarn(rootDir: string, taskId: string, label: string): void {
+async function resetMergeWithWarn(rootDir: string, taskId: string, label: string, auditor?: RunAuditor): Promise<void> {
   runObservedDestructiveSyncOp(rootDir, taskId, `reset --merge (${label})`, () => {
     try {
       execSync("git reset --merge", { cwd: rootDir, stdio: "pipe" });
@@ -2195,6 +2283,7 @@ function resetMergeWithWarn(rootDir: string, taskId: string, label: string): voi
       mergerLog.warn(`${taskId}: git reset --merge cleanup failed during ${label}: ${msg}`);
     }
   });
+  await assertConflictStageCleaned(rootDir, taskId, label, auditor);
 }
 
 /** Identity returned by `stashUnrelatedRootDirChanges`. The SHA is the stable
@@ -2768,6 +2857,9 @@ export const __test__ = {
   getAutostashDiff,
   notifyAutostashOrphans,
   runMergeAdvanceAutoSync,
+  resetMergeWithWarn,
+  assertConflictStageCleaned,
+  countUnmergedIndexEntries,
 };
 
 export async function stashUnrelatedRootDirChanges(
@@ -4616,7 +4708,7 @@ export async function commitOrAmendMergeWithFixes(
         const stdout = typeof err === "object" && err !== null && "stdout" in err ? String((err as { stdout?: unknown }).stdout ?? "") : "";
         const combined = `${stdout}\n${stderr}\n${msg}`;
         if (/conflict|CONFLICT/i.test(combined)) {
-          resetMergeWithWarn(rootDir, taskId, "squash-restore conflict");
+          await resetMergeWithWarn(rootDir, taskId, "squash-restore conflict", auditor);
           throw new Error(`${taskId}: squash-restore fallback hit merge conflicts while finalizing verification-fix merge`);
         }
         mergerLog.warn(`${taskId}: failed to restore squash state before finalize: ${msg}; stderr=${stderr.trim() || "<empty>"}`);
@@ -5889,8 +5981,9 @@ async function applyBranchCommitsPreservingHistory(params: {
   testSource?: "explicit" | "inferred" | "inferred-scoped";
   buildSource?: "explicit" | "inferred";
   signal?: AbortSignal;
+  auditor?: RunAuditor;
 }): Promise<{ landedCommitCount: number; landedCommitShas: string[]; baseSha: string; fullySubsumedByMain: boolean; skippedEmptyCount: number }> {
-  const { rootDir, baseRef, branch, task, taskId, store, mergeConflictStrategy, smartConflictResolution, result, testCommand, buildCommand, testSource, buildSource, signal } = params;
+  const { rootDir, baseRef, branch, task, taskId, store, mergeConflictStrategy, smartConflictResolution, result, testCommand, buildCommand, testSource, buildSource, signal, auditor } = params;
   const { stdout: baseShaStdout } = await execAsync(`git rev-parse ${quoteArg(baseRef)}`, { cwd: rootDir, encoding: "utf-8" });
   const baseSha = baseShaStdout.trim();
   const { stdout: originalBranchShaOut } = await execAsync("git rev-parse HEAD", { cwd: rootDir, encoding: "utf-8" });
@@ -5928,11 +6021,13 @@ async function applyBranchCommitsPreservingHistory(params: {
     await store.logEntry(taskId, `Auto-merge skipped ${skippedEmptyCount} empty cherry-pick(s); proceeded with ${landedCommitShas.length} non-empty commit(s)`);
   }
 
+  let cherryPickCleanupInvariantTouched = false;
   try {
     const { stdout: statusOut } = await execAsync("git status --porcelain", { cwd: rootDir, encoding: "utf-8" });
     const statusClean = statusOut.trim().length === 0;
     const cherryPickActive = await isCherryPickInProgress(rootDir);
     if (!statusClean || cherryPickActive) {
+      cherryPickCleanupInvariantTouched = true;
       mergerLog.warn(`${taskId}: cherry-pick cleanup invariant violated (statusClean=${statusClean}, cherryPickActive=${cherryPickActive}); attempting defensive recovery`);
       try {
         await execAsync("git cherry-pick --abort", { cwd: rootDir });
@@ -5942,6 +6037,7 @@ async function applyBranchCommitsPreservingHistory(params: {
       await execAsync(`git reset --hard ${quoteArg(originalBranchSha)}`, { cwd: rootDir });
     }
   } catch (error) {
+    cherryPickCleanupInvariantTouched = true;
     const message = error instanceof Error ? error.message : String(error);
     mergerLog.warn(`${taskId}: failed while validating cherry-pick cleanup invariant (${message}); attempting defensive recovery`);
     try {
@@ -5954,6 +6050,16 @@ async function applyBranchCommitsPreservingHistory(params: {
     } catch {
       // best effort
     }
+  }
+  /*
+   * FNXC:MergeIsolation 2026-07-11-15:00:
+   * No-orphaned-conflict-stage invariant: whenever the cherry-pick cleanup
+   * invariant above had to intervene (or failed to validate cleanly),
+   * verify (and if necessary force-complete) that zero unmerged index
+   * entries remain — see assertConflictStageCleaned for the full rationale.
+   */
+  if (cherryPickCleanupInvariantTouched) {
+    await assertConflictStageCleaned(rootDir, taskId, "cherry-pick cleanup invariant", auditor);
   }
 
   if (testCommand || buildCommand) {
@@ -8741,6 +8847,58 @@ export async function aiMergeTask(
   // surfaced on the task feed so the developer notices them.
   await sweepAutostashOrphans(rootDir, taskId, store);
 
+  /*
+   * FNXC:MergeIsolation 2026-07-11-14:20:
+   * Pre-merge dirty/unmerged-index guard. Runs BEFORE stashUnrelatedRootDirChanges
+   * so an unmerged (conflict-stage) index or an in-progress merge/rebase in
+   * rootDir is refused fail-soft instead of being fed to `git add -A` / `git
+   * stash create` / `git reset --hard` — `git stash` refuses on unmerged
+   * paths, which is exactly how the 2026-07-11 incident left UU/AA entries
+   * behind with no MERGE_HEAD. Ordinary tracked/untracked dirty state is
+   * left untouched here; stashUnrelatedRootDirChanges still autostashes it.
+   */
+  const preAutostashTargetState = await classifyTargetCheckoutState(rootDir);
+  if (preAutostashTargetState.state === "unmerged-index" || preAutostashTargetState.state === "unsafe-dirty") {
+    const refusedReason = preAutostashTargetState.state === "unmerged-index"
+      ? "unmerged-index-refused"
+      : "unsafe-dirty-refused";
+    const auditType = preAutostashTargetState.state === "unmerged-index"
+      ? "merge:integration-root-unmerged-index-refused"
+      : "merge:integration-root-unsafe-dirty-refused";
+    const metadata = preAutostashTargetState.state === "unmerged-index"
+      ? {
+        taskId,
+        rootDir,
+        unmergedPaths: preAutostashTargetState.unmergedPaths,
+        porcelainSample: preAutostashTargetState.porcelainSample,
+        mergeHeadPresent: preAutostashTargetState.mergeHeadPresent,
+      }
+      : {
+        taskId,
+        rootDir,
+        reason: preAutostashTargetState.reason,
+        porcelainSample: preAutostashTargetState.porcelainSample,
+      };
+    await audit.git({
+      type: auditType,
+      target: taskId,
+      metadata,
+    }).catch(() => undefined);
+    const message = `Merge aborted: ${rootDir} has an unmerged/unsafe index state (${refusedReason}) that cannot be safely autostashed. Resolve or clean the conflict manually and retry the merge.`;
+    await store.logEntry(taskId, "Merge aborted: unmerged/unsafe index guard refused pre-merge autostash", message).catch(() => undefined);
+    await store.updateTask(taskId, { error: refusedReason }).catch(() => undefined);
+    clearActiveMergerStatus(activeStatusPath, taskId);
+    await releaseReuseHandoffEarly(refusedReason);
+    return {
+      task,
+      branch,
+      merged: false,
+      worktreeRemoved: false,
+      branchDeleted: false,
+      error: message,
+    };
+  }
+
   // Pre-merge guard against the common single-checkout setup where rootDir
   // is the developer's working tree. The merge flow below issues several
   // `git reset --hard/--merge` calls and forced checkouts that would
@@ -9977,7 +10135,7 @@ export async function aiMergeTask(
                 // any leftover squash state and propagate failure.
                 const { stdout: currentHeadOut } = await execAsync("git rev-parse HEAD", { cwd: rootDir, encoding: "utf-8" });
                 const { stdout: branchTipOut } = await execAsync(`git rev-parse ${branch}`, { cwd: rootDir, encoding: "utf-8" });
-                resetMergeWithWarn(rootDir, taskId, "verification-fix finalize");
+                await resetMergeWithWarn(rootDir, taskId, "verification-fix finalize", audit);
                 const classification = finalized.reason === "fix-produced-no-content"
                   ? "fix produced no content"
                   : finalized.reason === "branch-ref-ahead-reset"
@@ -9996,7 +10154,7 @@ export async function aiMergeTask(
 
         // Fix attempts exhausted or disabled — fall back to existing behavior
         mergerLog.error(`${taskId}: deterministic verification failed — aborting merge (in-merge fix exhausted or disabled)`);
-        resetMergeWithWarn(rootDir, taskId, "deterministic-verification rollback");
+        await resetMergeWithWarn(rootDir, taskId, "deterministic-verification rollback", audit);
         throw error;
       }
 
@@ -10128,7 +10286,7 @@ export async function aiMergeTask(
               // mutating a previous task's commit.
               const { stdout: currentHeadOut } = await execAsync("git rev-parse HEAD", { cwd: rootDir, encoding: "utf-8" });
               const { stdout: branchTipOut } = await execAsync(`git rev-parse ${branch}`, { cwd: rootDir, encoding: "utf-8" });
-              resetMergeWithWarn(rootDir, taskId, "build-verification fix finalize");
+              await resetMergeWithWarn(rootDir, taskId, "build-verification fix finalize", audit);
               const classification = finalized.reason === "fix-produced-no-content"
                 ? "fix produced no content"
                 : finalized.reason === "branch-ref-ahead-reset"
@@ -10164,7 +10322,7 @@ export async function aiMergeTask(
         // No fix path took effect and no build retry — reset the squash state
         // we deliberately preserved at the build-failure throw site so it
         // doesn't leak into the next attempt or the caller.
-        resetMergeWithWarn(rootDir, taskId, "build-verification rollback (no retries left)");
+        await resetMergeWithWarn(rootDir, taskId, "build-verification rollback (no retries left)", audit);
         throw error; // No retries left — fatal
       }
 
@@ -10218,6 +10376,7 @@ export async function aiMergeTask(
       testSource: effectiveTestSource,
       buildSource: effectiveBuildSource,
       signal: options.signal,
+      auditor: audit,
     });
     rebaseMergeBaseSha = rebaseResult.baseSha;
     if (rebaseResult.fullySubsumedByMain) {
@@ -10614,6 +10773,16 @@ export async function aiMergeTask(
           expectedCurrentSha,
           taskId,
           audit,
+          /*
+           * FNXC:MergeIsolation 2026-07-11-12:00:
+           * This call site only runs inside `if (reuseTaskWorktreeMerge)`
+           * (isolated integration worktree mode), never for the explicit
+           * `cwd-integration-branch` opt-in. Require the ref-advance guard
+           * so a ref advance can never run `git update-ref` against the
+           * operator's primary checkout — the 2026-07-11 incident left
+           * UU/AA unmerged-stage entries with no MERGE_HEAD there.
+           */
+          requireIsolatedRoot: true,
         });
         if (!advanceResult.advanced) {
           // `non-fast-forward-advance` has the same root cause as
@@ -10961,6 +11130,30 @@ export async function aiMergeTask(
     reuseHandoffOutcome = error instanceof Error ? error.message : String(error);
     throw error;
   } finally {
+    /*
+     * FNXC:MergeIsolation 2026-07-11-16:10:
+     * Final safety net: whenever this merge attempt failed (any thrown
+     * error, from any of the git-op paths above), verify the isolated
+     * integration worktree has zero orphaned conflict-stage index entries
+     * before anything else in this finally block runs. Catches
+     * abort/cleanup gaps in code paths not individually wired to
+     * assertConflictStageCleaned.
+     *
+     * CRITICAL: `rootDir` is only proven non-project-root when merging via
+     * the isolated reuse-task-worktree path. In `cwd-integration-branch`
+     * (explicit opt-in) and legacy `cwd-main` modes, `rootDir` IS the
+     * operator's primary checkout by design (FN-5348) — running the
+     * destructive `git reset --hard HEAD` + `git clean -fd` branch of
+     * assertConflictStageCleaned there would recreate the exact 2026-07-11
+     * incident this task exists to prevent. Gate on `rootDir` actually
+     * resolving away from `projectRootDir` (not just the mode flag, since
+     * `reuseTaskWorktreeMerge` can be flipped back to `false` mid-flow —
+     * see the `reacquireReuseIntegrationWorktree` fallback above) so this
+     * safety net can never touch the primary checkout.
+     */
+    if (reuseHandoffOutcome !== "success" && !isRepoRootPath(projectRootDir, rootDir)) {
+      await assertConflictStageCleaned(rootDir, taskId, "post-failure finalize safety net", audit).catch(() => undefined);
+    }
     if (autostashHandle) {
       try {
         const settings = await store.getSettings();

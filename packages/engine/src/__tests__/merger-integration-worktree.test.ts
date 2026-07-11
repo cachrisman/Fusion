@@ -459,6 +459,49 @@ describe("acquireReuseHandoff", () => {
     });
   });
 
+  it("FUSI-060: refuses (never autostashes) when the worktree has unmerged conflict-stage index entries", async () => {
+    mockedExecSync.mockImplementation((cmd: any) => {
+      const command = String(cmd);
+      if (command === "git diff -z --name-only") return Buffer.from("");
+      if (command === "git diff -z --cached --name-only") return Buffer.from("");
+      // UU: both-modified conflict-stage entry, reproducing the reported
+      // UU/AA-without-MERGE_HEAD incident.
+      if (command === "git status -z --porcelain") return Buffer.from("UU conflicted.ts\0");
+      if (command === "git diff HEAD") return Buffer.from("");
+      if (command === "git rev-parse --abbrev-ref HEAD") return Buffer.from("fusion/fn-5279\n");
+      // No MERGE_HEAD present — the orphaned-conflict-stage symptom.
+      if (command === "git rev-parse -q --verify MERGE_HEAD") throw new Error("not a valid ref");
+      if (command === "git rev-parse -q --verify CHERRY_PICK_HEAD") throw new Error("not a valid ref");
+      if (command === "git add -A") throw new Error("acquireReuseHandoff must not stage an unmerged index");
+      if (command === "git stash create") throw new Error("acquireReuseHandoff must not stash an unmerged index");
+      return Buffer.from("");
+    });
+
+    const auditEmit = vi.fn();
+    const refusal = await expectRefusal(
+      acquireReuseHandoff({
+        task: await createStore().getTask("FN-5279"),
+        store: createStore(),
+        projectRoot: "/tmp/project-root",
+        settings: {} as any,
+        worktreePath: "/tmp/task-worktree",
+        auditEmit,
+      }),
+      "working-tree-dirty",
+      "unmerged-index-refused",
+    );
+    expect(refusal.payload).toMatchObject({
+      unmergedPaths: ["conflicted.ts"],
+      mergeHeadPresent: false,
+    });
+    expect(auditEmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "merge:integration-root-unmerged-index-refused",
+        target: "/tmp/task-worktree",
+      }),
+    );
+  });
+
   it("refuses the handoff when autostash of a dirty worktree itself fails", async () => {
     mockedExecSync.mockImplementation((cmd: any) => {
       const command = String(cmd);

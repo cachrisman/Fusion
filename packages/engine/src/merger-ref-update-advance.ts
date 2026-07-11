@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { RunAuditor } from "./run-audit.js";
+import { isRepoRootPath } from "./worktree-pool.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -51,22 +52,39 @@ export async function advanceIntegrationBranchRef(args: {
   expectedCurrentSha: string;
   taskId: string;
   audit: RunAuditor;
+  /**
+   * FNXC:MergeIsolation 2026-07-11-12:00:
+   * Opt-in flag set by the reuse-task-worktree (isolated-mode) merge caller
+   * so a ref advance can never run `git update-ref` against the operator's
+   * primary checkout. Left `false`/omitted by default so pre-existing unit
+   * coverage that exercises the CAS/ref-advance logic against a single tmp
+   * repo (rootDir === projectRootDir by test-harness convenience) is
+   * unaffected; production reuse-task-worktree callers MUST pass `true`.
+   */
+  requireIsolatedRoot?: boolean;
 }): Promise<
   | { advanced: true; previousSha: string; newSha: string }
   | {
     advanced: false;
-    reason: "concurrent-advance" | "ref-update-refused" | "missing-current-sha" | "non-fast-forward-advance";
+    reason:
+      | "concurrent-advance"
+      | "ref-update-refused"
+      | "missing-current-sha"
+      | "non-fast-forward-advance"
+      | "rootdir-equals-project-root";
     diagnostic: string;
     observedCurrentSha?: string;
   }
 > {
   const {
     rootDir,
+    projectRootDir,
     integrationBranch,
     newSha,
     expectedCurrentSha,
     taskId,
     audit,
+    requireIsolatedRoot,
   } = args;
 
   if (!integrationBranch?.trim()) {
@@ -77,6 +95,39 @@ export async function advanceIntegrationBranchRef(args: {
   }
   if (!expectedCurrentSha?.trim()) {
     throw new Error("advanceIntegrationBranchRef requires expectedCurrentSha");
+  }
+
+  /*
+   * FNXC:MergeIsolation 2026-07-11-12:00:
+   * 2026-07-11 incident: the operator's PRIMARY checkout was left with
+   * UU/AA unmerged-stage index entries and no MERGE_HEAD after the merger
+   * ran git ops against a resolved integration root that could equal the
+   * project root. A ref advance (`git update-ref` / `rev-parse` /
+   * `merge-base`) against the primary checkout is exactly the kind of git
+   * op that must never run in an isolated-mode merge, so refuse BEFORE any
+   * git subprocess is spawned rather than silently advancing.
+   */
+  if (requireIsolatedRoot && isRepoRootPath(projectRootDir, rootDir)) {
+    const diagnostic = `advanceIntegrationBranchRef refused: rootDir (${rootDir}) resolves to the project root (${projectRootDir}); refusing to run git ref-advance ops against the operator's primary checkout`;
+    await audit.git({
+      type: "merge:integration-ref-advance",
+      target: integrationBranch,
+      metadata: {
+        taskId,
+        integrationBranch,
+        refName: `refs/heads/${integrationBranch}`,
+        fromSha: expectedCurrentSha || null,
+        toSha: newSha,
+        advanceMode: "update-ref",
+        succeeded: false,
+        error: `rootdir-equals-project-root: ${diagnostic}`,
+      },
+    });
+    return {
+      advanced: false,
+      reason: "rootdir-equals-project-root",
+      diagnostic,
+    };
   }
 
   const ref = `refs/heads/${integrationBranch}`;
