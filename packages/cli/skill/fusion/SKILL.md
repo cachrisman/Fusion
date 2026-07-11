@@ -94,7 +94,7 @@ These operations are **not available** via extension tools and require the dashb
 
 - **Moving tasks between columns** — No tool for column moves (handled by the AI engine)
 - **Workflow steps** — Creating/managing workflow step definitions requires the dashboard
-- **Settings** — Changing settings requires the dashboard or `fn settings set` CLI command
+- **Settings** — Changing settings via the pi-extension agent surface requires the dashboard or `fn settings set` CLI command. (The MCP operator server additionally exposes `fn_settings_update` as a destructive-tier tool, only registered under `--allow-destructive`.)
 - **Task comments** — Adding comments or steering guidance requires CLI (`fn task comment`, `fn task steer`) or the dashboard comments tab
 - **Merge operations** — Merging completed tasks requires CLI (`fn task merge`) or auto-merge
 

@@ -441,11 +441,19 @@ unfiltered and always filterable explicitly. `columnLabel` already falls back
 to the raw id for an unknown column, so an unrecognized filter value still
 renders (empty result, not a crash) rather than throwing.
 */
+/*
+FNXC:McpServer 2026-07-11-16:00:
+FUSI-056: the default-columns wording listed here must match the real `COLUMNS`
+enum in packages/core/src/types.ts ("triage", not "planning" — there is no
+"planning" column) and the skill's own lifecycle prose ("Triage → Todo → …").
+A prior revision said "planning" here, contradicting both the enum and the
+lifecycle section within the same served fusion://skill document.
+*/
 const fnTaskList: McpToolDefinition = {
   name: "fn_task_list",
   description:
     "List all tasks on the Fusion board, grouped by column. `column` accepts any of the six default columns " +
-    "(todo, planning, in-progress, in-review, done, archived) PLUS any workflow-specific column defined by a " +
+    "(todo, triage, in-progress, in-review, done, archived) PLUS any workflow-specific column defined by a " +
     "custom workflow (e.g. an 'ideas' backlog column) — workflow-specific columns are also shown unfiltered.",
   inputSchema: {
     type: "object",
@@ -453,7 +461,7 @@ const fnTaskList: McpToolDefinition = {
       column: {
         type: "string",
         description:
-          "Filter to a specific column. Accepts the six defaults (todo, planning, in-progress, in-review, done, " +
+          "Filter to a specific column. Accepts the six defaults (todo, triage, in-progress, in-review, done, " +
           "archived) or any workflow-specific column id (e.g. 'ideas'). An unrecognized value returns an empty " +
           "result rather than an error.",
       },
