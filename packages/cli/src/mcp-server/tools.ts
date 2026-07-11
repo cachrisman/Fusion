@@ -69,6 +69,19 @@
  * `fn_slice_list`/`fn_slice_show`, `fn_feature_list`/`fn_feature_show`. See
  * the FNXC:McpServer 2026-07-11-08:30 comment above the "Mission hierarchy
  * tools (read-only)" section for the full rationale.
+ *
+ * FNXC:McpServer 2026-07-11-10:30:
+ * FUSI-018 adds the mutation half of the mission hierarchy plus a full goal
+ * tool set to the BASE registry (base tool count twenty-four → forty;
+ * combined with --allow-destructive: thirty-one → forty-seven):
+ * `fn_mission_create`, `fn_mission_update`, `fn_milestone_add`,
+ * `fn_milestone_update`, `fn_slice_add`, `fn_slice_activate`,
+ * `fn_feature_add`, `fn_feature_update`, `fn_feature_link_task`,
+ * `fn_goal_list`, `fn_goal_show`, `fn_goal_create`, `fn_goal_archive`,
+ * `fn_mission_link_goal`, `fn_mission_unlink_goal`, `fn_mission_list_goals`.
+ * See the FNXC:McpServer 2026-07-11-10:30 comment above the "Mission
+ * hierarchy & goal mutation tools" section for the full rationale,
+ * including why `fn_goal_archive` (deferred in FUSI-006) is safe to add now.
  */
 import {
   TaskStore,
@@ -81,6 +94,7 @@ import {
   TASK_PRIORITIES,
   COLUMNS,
   COLUMN_LABELS,
+  ActiveGoalLimitExceededError,
   type Task,
   type ColumnId,
   type TaskPriority,
@@ -1138,6 +1152,628 @@ const fnFeatureShow = bindMissionHierarchyShowTool({
   getOp: (missionStore, id) => missionStore.getFeature(id),
 });
 
+// ── Mission hierarchy & goal mutation tools ────────────────────────────
+
+/*
+FNXC:McpServer 2026-07-11-10:30:
+FUSI-018 adds the mutation half of the mission hierarchy plus a full goal
+tool set to the BASE registry (no --allow-destructive gate — every one of
+these sixteen tools is a reversible, non-cascading create/update/link
+operation with no equivalent in DESTRUCTIVE_TOOL_TIER): fn_mission_create,
+fn_mission_update, fn_milestone_add, fn_milestone_update, fn_slice_add,
+fn_slice_activate, fn_feature_add, fn_feature_update, fn_feature_link_task,
+fn_goal_list, fn_goal_show, fn_goal_create, fn_goal_archive,
+fn_mission_link_goal, fn_mission_unlink_goal, fn_mission_list_goals. Every
+handler dispatches to the SAME store.getMissionStore()/store.getGoalStore()
+operation the pi-extension fn_* handlers in packages/cli/src/extension.ts
+already call — no duplicated validation, no HTTP round-trip. This unblocks
+the fn_goal_archive MCP tool deferred in FUSI-006 (see the FNXC:McpServer
+2026-07-10-23:59 comment above fnTaskArchive): fn_goal_list/fn_goal_show now
+exist (this task) to discover goal IDs first.
+
+FNXC:McpServer 2026-07-11-10:30:
+The pi-extension fn_goal_list/fn_goal_show handlers call
+emitGoalRetrievalAudit(store, ctx, ...) to record pi-run-scoped
+(agentId/runId/taskId) retrieval telemetry. That helper is intentionally NOT
+replicated here: `fn mcp serve` has no pi run context (no agentId/runId/
+taskId to attach), and the existing FUSI-017 mission/milestone/slice/feature
+read handlers already omit pi-side audit for the same reason — this keeps
+the MCP server's audit surface consistent (stderr destructive-audit only,
+see auditDestructiveInvocation below).
+*/
+
+const fnMissionCreate: McpToolDefinition = {
+  name: "fn_mission_create",
+  description:
+    "Create a new mission — a high-level objective that can span multiple milestones. Missions contain " +
+    "milestones that break down work into phases.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      title: { type: "string", description: "Mission title — brief but descriptive" },
+      description: { type: "string", description: "Detailed mission objectives and context" },
+      autoAdvance: { type: "boolean", description: "Automatically activate the next pending slice when the current slice completes" },
+      baseBranch: { type: "string", description: "Optional integration base branch for tasks triaged from this mission" },
+    },
+    required: ["title"],
+  },
+  async handler(store, args) {
+    const title = String(args.title ?? "").trim();
+    if (!title) return errorResult("title is required.");
+    const missionStore = store.getMissionStore();
+
+    const mission = missionStore.createMission({
+      title,
+      description: typeof args.description === "string" ? args.description.trim() : undefined,
+      baseBranch: typeof args.baseBranch === "string" ? args.baseBranch.trim() || undefined : undefined,
+    });
+
+    if (args.autoAdvance !== undefined) {
+      missionStore.updateMission(mission.id, { autoAdvance: args.autoAdvance === true });
+    }
+
+    const createdMission = missionStore.getMission(mission.id)!;
+    return textResult(
+      `Created ${createdMission.id}: ${createdMission.title}\nStatus: ${createdMission.status}${createdMission.autoAdvance ? "\nAuto-advance: enabled" : ""}`,
+      {
+        structuredContent: redactSecretsDeep({
+          missionId: createdMission.id,
+          title: createdMission.title,
+          status: createdMission.status,
+          autoAdvance: createdMission.autoAdvance ?? false,
+        }),
+      },
+    );
+  },
+};
+
+const fnMissionUpdate: McpToolDefinition = {
+  name: "fn_mission_update",
+  description: "Update an existing mission's title or description. Partial patches leave untouched fields intact.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "Mission ID to update (e.g., M-001)" },
+      title: { type: "string", description: "Updated mission title" },
+      description: { type: "string", description: "Updated mission description" },
+    },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    const missionStore = store.getMissionStore();
+    const existingMission = missionStore.getMission(id);
+    if (!existingMission) return errorResult(`Mission ${id} not found`);
+
+    const updates: { title?: string; description?: string } = {};
+    if ("title" in args) updates.title = typeof args.title === "string" ? args.title.trim() : undefined;
+    if ("description" in args) updates.description = typeof args.description === "string" ? args.description.trim() : undefined;
+
+    if (Object.keys(updates).length === 0) {
+      return errorResult("No fields to update (provide at least one of: title, description)");
+    }
+
+    const mission = missionStore.updateMission(id, updates);
+    return textResult(`Updated ${mission.id}: "${mission.title}"`, {
+      structuredContent: redactSecretsDeep({ missionId: mission.id, title: mission.title, description: mission.description, status: mission.status }),
+    });
+  },
+};
+
+const fnMilestoneAdd: McpToolDefinition = {
+  name: "fn_milestone_add",
+  description: "Add a milestone to a mission. Milestones represent phases of work.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      missionId: { type: "string", description: "Parent mission ID (e.g., M-001)" },
+      title: { type: "string", description: "Milestone title" },
+      description: { type: "string", description: "Milestone description" },
+    },
+    required: ["missionId", "title"],
+  },
+  async handler(store, args) {
+    const missionId = String(args.missionId ?? "").trim();
+    const title = String(args.title ?? "").trim();
+    if (!missionId) return errorResult("missionId is required.");
+    if (!title) return errorResult("title is required.");
+
+    const missionStore = store.getMissionStore();
+    const mission = missionStore.getMission(missionId);
+    if (!mission) return errorResult(`Mission ${missionId} not found`);
+
+    const milestone = missionStore.addMilestone(missionId, {
+      title,
+      description: typeof args.description === "string" ? args.description.trim() : undefined,
+    });
+
+    return textResult(`Added ${milestone.id}: "${milestone.title}" to ${missionId}`, {
+      structuredContent: redactSecretsDeep({ milestoneId: milestone.id, missionId, title: milestone.title }),
+    });
+  },
+};
+
+const fnMilestoneUpdate: McpToolDefinition = {
+  name: "fn_milestone_update",
+  description:
+    "Update an existing milestone's title, description, or acceptance criteria (the structured pass/fail bar, " +
+    "distinct from verification's free-form how-to-confirm notes). Partial patches leave untouched fields intact.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "Milestone ID to update (e.g., MS-001)" },
+      title: { type: "string", description: "Updated milestone title" },
+      description: { type: "string", description: "Updated milestone description" },
+      acceptanceCriteria: { type: "string", description: "Updated acceptance criteria for completing the milestone" },
+    },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    const missionStore = store.getMissionStore();
+    const existingMilestone = missionStore.getMilestone(id);
+    if (!existingMilestone) return errorResult(`Milestone ${id} not found`);
+
+    const updates: { title?: string; description?: string; acceptanceCriteria?: string } = {};
+    if ("title" in args) updates.title = typeof args.title === "string" ? args.title.trim() : undefined;
+    if ("description" in args) updates.description = typeof args.description === "string" ? args.description.trim() : undefined;
+    if ("acceptanceCriteria" in args) updates.acceptanceCriteria = typeof args.acceptanceCriteria === "string" ? args.acceptanceCriteria.trim() : undefined;
+
+    if (Object.keys(updates).length === 0) {
+      return errorResult("No fields to update (provide at least one of: title, description, acceptanceCriteria)");
+    }
+
+    const milestone = missionStore.updateMilestone(id, updates);
+    return textResult(`Updated ${milestone.id}: "${milestone.title}"`, {
+      structuredContent: redactSecretsDeep({
+        milestoneId: milestone.id,
+        title: milestone.title,
+        description: milestone.description,
+        acceptanceCriteria: milestone.acceptanceCriteria,
+        status: milestone.status,
+      }),
+    });
+  },
+};
+
+const fnSliceAdd: McpToolDefinition = {
+  name: "fn_slice_add",
+  description: "Add a slice to a milestone. Slices are work units that can be activated for implementation.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      milestoneId: { type: "string", description: "Parent milestone ID (e.g., MS-001)" },
+      title: { type: "string", description: "Slice title" },
+      description: { type: "string", description: "Slice description" },
+    },
+    required: ["milestoneId", "title"],
+  },
+  async handler(store, args) {
+    const milestoneId = String(args.milestoneId ?? "").trim();
+    const title = String(args.title ?? "").trim();
+    if (!milestoneId) return errorResult("milestoneId is required.");
+    if (!title) return errorResult("title is required.");
+
+    const missionStore = store.getMissionStore();
+    const milestone = missionStore.getMilestone(milestoneId);
+    if (!milestone) return errorResult(`Milestone ${milestoneId} not found`);
+
+    const slice = missionStore.addSlice(milestoneId, {
+      title,
+      description: typeof args.description === "string" ? args.description.trim() : undefined,
+    });
+
+    return textResult(`Added ${slice.id}: "${slice.title}" to ${milestoneId}`, {
+      structuredContent: redactSecretsDeep({ sliceId: slice.id, milestoneId, title: slice.title }),
+    });
+  },
+};
+
+const fnSliceActivate: McpToolDefinition = {
+  name: "fn_slice_activate",
+  description: "Activate a pending slice for implementation. Sets status to 'active' and enables task linking for its features.",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string", description: "Slice ID to activate (e.g., SL-001)" } },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    const missionStore = store.getMissionStore();
+    const slice = missionStore.getSlice(id);
+    if (!slice) return errorResult(`Slice ${id} not found`);
+    if (slice.status !== "pending") {
+      return errorResult(`Slice ${id} is not pending (status: ${slice.status})`, { structuredContent: { sliceId: id, currentStatus: slice.status } });
+    }
+
+    const activated = await missionStore.activateSlice(id);
+    return textResult(`Activated ${activated.id}: "${activated.title}"\nStatus: ${activated.status}`, {
+      structuredContent: redactSecretsDeep({ sliceId: activated.id, title: activated.title, status: activated.status }),
+    });
+  },
+};
+
+const fnFeatureAdd: McpToolDefinition = {
+  name: "fn_feature_add",
+  description: "Add a feature to a slice. Features are deliverables that can be linked to tasks.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      sliceId: { type: "string", description: "Parent slice ID (e.g., SL-001)" },
+      title: { type: "string", description: "Feature title" },
+      description: { type: "string", description: "Feature description" },
+      acceptanceCriteria: { type: "string", description: "Acceptance criteria for completing the feature" },
+    },
+    required: ["sliceId", "title"],
+  },
+  async handler(store, args) {
+    const sliceId = String(args.sliceId ?? "").trim();
+    const title = String(args.title ?? "").trim();
+    if (!sliceId) return errorResult("sliceId is required.");
+    if (!title) return errorResult("title is required.");
+
+    const missionStore = store.getMissionStore();
+    const slice = missionStore.getSlice(sliceId);
+    if (!slice) return errorResult(`Slice ${sliceId} not found`);
+
+    const feature = missionStore.addFeature(sliceId, {
+      title,
+      description: typeof args.description === "string" ? args.description.trim() : undefined,
+      acceptanceCriteria: typeof args.acceptanceCriteria === "string" ? args.acceptanceCriteria.trim() : undefined,
+    });
+
+    return textResult(`Added ${feature.id}: "${feature.title}" to ${sliceId}`, {
+      structuredContent: redactSecretsDeep({ featureId: feature.id, sliceId, title: feature.title }),
+    });
+  },
+};
+
+const fnFeatureUpdate: McpToolDefinition = {
+  name: "fn_feature_update",
+  description: "Update an existing feature's title, description, or acceptance criteria. Partial patches leave untouched fields intact.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "Feature ID to update (e.g., F-001)" },
+      title: { type: "string", description: "Updated feature title" },
+      description: { type: "string", description: "Updated feature description" },
+      acceptanceCriteria: { type: "string", description: "Updated acceptance criteria for completing the feature" },
+    },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    const missionStore = store.getMissionStore();
+    const existingFeature = missionStore.getFeature(id);
+    if (!existingFeature) return errorResult(`Feature ${id} not found`);
+
+    const updates: { title?: string; description?: string; acceptanceCriteria?: string } = {};
+    if ("title" in args) updates.title = typeof args.title === "string" ? args.title.trim() : undefined;
+    if ("description" in args) updates.description = typeof args.description === "string" ? args.description.trim() : undefined;
+    if ("acceptanceCriteria" in args) updates.acceptanceCriteria = typeof args.acceptanceCriteria === "string" ? args.acceptanceCriteria.trim() : undefined;
+
+    if (Object.keys(updates).length === 0) {
+      return errorResult("No fields to update (provide at least one of: title, description, acceptanceCriteria)");
+    }
+
+    const feature = missionStore.updateFeature(id, updates);
+    return textResult(`Updated ${feature.id}: "${feature.title}"`, {
+      structuredContent: redactSecretsDeep({
+        featureId: feature.id,
+        sliceId: feature.sliceId,
+        title: feature.title,
+        description: feature.description,
+        acceptanceCriteria: feature.acceptanceCriteria,
+        status: feature.status,
+      }),
+    });
+  },
+};
+
+const fnFeatureLinkTask: McpToolDefinition = {
+  name: "fn_feature_link_task",
+  description:
+    "Link a feature to a fn task for implementation. Updates the feature status to 'triaged' and associates it " +
+    "with the task. If the target task is not on the active board (for example archived, deleted, or never " +
+    "created), the tool returns a clear validation error indicating that only active tasks can be linked.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      featureId: { type: "string", description: "Feature ID to link (e.g., F-001)" },
+      taskId: { type: "string", description: "Task ID to link to (e.g., FN-001)" },
+    },
+    required: ["featureId", "taskId"],
+  },
+  async handler(store, args) {
+    const featureId = String(args.featureId ?? "").trim();
+    const taskId = String(args.taskId ?? "").trim();
+    if (!featureId) return errorResult("featureId is required.");
+    if (!taskId) return errorResult("taskId is required.");
+
+    const missionStore = store.getMissionStore();
+    const feature = missionStore.getFeature(featureId);
+    if (!feature) return errorResult(`Feature ${featureId} not found`);
+
+    try {
+      await store.getTask(taskId);
+    } catch {
+      return errorResult(`Task ${taskId} not found`);
+    }
+
+    try {
+      const updated = missionStore.linkFeatureToTask(featureId, taskId);
+      await store.updateTask(taskId, { sliceId: feature.sliceId });
+      return textResult(`Linked ${updated.id}: "${updated.title}" → ${taskId}\nStatus: ${updated.status}`, {
+        structuredContent: redactSecretsDeep({ featureId: updated.id, taskId, title: updated.title, status: updated.status }),
+      });
+    } catch (error) {
+      if (error instanceof Error) return errorResult(error.message);
+      throw error;
+    }
+  },
+};
+
+const GOAL_LIST_HARD_LIMIT = 5;
+const GOAL_LIST_SOFT_WARNING_THRESHOLD = 3;
+const GOAL_SNIPPET_MAX_CHARS = 80;
+
+function buildGoalSnippet(description?: string): string | undefined {
+  const firstLine = description?.split(/\r?\n/, 1)[0]?.replace(/\s+/g, " ").trim();
+  if (!firstLine) return undefined;
+  if (firstLine.length <= GOAL_SNIPPET_MAX_CHARS) return firstLine;
+  return `${firstLine.slice(0, GOAL_SNIPPET_MAX_CHARS - 1).trimEnd()}…`;
+}
+
+function buildGoalListEntry(goal: { id: string; title: string; status: string; description?: string }) {
+  const snippet = buildGoalSnippet(goal.description);
+  return snippet ? { id: goal.id, title: goal.title, status: goal.status, snippet } : { id: goal.id, title: goal.title, status: goal.status };
+}
+
+function formatGoalListLine(goal: { id: string; title: string; status: string; snippet?: string }): string {
+  return `- ${goal.id} [${goal.status}] ${goal.title}${goal.snippet ? ` — ${goal.snippet}` : ""}`;
+}
+
+const fnGoalList: McpToolDefinition = {
+  name: "fn_goal_list",
+  description: "List goals by status with active-goal warning details.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      status: { type: "string", enum: ["active", "archived", "all"], description: "Filter by goal status (default: active)" },
+    },
+  },
+  async handler(store, args) {
+    const goalStore = store.getGoalStore();
+    const status = (typeof args.status === "string" ? args.status : "active") as "active" | "archived" | "all";
+    const goals = status === "all" ? goalStore.listGoals() : goalStore.listGoals({ status });
+    const activeCount = goalStore.listGoals({ status: "active" }).length;
+    const softWarning = activeCount >= GOAL_LIST_SOFT_WARNING_THRESHOLD;
+    const goalEntries = goals.map(buildGoalListEntry);
+
+    const lines: string[] = [];
+    lines.push(`Goals (${goals.length}) [filter: ${status}]`);
+    lines.push(`Active: ${activeCount}/${GOAL_LIST_HARD_LIMIT}`);
+    if (softWarning) {
+      lines.push(`⚠  ${GOAL_LIST_SOFT_WARNING_THRESHOLD}/${GOAL_LIST_HARD_LIMIT} active goals — soft warning at ${GOAL_LIST_SOFT_WARNING_THRESHOLD}, hard cap at ${GOAL_LIST_HARD_LIMIT}`);
+    }
+    lines.push("");
+    if (goalEntries.length === 0) {
+      lines.push("No goals found.");
+    } else {
+      lines.push(...goalEntries.map(formatGoalListLine));
+    }
+
+    return textResult(lines.join("\n"), {
+      structuredContent: redactSecretsDeep({ goals: goalEntries, activeCount, softWarning, hardLimit: GOAL_LIST_HARD_LIMIT }),
+    });
+  },
+};
+
+const fnGoalShow: McpToolDefinition = {
+  name: "fn_goal_show",
+  description: "Show full details for a single goal by ID.",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string", description: "Goal ID (G-…)" } },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    const goalStore = store.getGoalStore();
+    const goal = goalStore.getGoal(id);
+    if (!goal) return errorResult(`Goal ${id} not found`, { structuredContent: { code: "GOAL_NOT_FOUND", goalId: id } });
+
+    const lines: string[] = [`${goal.id}: ${goal.title}`, `Status: ${goal.status}`, `Created: ${goal.createdAt}`, `Updated: ${goal.updatedAt}`];
+    if (goal.description) lines.push(`Description: ${goal.description}`);
+
+    return textResult(lines.join("\n"), { structuredContent: redactSecretsDeep({ goal }) });
+  },
+};
+
+const fnGoalCreate: McpToolDefinition = {
+  name: "fn_goal_create",
+  description: "Create a new project goal.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      title: { type: "string", description: "Goal title — brief but descriptive" },
+      description: { type: "string", description: "Long-form goal description (free-text markdown)" },
+    },
+    required: ["title"],
+  },
+  async handler(store, args) {
+    const title = String(args.title ?? "").trim();
+    if (!title) return errorResult("title is required.");
+    const goalStore = store.getGoalStore();
+
+    try {
+      const goal = goalStore.createGoal({
+        title,
+        description: typeof args.description === "string" ? args.description.trim() || undefined : undefined,
+      });
+      const activeCount = goalStore.listGoals({ status: "active" }).length;
+      const softWarning = activeCount >= GOAL_LIST_SOFT_WARNING_THRESHOLD;
+      return textResult(
+        `Created ${goal.id}: ${goal.title}\nStatus: ${goal.status}${softWarning ? `\n⚠  ${activeCount}/${GOAL_LIST_HARD_LIMIT} active goals — approaching hard cap` : ""}`,
+        { structuredContent: redactSecretsDeep({ goalId: goal.id, title: goal.title, status: goal.status, softWarning }) },
+      );
+    } catch (error) {
+      if (error instanceof ActiveGoalLimitExceededError) {
+        return errorResult(
+          `Cannot create goal — already at the hard cap of ${error.limit} active goals (currently ${error.currentActive}). Archive one first.`,
+          { structuredContent: { code: "ACTIVE_GOAL_LIMIT_EXCEEDED", limit: error.limit, currentActive: error.currentActive } },
+        );
+      }
+      throw error;
+    }
+  },
+};
+
+const fnGoalArchive: McpToolDefinition = {
+  name: "fn_goal_archive",
+  description: "Archive a goal by ID.",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string", description: "Goal ID (G-…) to archive" } },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    const goalStore = store.getGoalStore();
+    const goal = goalStore.getGoal(id);
+    if (!goal) return errorResult(`Goal ${id} not found`, { structuredContent: { code: "GOAL_NOT_FOUND", goalId: id } });
+
+    if (goal.status === "archived") {
+      return textResult(`Goal ${id} is already archived`, { structuredContent: { goalId: id, status: "archived" } });
+    }
+
+    const archived = goalStore.archiveGoal(id);
+    return textResult(`Archived ${archived.id}: ${archived.title}`, {
+      structuredContent: redactSecretsDeep({ goalId: archived.id, status: "archived" }),
+    });
+  },
+};
+
+const fnMissionListGoals: McpToolDefinition = {
+  name: "fn_mission_list_goals",
+  description: "List goals linked to a mission.",
+  inputSchema: {
+    type: "object",
+    properties: { missionId: { type: "string", description: "Mission ID (e.g., M-001)" } },
+    required: ["missionId"],
+  },
+  async handler(store, args) {
+    const missionId = String(args.missionId ?? "").trim();
+    if (!missionId) return errorResult("missionId is required.");
+    const missionStore = store.getMissionStore();
+    const goalStore = store.getGoalStore();
+    const mission = missionStore.getMission(missionId);
+    if (!mission) return errorResult(`Mission ${missionId} not found`, { structuredContent: { code: "MISSION_NOT_FOUND", missionId } });
+
+    const goals = missionStore
+      .listGoalIdsForMission(missionId)
+      .map((goalId) => goalStore.getGoal(goalId))
+      .filter((goal): goal is NonNullable<typeof goal> => Boolean(goal));
+
+    const lines = [`Linked goals for ${mission.id}: ${mission.title}`];
+    if (goals.length === 0) {
+      lines.push("No linked goals.");
+    } else {
+      for (const goal of goals) {
+        const description = goal.description ? ` — ${goal.description}` : "";
+        lines.push(`- ${goal.id} [${goal.status}] ${goal.title}${description}`);
+      }
+    }
+
+    return textResult(lines.join("\n"), {
+      structuredContent: redactSecretsDeep({ missionId: mission.id, missionTitle: mission.title, goals }),
+    });
+  },
+};
+
+const fnMissionLinkGoal: McpToolDefinition = {
+  name: "fn_mission_link_goal",
+  description: "Link a goal to a mission.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      missionId: { type: "string", description: "Mission ID (e.g., M-001)" },
+      goalId: { type: "string", description: "Goal ID (e.g., G-001)" },
+    },
+    required: ["missionId", "goalId"],
+  },
+  async handler(store, args) {
+    const missionId = String(args.missionId ?? "").trim();
+    const goalId = String(args.goalId ?? "").trim();
+    if (!missionId) return errorResult("missionId is required.");
+    if (!goalId) return errorResult("goalId is required.");
+
+    const missionStore = store.getMissionStore();
+    const goalStore = store.getGoalStore();
+    const mission = missionStore.getMission(missionId);
+    if (!mission) return errorResult(`Mission ${missionId} not found`, { structuredContent: { code: "MISSION_NOT_FOUND", missionId } });
+
+    const goal = goalStore.getGoal(goalId);
+    if (!goal) return errorResult(`Goal ${goalId} not found`, { structuredContent: { code: "GOAL_NOT_FOUND", goalId } });
+    if (goal.status === "archived") {
+      return errorResult(`Goal ${goalId} is archived and cannot be linked`, { structuredContent: { code: "GOAL_ARCHIVED", goalId } });
+    }
+
+    missionStore.linkGoal(missionId, goalId);
+    const goals = missionStore
+      .listGoalIdsForMission(missionId)
+      .map((id) => goalStore.getGoal(id))
+      .filter((linkedGoal): linkedGoal is NonNullable<typeof linkedGoal> => Boolean(linkedGoal));
+
+    return textResult(`Linked ${goal.id}: ${goal.title} → ${mission.id}`, {
+      structuredContent: redactSecretsDeep({ missionId: mission.id, missionTitle: mission.title, goal, goals }),
+    });
+  },
+};
+
+const fnMissionUnlinkGoal: McpToolDefinition = {
+  name: "fn_mission_unlink_goal",
+  description: "Unlink a goal from a mission.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      missionId: { type: "string", description: "Mission ID (e.g., M-001)" },
+      goalId: { type: "string", description: "Goal ID (e.g., G-001)" },
+    },
+    required: ["missionId", "goalId"],
+  },
+  async handler(store, args) {
+    const missionId = String(args.missionId ?? "").trim();
+    const goalId = String(args.goalId ?? "").trim();
+    if (!missionId) return errorResult("missionId is required.");
+    if (!goalId) return errorResult("goalId is required.");
+
+    const missionStore = store.getMissionStore();
+    const goalStore = store.getGoalStore();
+    const mission = missionStore.getMission(missionId);
+    if (!mission) return errorResult(`Mission ${missionId} not found`, { structuredContent: { code: "MISSION_NOT_FOUND", missionId } });
+
+    const goal = goalStore.getGoal(goalId);
+    if (!goal) return errorResult(`Goal ${goalId} not found`, { structuredContent: { code: "GOAL_NOT_FOUND", goalId } });
+
+    missionStore.unlinkGoal(missionId, goalId);
+    const goals = missionStore
+      .listGoalIdsForMission(missionId)
+      .map((id) => goalStore.getGoal(id))
+      .filter((linkedGoal): linkedGoal is NonNullable<typeof linkedGoal> => Boolean(linkedGoal));
+
+    return textResult(`Unlinked ${goal.id}: ${goal.title} from ${mission.id}`, {
+      structuredContent: redactSecretsDeep({ missionId: mission.id, missionTitle: mission.title, goal, goals }),
+    });
+  },
+};
+
 export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnTaskCreate,
   fnTaskList,
@@ -1163,6 +1799,22 @@ export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnSliceShow,
   fnFeatureList,
   fnFeatureShow,
+  fnMissionCreate,
+  fnMissionUpdate,
+  fnMilestoneAdd,
+  fnMilestoneUpdate,
+  fnSliceAdd,
+  fnSliceActivate,
+  fnFeatureAdd,
+  fnFeatureUpdate,
+  fnFeatureLinkTask,
+  fnGoalList,
+  fnGoalShow,
+  fnGoalCreate,
+  fnGoalArchive,
+  fnMissionLinkGoal,
+  fnMissionUnlinkGoal,
+  fnMissionListGoals,
 ];
 
 // ── Destructive tools (opt-in via --allow-destructive) ─────────────────────

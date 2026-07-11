@@ -291,6 +291,9 @@ FUSI-006 adds `fn_task_archive` to the base v1 tool set (fifteen → sixteen; tw
 
 FNXC:McpDocs 2026-07-11-08:30:
 FUSI-017 adds the read half of the mission hierarchy to the base v1 tool set (sixteen → twenty-four; twenty-three → thirty-one with `--allow-destructive`): `fn_mission_list`, `fn_mission_show`, `fn_milestone_list`/`fn_milestone_show`, `fn_slice_list`/`fn_slice_show`, `fn_feature_list`/`fn_feature_show`. All eight are base-tier reads (no `--allow-destructive` gate) that dispatch to the same `MissionStore` reads the pi-extension `fn_mission_list`/`fn_mission_show` handlers use; the per-level milestone/slice/feature tools have no pi-extension precedent and are net-new here.
+
+FNXC:McpDocs 2026-07-11-10:30:
+FUSI-018 adds the mutation half of the mission hierarchy plus a full goal tool set to the base v1 tool set (twenty-four → forty; thirty-one → forty-seven with `--allow-destructive`): `fn_mission_create`, `fn_mission_update`, `fn_milestone_add`, `fn_milestone_update`, `fn_slice_add`, `fn_slice_activate`, `fn_feature_add`, `fn_feature_update`, `fn_feature_link_task`, `fn_goal_list`, `fn_goal_show`, `fn_goal_create`, `fn_goal_archive`, `fn_mission_link_goal`, `fn_mission_unlink_goal`, `fn_mission_list_goals`. All sixteen are base-tier (no `--allow-destructive` gate) reversible create/update/link mutations that dispatch to the same `MissionStore`/`GoalStore` operations the pi-extension handlers use. This also resolves the `fn_goal_archive` deferral recorded in the FUSI-006 entry above: `fn_goal_list`/`fn_goal_show` (this task) now exist to discover goal IDs first.
 -->
 
 Every other command on this page configures Fusion as an MCP **client**. `fn mcp serve` is the inverse: it starts Fusion as an MCP **server**, so an operator's own MCP client (Claude Desktop, Claude Code, or any other MCP-compatible client) can connect to Fusion and drive the board directly — creating and inspecting tasks, delegating work to agents, and managing workflows — without going through the dashboard UI. Two transports are available: **stdio** (default, local subprocess) and **streamable HTTP** (network-facing, added by FUSI-003 for remote MCP clients).
@@ -341,6 +344,25 @@ fn mcp serve [--project <name>] [--allow-destructive]
 - `fn_milestone_show` / `fn_slice_show` / `fn_feature_show` — show a single milestone, slice, or feature by ID (status, acceptance criteria/verification, parent/task links). Dispatch to `MissionStore.getMilestone(id)` / `.getSlice(id)` / `.getFeature(id)` respectively; a missing id returns an error result.
 
 All eight mission tools are base-tier reads — they do NOT require `--allow-destructive`. The per-level `fn_milestone_*`/`fn_slice_*`/`fn_feature_*` tools have no pi-extension precedent; they exist so every hierarchy level is independently discoverable from an external MCP client without always walking the full mission tree via `fn_mission_show`. These read tools were added to unblock the create/update, settings, and project follow-up tools that need mission-hierarchy IDs to operate on.
+
+**Missions & Goals (mutations)**
+- `fn_mission_create` — create a new mission (`title` required; optional `description`, `autoAdvance`, `baseBranch`). Dispatches to `MissionStore.createMission(...)`, then `updateMission(...)` when `autoAdvance` is provided — the same operations the pi-extension `fn_mission_create` tool uses.
+- `fn_mission_update` — partial-patch a mission's `title`/`description`. Rejects when no fields are provided or the mission id is unknown. Dispatches to `MissionStore.updateMission(id, updates)`.
+- `fn_milestone_add` — add a milestone to a mission (`missionId`, `title` required). Dispatches to `MissionStore.addMilestone(missionId, ...)`; a missing parent mission returns an error.
+- `fn_milestone_update` — partial-patch a milestone's `title`/`description`/`acceptanceCriteria`. Dispatches to `MissionStore.updateMilestone(id, updates)`.
+- `fn_slice_add` — add a slice to a milestone (`milestoneId`, `title` required). Dispatches to `MissionStore.addSlice(milestoneId, ...)`; a missing parent milestone returns an error.
+- `fn_slice_activate` — activate a `pending` slice so its features can be linked to tasks. Rejects a slice that is not `pending`. Dispatches to `await MissionStore.activateSlice(id)`.
+- `fn_feature_add` — add a feature to a slice (`sliceId`, `title` required; optional `description`, `acceptanceCriteria`). Dispatches to `MissionStore.addFeature(sliceId, ...)`; a missing parent slice returns an error.
+- `fn_feature_update` — partial-patch a feature's `title`/`description`/`acceptanceCriteria`. Dispatches to `MissionStore.updateFeature(id, updates)`.
+- `fn_feature_link_task` — link a feature to a Fusion task (`featureId`, `taskId` required). Verifies the task exists on the active board, then dispatches to `MissionStore.linkFeatureToTask(featureId, taskId)` AND `store.updateTask(taskId, { sliceId })` — mirroring the pi-extension `fn_feature_link_task` tool exactly, including its "only active tasks can be linked" validation error.
+- `fn_goal_list` — list goals filtered by `status` (`active` default, or `archived`/`all`), with the active-goal soft-warning/hard-cap counts. Dispatches to `store.getGoalStore().listGoals(...)`.
+- `fn_goal_show` — show a single goal's full detail by ID. Dispatches to `GoalStore.getGoal(id)`; a missing id returns an error.
+- `fn_goal_create` — create a new goal (`title` required; optional `description`). Dispatches to `GoalStore.createGoal(...)`; surfaces the `ACTIVE_GOAL_LIMIT_EXCEEDED` case as a structured (non-throwing) error result exactly as the pi-extension `fn_goal_create` tool does.
+- `fn_goal_archive` — archive a goal by ID (idempotent — archiving an already-archived goal succeeds without error). Dispatches to `GoalStore.archiveGoal(id)`. This tool was **deferred** in FUSI-006 pending `fn_goal_list`/`fn_goal_show` existing to discover goal IDs first — both now exist above, so the deferral is resolved.
+- `fn_mission_link_goal` / `fn_mission_unlink_goal` — link or unlink a goal to/from a mission (`missionId`, `goalId` required); linking an archived goal is rejected. Both return the mission's remaining linked-goal set for verification. Dispatch to `MissionStore.linkGoal(...)` / `.unlinkGoal(...)`.
+- `fn_mission_list_goals` — list the goals currently linked to a mission (`missionId` required). Dispatches to `MissionStore.listGoalIdsForMission(missionId)` resolved through `GoalStore.getGoal(...)`.
+
+All sixteen Missions & Goals mutation tools above are base-tier — they do NOT require `--allow-destructive`. Every one dispatches to the same `MissionStore`/`GoalStore` operation the corresponding pi-extension `fn_*` tool in `packages/cli/src/extension.ts` already calls; no new domain logic was introduced. The pi-extension's `fn_goal_list`/`fn_goal_show` handlers additionally emit a pi-run-scoped retrieval audit (`emitGoalRetrievalAudit`, keyed by agentId/runId/taskId) that is intentionally NOT replicated here — `fn mcp serve` has no pi run context to attach that audit to, matching how the FUSI-017 mission/milestone/slice/feature read tools already omit pi-side audit.
 
 ### Destructive tools (`--allow-destructive`, off by default)
 
@@ -420,7 +442,7 @@ Add `"--allow-destructive"` to `args` to also opt into the destructive tool tier
 }
 ```
 
-Omit `--project` (and its argument) to have Fusion auto-detect the project from the working directory the client launches the process in. Expected outcome (no `--allow-destructive`): the client lists the twenty-four curated Fusion tools above and can call them directly to manage the board. Expected outcome (with `--allow-destructive`): the client lists those twenty-four tools **plus** `fn_task_delete`, `fn_agent_delete`, `fn_workflow_delete`, `fn_mission_delete`, `fn_milestone_delete`, `fn_slice_delete`, and `fn_feature_delete` — thirty-one tools total.
+Omit `--project` (and its argument) to have Fusion auto-detect the project from the working directory the client launches the process in. Expected outcome (no `--allow-destructive`): the client lists the forty curated Fusion tools above and can call them directly to manage the board. Expected outcome (with `--allow-destructive`): the client lists those forty tools **plus** `fn_task_delete`, `fn_agent_delete`, `fn_workflow_delete`, `fn_mission_delete`, `fn_milestone_delete`, `fn_slice_delete`, and `fn_feature_delete` — forty-seven tools total.
 
 ### Connecting a remote client over HTTP
 

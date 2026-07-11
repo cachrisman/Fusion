@@ -51,6 +51,23 @@ const EXPECTED_TOOL_NAMES = [
   "fn_slice_show",
   "fn_feature_list",
   "fn_feature_show",
+  // FUSI-018: mission-hierarchy mutation + goal tool set
+  "fn_mission_create",
+  "fn_mission_update",
+  "fn_milestone_add",
+  "fn_milestone_update",
+  "fn_slice_add",
+  "fn_slice_activate",
+  "fn_feature_add",
+  "fn_feature_update",
+  "fn_feature_link_task",
+  "fn_goal_list",
+  "fn_goal_show",
+  "fn_goal_create",
+  "fn_goal_archive",
+  "fn_mission_link_goal",
+  "fn_mission_unlink_goal",
+  "fn_mission_list_goals",
 ];
 
 const EXPECTED_DESTRUCTIVE_TOOL_NAMES = [
@@ -833,6 +850,190 @@ describe("fn mcp serve — in-memory server smoke test", () => {
         for (const name of ["fn_mission_list", "fn_mission_show", "fn_milestone_list", "fn_milestone_show", "fn_slice_list", "fn_slice_show", "fn_feature_list", "fn_feature_show"]) {
           expect(names).toContain(name);
         }
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+  });
+
+  describe("mission-hierarchy mutation + goal tools (FUSI-018)", () => {
+    const FUSI_018_TOOL_NAMES = [
+      "fn_mission_create",
+      "fn_mission_update",
+      "fn_milestone_add",
+      "fn_milestone_update",
+      "fn_slice_add",
+      "fn_slice_activate",
+      "fn_feature_add",
+      "fn_feature_update",
+      "fn_feature_link_task",
+      "fn_goal_list",
+      "fn_goal_show",
+      "fn_goal_create",
+      "fn_goal_archive",
+      "fn_mission_link_goal",
+      "fn_mission_unlink_goal",
+      "fn_mission_list_goals",
+    ];
+
+    it("all 16 tools are in MCP_TOOL_REGISTRY, none in DESTRUCTIVE_TOOL_TIER, and buildMcpToolRegistry includes each exactly once under every allowDestructive mode", () => {
+      const baseNames = MCP_TOOL_REGISTRY.map((t) => t.name);
+      for (const name of FUSI_018_TOOL_NAMES) {
+        expect(baseNames, `${name} in MCP_TOOL_REGISTRY`).toContain(name);
+      }
+      const destructiveNames = DESTRUCTIVE_TOOL_TIER.map((t) => t.name);
+      for (const name of FUSI_018_TOOL_NAMES) {
+        expect(destructiveNames, `${name} not in DESTRUCTIVE_TOOL_TIER`).not.toContain(name);
+      }
+
+      for (const ctx of [{ allowDestructive: false }, {}, { allowDestructive: true }]) {
+        const names = buildMcpToolRegistry(ctx).map((t) => t.name);
+        for (const name of FUSI_018_TOOL_NAMES) {
+          const occurrences = names.filter((n) => n === name).length;
+          expect(occurrences, `${name} occurrences in buildMcpToolRegistry(${JSON.stringify(ctx)})`).toBe(1);
+        }
+      }
+    });
+
+    function seedMissionHierarchy() {
+      const missionStore = store.getMissionStore();
+      const mission = missionStore.createMission({ title: "Mutate Me Mission" });
+      const milestone = missionStore.addMilestone(mission.id, { title: "MS" });
+      const slice = missionStore.addSlice(milestone.id, { title: "SL" });
+      const feature = missionStore.addFeature(slice.id, { title: "FT" });
+      return { missionStore, mission, milestone, slice, feature };
+    }
+
+    it("dispatches fn_mission_create then fn_mission_update to the shared MissionStore", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        const createResult = await client.callTool({ name: "fn_mission_create", arguments: { title: "MCP Mission" } });
+        expect(createResult.isError).not.toBe(true);
+        const missionId = (createResult.structuredContent as { missionId?: string } | undefined)?.missionId;
+        expect(typeof missionId).toBe("string");
+        expect(store.getMissionStore().getMission(missionId!)?.title).toBe("MCP Mission");
+
+        const updateResult = await client.callTool({ name: "fn_mission_update", arguments: { id: missionId, title: "Renamed Mission" } });
+        expect(updateResult.isError).not.toBe(true);
+        expect(store.getMissionStore().getMission(missionId!)?.title).toBe("Renamed Mission");
+
+        const missingUpdate = await client.callTool({ name: "fn_mission_update", arguments: { id: "M-DOES-NOT-EXIST" } });
+        expect(missingUpdate.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("dispatches fn_milestone_add to MissionStore.addMilestone", async () => {
+      const { mission } = seedMissionHierarchy();
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_milestone_add", arguments: { missionId: mission.id, title: "New Milestone" } });
+        expect(result.isError).not.toBe(true);
+        const milestoneId = (result.structuredContent as { milestoneId?: string } | undefined)?.milestoneId;
+        expect(store.getMissionStore().getMilestone(milestoneId!)?.title).toBe("New Milestone");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("dispatches fn_slice_add then fn_slice_activate to MissionStore", async () => {
+      const { milestone } = seedMissionHierarchy();
+      const { client, mcpServer } = await connectClient();
+      try {
+        const addResult = await client.callTool({ name: "fn_slice_add", arguments: { milestoneId: milestone.id, title: "New Slice" } });
+        expect(addResult.isError).not.toBe(true);
+        const sliceId = (addResult.structuredContent as { sliceId?: string } | undefined)?.sliceId;
+        expect(store.getMissionStore().getSlice(sliceId!)?.status).toBe("pending");
+
+        const activateResult = await client.callTool({ name: "fn_slice_activate", arguments: { id: sliceId } });
+        expect(activateResult.isError).not.toBe(true);
+        expect(store.getMissionStore().getSlice(sliceId!)?.status).toBe("active");
+
+        const reactivate = await client.callTool({ name: "fn_slice_activate", arguments: { id: sliceId } });
+        expect(reactivate.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("dispatches fn_feature_add, fn_feature_update, and fn_feature_link_task to MissionStore + TaskStore", async () => {
+      const { slice } = seedMissionHierarchy();
+      const task = await store.createTask({ description: "Feature link target", source: { sourceType: "api" } });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const addResult = await client.callTool({ name: "fn_feature_add", arguments: { sliceId: slice.id, title: "New Feature" } });
+        expect(addResult.isError).not.toBe(true);
+        const featureId = (addResult.structuredContent as { featureId?: string } | undefined)?.featureId;
+        expect(store.getMissionStore().getFeature(featureId!)?.title).toBe("New Feature");
+
+        const updateResult = await client.callTool({ name: "fn_feature_update", arguments: { id: featureId, title: "Renamed Feature" } });
+        expect(updateResult.isError).not.toBe(true);
+        expect(store.getMissionStore().getFeature(featureId!)?.title).toBe("Renamed Feature");
+
+        const linkResult = await client.callTool({ name: "fn_feature_link_task", arguments: { featureId, taskId: task.id } });
+        expect(linkResult.isError).not.toBe(true);
+        expect(store.getMissionStore().getFeature(featureId!)?.taskId).toBe(task.id);
+
+        const missingTaskLink = await client.callTool({ name: "fn_feature_link_task", arguments: { featureId, taskId: "FN-DOES-NOT-EXIST" } });
+        expect(missingTaskLink.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("dispatches fn_goal_create, fn_goal_list, fn_goal_show, and fn_goal_archive to the shared GoalStore", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        const createResult = await client.callTool({ name: "fn_goal_create", arguments: { title: "MCP Goal" } });
+        expect(createResult.isError).not.toBe(true);
+        const goalId = (createResult.structuredContent as { goalId?: string } | undefined)?.goalId;
+        expect(typeof goalId).toBe("string");
+
+        const listResult = await client.callTool({ name: "fn_goal_list", arguments: {} });
+        expect(listResult.isError).not.toBe(true);
+        const listText = (listResult.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+        expect(listText).toContain(goalId);
+
+        const showResult = await client.callTool({ name: "fn_goal_show", arguments: { id: goalId } });
+        expect(showResult.isError).not.toBe(true);
+        const showText = (showResult.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+        expect(showText).toContain("MCP Goal");
+
+        const archiveResult = await client.callTool({ name: "fn_goal_archive", arguments: { id: goalId } });
+        expect(archiveResult.isError).not.toBe(true);
+        expect(store.getGoalStore().getGoal(goalId!)?.status).toBe("archived");
+
+        const showMissing = await client.callTool({ name: "fn_goal_show", arguments: { id: "G-DOES-NOT-EXIST" } });
+        expect(showMissing.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("dispatches fn_mission_link_goal, fn_mission_list_goals, and fn_mission_unlink_goal to MissionStore", async () => {
+      const { mission } = seedMissionHierarchy();
+      const goal = store.getGoalStore().createGoal({ title: "Linkable Goal" });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const linkResult = await client.callTool({ name: "fn_mission_link_goal", arguments: { missionId: mission.id, goalId: goal.id } });
+        expect(linkResult.isError).not.toBe(true);
+        expect(store.getMissionStore().listGoalIdsForMission(mission.id)).toContain(goal.id);
+
+        const listGoalsResult = await client.callTool({ name: "fn_mission_list_goals", arguments: { missionId: mission.id } });
+        expect(listGoalsResult.isError).not.toBe(true);
+        const listGoalsText = (listGoalsResult.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+        expect(listGoalsText).toContain(goal.id);
+
+        const unlinkResult = await client.callTool({ name: "fn_mission_unlink_goal", arguments: { missionId: mission.id, goalId: goal.id } });
+        expect(unlinkResult.isError).not.toBe(true);
+        expect(store.getMissionStore().listGoalIdsForMission(mission.id)).not.toContain(goal.id);
       } finally {
         await client.close();
         await mcpServer.close();
