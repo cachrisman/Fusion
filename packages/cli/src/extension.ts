@@ -424,7 +424,14 @@ export function formatTaskLine(t: Task): string {
   return `${t.id}  ${label}${sourceSuffix}${deps}${paused}`;
 }
 
-async function getResearchAvailability(store: TaskStore): Promise<{ ok: boolean; code?: string; message?: string }> {
+/*
+FNXC:McpServer 2026-07-11-16:00:
+FUSI-052 exports these three research helpers (previously module-private) so
+packages/cli/src/mcp-server/tools.ts's fn_research_* MCP tools can reuse the
+SAME availability gating and run-serialization logic the pi-extension
+fn_research_* handlers use, instead of duplicating it. No behavior change.
+*/
+export async function getResearchAvailability(store: TaskStore): Promise<{ ok: boolean; code?: string; message?: string }> {
   const settings = await store.getSettings();
   if (!isResearchExperimentalEnabled(settings)) {
     return { ok: false, code: "feature-disabled", message: "Research tools are disabled. Enable experimentalFeatures.researchView first." };
@@ -463,7 +470,7 @@ const RESEARCH_RUN_TERMINAL_STATUSES = new Set<ResearchRunStatus>([
   "retry_exhausted",
 ]);
 
-function toResearchRunDetails(run: ResearchRun) {
+export function toResearchRunDetails(run: ResearchRun) {
   return {
     runId: run.id,
     status: run.status,
@@ -477,7 +484,7 @@ function toResearchRunDetails(run: ResearchRun) {
   };
 }
 
-function isResearchRunTerminal(status: ResearchRunStatus): boolean {
+export function isResearchRunTerminal(status: ResearchRunStatus): boolean {
   return RESEARCH_RUN_TERMINAL_STATUSES.has(status);
 }
 

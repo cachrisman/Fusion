@@ -327,11 +327,18 @@ describe("Invariant G — tool-count parity across surfaces stays source-derived
     // (fn_workflow_settings, fn_workflow_add_node, fn_workflow_remove_node,
     // fn_workflow_add_edge, fn_workflow_remove_edge, fn_task_update) — base
     // 43 → 49, destructive unchanged at 11, combined 54 → 60.
+    //
+    // FNXC:McpServer 2026-07-11-16:00: FUSI-052 adds fifteen base tools
+    // (task lifecycle, agent edit, fn_models_list, research pipeline,
+    // fn_trait_list) — base 49 → 64, destructive unchanged at 11, combined
+    // 60 → 75.
     const numberWords: Record<number, string> = {
       43: "forty-three",
       49: "forty-nine",
       54: "fifty-four",
       60: "sixty",
+      64: "sixty-four",
+      75: "seventy-five",
       11: "eleven",
     };
     expect(numberWords[base], `no spelled-out word mapping recorded for base count ${base} — update this test's numberWords map`).toBeTruthy();
@@ -554,7 +561,27 @@ describe("Invariant D & E — full-registry dispatch over an in-memory server", 
         // Secret-shaped input injected wherever the schema accepts a free-text field (instructions_text, patch values).
         const SECRET_PROBE = "sk-live-shouldneverleak1234567890";
 
+        // FNXC:McpServer 2026-07-11-16:00: FUSI-052 fixtures for the fifteen new base tools.
+        const pauseTarget = await store.createTask({ description: "Invariant E pause target", source: { sourceType: "api" } });
+        const archiveForUnarchive = await store.createTask({ description: "Invariant E archive-for-unarchive", source: { sourceType: "api" } });
+        await store.archiveTask(archiveForUnarchive.id, {});
+
         const argsByName: Record<string, Record<string, unknown>> = {
+          fn_task_pause: { id: pauseTarget.id },
+          fn_task_unpause: { id: pauseTarget.id },
+          fn_task_retry: { id: readTask.id },
+          fn_task_duplicate: { id: readTask.id },
+          fn_task_refine: { id: readTask.id, feedback: `Invariant E refine ${SECRET_PROBE}` },
+          fn_task_unarchive: { id: archiveForUnarchive.id },
+          fn_agent_update: { agent_id: execAgent.id, soul: `Invariant E soul ${SECRET_PROBE}` },
+          fn_agent_set_instructions: { agent_id: execAgent.id, instructions_text: SECRET_PROBE },
+          fn_models_list: {},
+          fn_research_run: { query: `Invariant E probe ${SECRET_PROBE}` },
+          fn_research_list: {},
+          fn_research_get: { id: "invariant-e-fake-run" },
+          fn_research_cancel: { id: "invariant-e-fake-run" },
+          fn_research_retry: { id: "invariant-e-fake-run" },
+          fn_trait_list: {},
           fn_task_create: { description: `Invariant E probe ${SECRET_PROBE}` },
           fn_task_list: {},
           fn_task_show: { id: readTask.id },

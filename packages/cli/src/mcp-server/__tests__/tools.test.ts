@@ -159,6 +159,22 @@ const EXPECTED_TOOL_NAMES = [
   // FUSI-020: project registry reads
   "fn_project_list",
   "fn_project_show",
+  // FUSI-052: task lifecycle, agent edit, model read, research, trait discovery
+  "fn_task_pause",
+  "fn_task_unpause",
+  "fn_task_retry",
+  "fn_task_duplicate",
+  "fn_task_refine",
+  "fn_task_unarchive",
+  "fn_agent_update",
+  "fn_agent_set_instructions",
+  "fn_models_list",
+  "fn_research_run",
+  "fn_research_list",
+  "fn_research_get",
+  "fn_research_cancel",
+  "fn_research_retry",
+  "fn_trait_list",
 ];
 
 const EXPECTED_DESTRUCTIVE_TOOL_NAMES = [
@@ -1949,6 +1965,289 @@ describe("fn mcp serve — in-memory server smoke test", () => {
       } finally {
         await destructive.client.close();
         await destructive.mcpServer.close();
+      }
+    });
+  });
+
+  /*
+  FNXC:McpServer 2026-07-11-16:00:
+  FUSI-052 dispatch coverage for the fifteen new base tools: task lifecycle
+  (pause/unpause/retry/duplicate/refine/unarchive), agent edit
+  (fn_agent_update/fn_agent_set_instructions), fn_models_list, the five
+  research tools, and fn_trait_list. Each asserts (a) correct dispatch to the
+  shared store/domain op, (b) base-tier registration (present without
+  --allow-destructive), (c) no DESTRUCTIVE: prefix, and representative
+  success + error/not-found paths. fn_task_retry additionally covers a plain
+  failed->todo retry, an in-review execution-stall retry (preserveProgress),
+  and a non-retryable-state rejection, per the FN-5893 "fix the invariant,
+  not the repro" standing rule.
+  */
+  describe("task lifecycle, agent edit, model, research, trait tools (FUSI-052)", () => {
+    it("all fifteen new tools are present in the base registry without --allow-destructive and none is DESTRUCTIVE:-prefixed", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        const { tools } = await client.listTools();
+        const byName = new Map((tools ?? []).map((t) => [t.name, t]));
+        const newNames = [
+          "fn_task_pause", "fn_task_unpause", "fn_task_retry", "fn_task_duplicate", "fn_task_refine", "fn_task_unarchive",
+          "fn_agent_update", "fn_agent_set_instructions", "fn_models_list",
+          "fn_research_run", "fn_research_list", "fn_research_get", "fn_research_cancel", "fn_research_retry",
+          "fn_trait_list",
+        ];
+        for (const name of newNames) {
+          const tool = byName.get(name);
+          expect(tool, `${name} missing from base registry`).toBeTruthy();
+          expect(tool!.description.startsWith("DESTRUCTIVE:"), `${name} incorrectly DESTRUCTIVE:-marked`).toBe(false);
+          expect(/_delete$/i.test(name), `${name} looks like a delete tool`).toBe(false);
+        }
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_task_pause / fn_task_unpause dispatch to store.pauseTask", async () => {
+      const task = await store.createTask({ description: "Pause me via MCP", source: { sourceType: "api" } });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const paused = await client.callTool({ name: "fn_task_pause", arguments: { id: task.id } });
+        expect(paused.isError).not.toBe(true);
+        expect((await store.getTask(task.id)).paused).toBe(true);
+
+        const unpaused = await client.callTool({ name: "fn_task_unpause", arguments: { id: task.id } });
+        expect(unpaused.isError).not.toBe(true);
+        expect((await store.getTask(task.id)).paused).toBeFalsy();
+
+        const missing = await client.callTool({ name: "fn_task_pause", arguments: { id: "" } });
+        expect(missing.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_task_retry: plain failed task moves to todo with error state cleared", async () => {
+      const task = await store.createTask({ description: "Retry me via MCP", source: { sourceType: "api" } });
+      await store.updateTask(task.id, { status: "failed", error: "boom" });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_task_retry", arguments: { id: task.id } });
+        expect(result.isError).not.toBe(true);
+        const updated = await store.getTask(task.id);
+        expect(updated.column).toBe("todo");
+        expect(updated.status).toBeFalsy();
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_task_retry: stranded in-review task with incomplete steps retries to todo preserving progress", async () => {
+      const task = await store.createTask({ description: "In-review stall via MCP", source: { sourceType: "api" } });
+      await store.moveTask(task.id, "todo");
+      await store.moveTask(task.id, "in-progress");
+      await store.moveTask(task.id, "in-review");
+      await store.updateTask(task.id, {
+        status: null,
+        steps: [{ number: 0, name: "Step 0", status: "in-progress" }] as never,
+      });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_task_retry", arguments: { id: task.id } });
+        expect(result.isError).not.toBe(true);
+        const updated = await store.getTask(task.id);
+        expect(updated.column).toBe("todo");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_task_retry: rejects a task not in a retryable state", async () => {
+      const task = await store.createTask({ description: "Not retryable via MCP", source: { sourceType: "api" } });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_task_retry", arguments: { id: task.id } });
+        expect(result.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_task_duplicate dispatches to store.duplicateTask, creating a new task in planning", async () => {
+      const task = await store.createTask({ description: "Duplicate me via MCP", source: { sourceType: "api" } });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_task_duplicate", arguments: { id: task.id } });
+        expect(result.isError).not.toBe(true);
+        const newTaskId = (result.structuredContent as { newTaskId?: string } | undefined)?.newTaskId;
+        expect(typeof newTaskId).toBe("string");
+        const newTask = await store.getTask(newTaskId!);
+        expect(newTask.description).toContain(task.description);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_task_refine dispatches to store.refineTask, creating a dependent follow-up task", async () => {
+      const task = await store.createTask({ description: "Refine me via MCP", source: { sourceType: "api" } });
+      await store.moveTask(task.id, "todo");
+      await store.moveTask(task.id, "in-progress");
+      await store.moveTask(task.id, "in-review");
+      await store.moveTask(task.id, "done");
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_task_refine", arguments: { id: task.id, feedback: "needs more polish" } });
+        expect(result.isError).not.toBe(true);
+        const newTaskId = (result.structuredContent as { newTaskId?: string } | undefined)?.newTaskId;
+        expect(typeof newTaskId).toBe("string");
+        const newTask = await store.getTask(newTaskId!);
+        expect(newTask.dependencies).toContain(task.id);
+
+        const missingFeedback = await client.callTool({ name: "fn_task_refine", arguments: { id: task.id } });
+        expect(missingFeedback.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_task_unarchive dispatches to store.unarchiveTask, restoring the pre-archive column", async () => {
+      const task = await store.createTask({ description: "Unarchive me via MCP", source: { sourceType: "api" } });
+      await store.archiveTask(task.id, {});
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_task_unarchive", arguments: { id: task.id } });
+        expect(result.isError).not.toBe(true);
+        const restored = await store.getTask(task.id);
+        expect(restored.column).not.toBe("archived");
+
+        const notFound = await client.callTool({ name: "fn_task_unarchive", arguments: { id: "FN-DOES-NOT-EXIST" } });
+        expect(notFound.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_agent_update dispatches to AgentStore.updateAgent and updates the target's fields", async () => {
+      const agentStore = new AgentStore({ rootDir: join(tmpDir, ".fusion") });
+      await agentStore.init();
+      const agent = await agentStore.createAgent({ name: "MCP Update Target", role: "executor" });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_agent_update", arguments: { agent_id: agent.id, title: "Senior Executor" } });
+        expect(result.isError).not.toBe(true);
+        const updated = await agentStore.getAgent(agent.id);
+        expect(updated?.title).toBe("Senior Executor");
+
+        const noFields = await client.callTool({ name: "fn_agent_update", arguments: { agent_id: agent.id } });
+        expect(noFields.isError).toBe(true);
+
+        const notFound = await client.callTool({ name: "fn_agent_update", arguments: { agent_id: "agent-does-not-exist", title: "x" } });
+        expect(notFound.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_agent_set_instructions dispatches to AgentStore.updateAgent for instructionsText/instructionsPath", async () => {
+      const agentStore = new AgentStore({ rootDir: join(tmpDir, ".fusion") });
+      await agentStore.init();
+      const agent = await agentStore.createAgent({ name: "MCP Instructions Target", role: "executor" });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_agent_set_instructions", arguments: { agent_id: agent.id, instructions_text: "Be helpful." } });
+        expect(result.isError).not.toBe(true);
+        const updated = await agentStore.getAgent(agent.id);
+        expect(updated?.instructionsText).toBe("Be helpful.");
+
+        const noFields = await client.callTool({ name: "fn_agent_set_instructions", arguments: { agent_id: agent.id } });
+        expect(noFields.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_models_list returns the ModelRegistry's built-in models without writing to stdout", async () => {
+      const { client, mcpServer } = await connectClient();
+      const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      try {
+        const result = await client.callTool({ name: "fn_models_list", arguments: {} });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { count?: number; models?: Array<{ id: string; provider: string }> } | undefined;
+        expect(typeof structured?.count).toBe("number");
+        expect(Array.isArray(structured?.models)).toBe(true);
+      } finally {
+        stdoutSpy.mockRestore();
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_models_list narrows results by the optional provider filter", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        const all = await client.callTool({ name: "fn_models_list", arguments: {} });
+        const allModels = (all.structuredContent as { models?: Array<{ provider: string }> } | undefined)?.models ?? [];
+        expect(allModels.length).toBeGreaterThan(0);
+        const someProvider = allModels[0]!.provider;
+
+        const filtered = await client.callTool({ name: "fn_models_list", arguments: { provider: someProvider } });
+        const filteredModels = (filtered.structuredContent as { models?: Array<{ provider: string }> } | undefined)?.models ?? [];
+        expect(filteredModels.every((m) => m.provider === someProvider)).toBe(true);
+
+        const none = await client.callTool({ name: "fn_models_list", arguments: { provider: "definitely-not-a-real-provider" } });
+        const noneModels = (none.structuredContent as { models?: unknown[] } | undefined)?.models ?? [];
+        expect(noneModels).toEqual([]);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_research_run / fn_research_list / fn_research_get / fn_research_cancel / fn_research_retry gate on availability without throwing when research is unconfigured", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        const run = await client.callTool({ name: "fn_research_run", arguments: { query: "MCP research probe" } });
+        expect(run.isError).not.toBe(true);
+        const runDetails = run.structuredContent as { status?: string } | undefined;
+        expect(runDetails?.status).toBe("unavailable");
+
+        const list = await client.callTool({ name: "fn_research_list", arguments: {} });
+        expect(list.isError).not.toBe(true);
+
+        const get = await client.callTool({ name: "fn_research_get", arguments: { id: "fake-run" } });
+        expect(get.isError).not.toBe(true);
+
+        const cancel = await client.callTool({ name: "fn_research_cancel", arguments: { id: "fake-run" } });
+        expect(cancel.isError).toBe(true);
+
+        const retry = await client.callTool({ name: "fn_research_retry", arguments: { id: "fake-run" } });
+        expect(retry.isError).toBe(true);
+
+        const missingQuery = await client.callTool({ name: "fn_research_run", arguments: {} });
+        expect(missingQuery.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_trait_list dispatches to the shared createTraitListTool factory and returns the trait catalog", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_trait_list", arguments: {} });
+        expect(result.isError).not.toBe(true);
+        const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+        expect(text.length).toBeGreaterThan(0);
+      } finally {
+        await client.close();
+        await mcpServer.close();
       }
     });
   });

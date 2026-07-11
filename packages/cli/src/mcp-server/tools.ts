@@ -136,6 +136,43 @@
  * `MCP_TOOL_REGISTRY`/`DESTRUCTIVE_TOOL_TIER` at HEAD. After merging with
  * FUSI-018's mission/goal mutation base tools, the current sizes are
  * 43 base / 11 destructive / 54 combined.
+ *
+ * FNXC:McpServer 2026-07-11-15:00:
+ * FUSI-046 adds six base tools on top of FUSI-021's 43/11/54 baseline
+ * (`fn_workflow_settings`, `fn_workflow_add_node`/`fn_workflow_remove_node`/
+ * `fn_workflow_add_edge`/`fn_workflow_remove_edge`, `fn_task_update`) —
+ * base tool count forty-three → forty-nine; combined with
+ * --allow-destructive: fifty-four → sixty; destructive tier UNCHANGED at
+ * eleven. See the FNXC:McpServer 2026-07-11-15:00 comments above
+ * `fnWorkflowSettings`/`fnWorkflowAddNode`/`fnTaskUpdate` for the full
+ * rationale.
+ *
+ * FNXC:McpServer 2026-07-11-16:00:
+ * FUSI-052 adds fifteen base tools on top of FUSI-046's 49/11/60 baseline —
+ * task lifecycle (`fn_task_retry`, `fn_task_unarchive`, `fn_task_pause`,
+ * `fn_task_unpause`, `fn_task_refine`, `fn_task_duplicate`), agent edit
+ * (`fn_agent_update`, `fn_agent_set_instructions`), model discovery
+ * (`fn_models_list`), the governed research pipeline (`fn_research_run`/
+ * `fn_research_list`/`fn_research_get`/`fn_research_cancel`/
+ * `fn_research_retry`), and workflow-trait discovery (`fn_trait_list`).
+ * Base tool count forty-nine → sixty-four; combined with
+ * --allow-destructive: sixty → seventy-five; destructive tier UNCHANGED at
+ * eleven. Every one of the fifteen dispatches to the SAME @fusion/core /
+ * @fusion/engine domain operation the pi-extension fn_* handler in
+ * packages/cli/src/extension.ts calls (fn_task_retry additionally reuses
+ * the shared `buildAutoPauseClearPatch`/`buildManualRetryResetPatch`/
+ * `isInReviewMissingWorktreeSessionStartFailure` engine/core helpers so its
+ * retry classification cannot drift from the pi handler's); the three
+ * research helpers (`getResearchAvailability`/`toResearchRunDetails`/
+ * `isResearchRunTerminal`) were exported from extension.ts (added `export`
+ * only, no behavior change) for the SAME reason. `fn_models_list` is the
+ * one net-new tool (no pi-extension precedent) — it constructs a
+ * `ModelRegistry` the same way packages/cli/src/commands/dashboard.ts does,
+ * but with a stderr-only (never `console.log`) provider registration log
+ * callback, since this server's stdout is the MCP protocol transport
+ * channel. All fifteen are BASE-tier: none is `DESTRUCTIVE:`-prefixed or
+ * `*_delete`-class — see the per-tool FNXC:McpServer 2026-07-11-16:00
+ * comments above each tool group for the individual base-tier rationale.
  */
 import {
   TaskStore,
@@ -156,15 +193,24 @@ import {
   readProjectIdentity,
   writeProjectIdentity,
   validateNodeOverrideChange,
+  buildAutoPauseClearPatch,
+  buildManualRetryResetPatch,
+  isEphemeralAgent,
+  RESEARCH_RUN_STATUSES,
+  registerBuiltInZaiProvider,
+  registerBuiltInGrokProvider,
   type Task,
   type ColumnId,
   type TaskPriority,
   type RegisteredProject,
+  type AgentCapability,
+  type AgentUpdateInput,
+  type ResearchRunStatus,
 } from "@fusion/core";
 import { scaffoldFusionProject } from "../commands/init.js";
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { workflowDeleteParams } from "@fusion/engine";
+import { workflowDeleteParams, isInReviewMissingWorktreeSessionStartFailure, traitListParams, createFusionAuthStorage } from "@fusion/engine";
 import {
   createWorkflowAuthoringTools,
   workflowListParams,
@@ -179,6 +225,8 @@ import {
   workflowRemoveEdgeParams,
 } from "@fusion/engine";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { getModelRegistryModelsPath } from "../commands/auth-paths.js";
 import {
   getFusionDir,
   validateAssignableAgentId,
@@ -187,6 +235,9 @@ import {
   formatDuplicateLineageLine,
   columnLabel,
   formatTaskLine,
+  getResearchAvailability,
+  toResearchRunDetails,
+  isResearchRunTerminal,
 } from "../extension.js";
 
 /** Runtime context threaded into every MCP tool handler. */
@@ -819,6 +870,450 @@ const fnAgentStop: McpToolDefinition = {
   },
 };
 
+/*
+FNXC:McpServer 2026-07-11-16:00:
+FUSI-052: fn_agent_update / fn_agent_set_instructions close the "no agent
+edit on MCP; had to delete and recreate" gap. Both mirror the pi-extension
+handlers (packages/cli/src/extension.ts ~4415/~4642) field-for-field
+(param shape + length/minimum validations + ephemeral-agent rejection +
+not-found handling) and dispatch to the SAME `AgentStore.updateAgent(...)`
+domain op — no re-implemented config-revision/hierarchy logic. The MCP
+operator caller is PRIVILEGED (no `callerAgentId` on `McpToolRuntimeContext`
+— mirrors the `{ id: "user", role: "user", isPrivileged: true }` shape
+`fn_agent_create` already uses), so the pi handler's chain-of-command /
+org-subtree denial branches (which only fire when a CALLER agent id is
+present) are simply unreachable here — every target agent is addressable and
+`reportsTo: ""` (clear manager) is always allowed, exactly as it is for the
+privileged pi caller path. BASE-tier: an in-place reversible edit, not a
+`*_delete`-class mutation. `structuredContent` is walked through
+`redactSecretsDeep` since `runtimeConfig`/`soul`/instructions fields are
+free-text enough that a future value could be secret-shaped.
+*/
+const fnAgentUpdate: McpToolDefinition = {
+  name: "fn_agent_update",
+  description:
+    "Update editable configuration for an existing non-ephemeral agent. The MCP operator caller is privileged " +
+    "(no chain-of-command restriction) — any non-ephemeral agent may be targeted.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      agent_id: { type: "string", description: "Target agent ID or name to update" },
+      name: { type: "string", description: "New display name" },
+      role: { type: "string", enum: ["triage", "executor", "reviewer", "merger", "engineer", "custom"], description: "Agent role/capability" },
+      title: { type: "string", description: "Optional title shown for the agent" },
+      icon: { type: "string", description: "Optional compact icon/emoji" },
+      soul: { type: "string", description: "Agent personality/identity text" },
+      instructions_text: { type: "string", description: "Inline custom instructions" },
+      instructions_path: { type: "string", description: "Path to instructions markdown" },
+      heartbeat_procedure_path: { type: "string", description: "Path to heartbeat procedure markdown" },
+      reportsTo: { type: "string", description: "Manager agent ID/name. Pass empty string to clear." },
+      heartbeat_interval_ms: { type: "number", minimum: 1000, description: "Heartbeat polling interval in ms" },
+      heartbeat_timeout_ms: { type: "number", minimum: 5000, description: "Heartbeat timeout in ms" },
+      max_concurrent_runs: { type: "number", minimum: 1, description: "Max concurrent heartbeat runs" },
+      message_response_mode: { type: "string", enum: ["immediate", "on-heartbeat"], description: "How agent responds to messages" },
+    },
+    required: ["agent_id"],
+  },
+  async handler(_store, args, ctx) {
+    const agentId = String(args.agent_id ?? "").trim();
+    if (!agentId) return errorResult("agent_id is required.");
+
+    const updateParamKeys = [
+      "name", "role", "title", "icon", "soul", "instructions_text", "instructions_path",
+      "heartbeat_procedure_path", "reportsTo", "heartbeat_interval_ms", "heartbeat_timeout_ms",
+      "max_concurrent_runs", "message_response_mode",
+    ] as const;
+    const providedKeys = updateParamKeys.filter((key) => args[key] !== undefined);
+    if (providedKeys.length === 0) return errorResult("Provide at least one field to update");
+
+    const soul = args.soul;
+    if (typeof soul === "string" && soul.length > 10000) return errorResult("soul exceeds 10000 character limit");
+    const instructionsText = args.instructions_text;
+    if (typeof instructionsText === "string" && instructionsText.length > 50000) return errorResult("instructions_text exceeds 50000 character limit");
+    const instructionsPath = args.instructions_path;
+    if (typeof instructionsPath === "string" && instructionsPath.length > 500) return errorResult("instructions_path exceeds 500 character limit");
+    const heartbeatProcedurePath = args.heartbeat_procedure_path;
+    if (typeof heartbeatProcedurePath === "string" && heartbeatProcedurePath.length > 500) return errorResult("heartbeat_procedure_path exceeds 500 character limit");
+    const heartbeatIntervalMs = args.heartbeat_interval_ms;
+    if (typeof heartbeatIntervalMs === "number" && heartbeatIntervalMs < 1000) return errorResult("heartbeat_interval_ms must be at least 1000");
+    const heartbeatTimeoutMs = args.heartbeat_timeout_ms;
+    if (typeof heartbeatTimeoutMs === "number" && heartbeatTimeoutMs < 5000) return errorResult("heartbeat_timeout_ms must be at least 5000");
+    const maxConcurrentRuns = args.max_concurrent_runs;
+    if (typeof maxConcurrentRuns === "number" && maxConcurrentRuns < 1) return errorResult("max_concurrent_runs must be at least 1");
+
+    const agentStore = await getAgentStore(ctx.cwd);
+    const target = (await agentStore.getAgent(agentId)) ?? (await agentStore.resolveAgent(agentId));
+    if (!target) return errorResult(`Agent '${agentId}' not found`);
+    if (isEphemeralAgent(target)) return errorResult(`Cannot update ephemeral/runtime agent ${target.id}`);
+
+    let resolvedReportsTo: string | undefined;
+    if (args.reportsTo !== undefined) {
+      const reportsToArg = String(args.reportsTo);
+      if (reportsToArg === "") {
+        resolvedReportsTo = undefined;
+      } else {
+        const manager = await agentStore.resolveAgent(reportsToArg);
+        if (!manager) return errorResult(`Manager '${reportsToArg}' not found`);
+        if (manager.id === target.id) return errorResult("An agent cannot report to itself");
+        const managerChain = await agentStore.getChainOfCommand(manager.id);
+        if (managerChain.some((a) => a.id === target.id)) return errorResult("reportsTo would create a management cycle");
+        resolvedReportsTo = manager.id;
+      }
+    }
+
+    const hasRuntimeConfigUpdates = [heartbeatIntervalMs, heartbeatTimeoutMs, maxConcurrentRuns, args.message_response_mode].some((v) => v !== undefined);
+    const updateInput: AgentUpdateInput = {};
+    const updatedFields: string[] = [];
+    const setField = <K extends keyof AgentUpdateInput>(field: K, value: AgentUpdateInput[K]) => {
+      updateInput[field] = value;
+      updatedFields.push(String(field));
+    };
+
+    if (typeof args.name === "string") setField("name", args.name);
+    if (typeof args.role === "string") setField("role", args.role as AgentCapability);
+    if (typeof args.title === "string") setField("title", args.title);
+    if (typeof args.icon === "string") setField("icon", args.icon);
+    if (typeof soul === "string") setField("soul", soul);
+    if (typeof instructionsText === "string") setField("instructionsText", instructionsText);
+    if (typeof instructionsPath === "string") setField("instructionsPath", instructionsPath);
+    if (typeof heartbeatProcedurePath === "string") setField("heartbeatProcedurePath", heartbeatProcedurePath);
+    if (args.reportsTo !== undefined) setField("reportsTo", resolvedReportsTo);
+    if (hasRuntimeConfigUpdates) {
+      setField("runtimeConfig", {
+        ...((target.runtimeConfig ?? {}) as Record<string, unknown>),
+        ...(typeof heartbeatIntervalMs === "number" ? { heartbeatIntervalMs } : {}),
+        ...(typeof heartbeatTimeoutMs === "number" ? { heartbeatTimeoutMs } : {}),
+        ...(typeof maxConcurrentRuns === "number" ? { maxConcurrentRuns } : {}),
+        ...(typeof args.message_response_mode === "string" ? { messageResponseMode: args.message_response_mode } : {}),
+      });
+    }
+
+    const updated = await agentStore.updateAgent(target.id, updateInput);
+    return textResult(`Updated ${updated.name} (${updated.id}): ${updatedFields.join(", ")}`, {
+      structuredContent: redactSecretsDeep({ outcome: "updated", agentId: updated.id, updatedFields, agent: updated }),
+    });
+  },
+};
+
+const fnAgentSetInstructions: McpToolDefinition = {
+  name: "fn_agent_set_instructions",
+  description:
+    "Set the instructionsText and/or instructionsPath of an existing non-ephemeral agent. At least one of " +
+    "instructions_text or instructions_path is required; pass an empty string to clear a field. The change is " +
+    "persisted and recorded as a config revision.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      agent_id: { type: "string", description: "Target agent whose instructions to set" },
+      instructions_text: { type: "string", description: "Inline instructions. Pass an empty string to clear." },
+      instructions_path: { type: "string", description: "Path to a markdown instructions file. Pass an empty string to clear." },
+    },
+    required: ["agent_id"],
+  },
+  async handler(_store, args, ctx) {
+    const agentId = String(args.agent_id ?? "").trim();
+    if (!agentId) return errorResult("agent_id is required.");
+
+    const hasInstructionsText = args.instructions_text !== undefined;
+    const hasInstructionsPath = args.instructions_path !== undefined;
+    if (!hasInstructionsText && !hasInstructionsPath) {
+      return errorResult("Provide instructions_text and/or instructions_path to update agent instructions.");
+    }
+
+    const agentStore = await getAgentStore(ctx.cwd);
+    const target = await agentStore.resolveAgent(agentId);
+    if (!target) return errorResult(`Agent '${agentId}' not found`);
+    if (isEphemeralAgent(target)) return errorResult(`Cannot update ephemeral/runtime agent ${target.id}`);
+
+    const updatedFields: string[] = [];
+    if (hasInstructionsText) updatedFields.push("instructionsText");
+    if (hasInstructionsPath) updatedFields.push("instructionsPath");
+
+    const updated = await agentStore.updateAgent(target.id, {
+      ...(hasInstructionsText ? { instructionsText: String(args.instructions_text) } : {}),
+      ...(hasInstructionsPath ? { instructionsPath: String(args.instructions_path) } : {}),
+    });
+
+    return textResult(`Updated ${updated.name} (${updated.id}) instructions: ${updatedFields.join(", ")}`, {
+      structuredContent: redactSecretsDeep({ outcome: "updated", agentId: updated.id, updatedFields }),
+    });
+  },
+};
+
+// ── Model registry tools (read-only) ────────────────────────────────────────
+
+/*
+FNXC:McpServer 2026-07-11-16:00:
+FUSI-052: fn_models_list is net-new (no pi-extension precedent) — it closes
+the "which provider/model ids are actually registered" discoverability gap
+(the motivating cursor-cli "not found in registry" incident, and FUSI-050).
+Constructs a ModelRegistry the SAME way packages/cli/src/commands/dashboard.ts
+(~1507) and daemon.ts/serve.ts do: `ModelRegistry.create(createFusionAuthStorage(),
+getModelRegistryModelsPath())`, then `registerBuiltInZaiProvider`/
+`registerBuiltInGrokProvider`. IMPORTANT: unlike daemon.ts's `console.log`
+provider log callback, this handler's callback MUST be stderr-or-no-op —
+fn mcp serve's stdout IS the MCP protocol transport channel, so a
+console.log here would corrupt every in-flight response. Read-only,
+base-tier; response walked through redactSecretsDeep defensively (model
+records are not expected to carry secret material, but the registry is
+free-form enough that a future field could).
+*/
+const fnModelsList: McpToolDefinition = {
+  name: "fn_models_list",
+  description:
+    "List the provider/model ids currently registered in Fusion's model registry (built-in models plus any " +
+    "configured custom/provider models). Use this to discover valid model ids before setting a workflow's " +
+    "per-phase model lane via fn_workflow_settings, or an agent's model configuration.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      provider: { type: "string", description: "Optional provider id to narrow the list (e.g. 'anthropic', 'zai', 'grok-cli')" },
+    },
+  },
+  async handler(_store, args) {
+    try {
+      const authStorage = createFusionAuthStorage();
+      const modelRegistry = ModelRegistry.create(authStorage, getModelRegistryModelsPath());
+      // FNXC:McpServer 2026-07-11-16:00: stderr-or-no-op ONLY — stdout is the MCP protocol channel.
+      const logCb = (message: string) => {
+        console.error(`[fn mcp serve] fn_models_list: ${message}`);
+      };
+      registerBuiltInZaiProvider(modelRegistry, logCb);
+      registerBuiltInGrokProvider(modelRegistry, logCb);
+
+      const providerFilter = typeof args.provider === "string" ? args.provider.trim() : undefined;
+      const all = modelRegistry
+        .getAll()
+        .filter((m) => !providerFilter || m.provider === providerFilter)
+        .map((m) => ({
+          id: m.id,
+          name: m.name,
+          provider: m.provider ?? "unknown",
+          contextWindow: m.contextWindow ?? 0,
+        }));
+
+      if (all.length === 0) {
+        return textResult(
+          providerFilter ? `No models registered for provider '${providerFilter}'.` : "No models registered.",
+          { structuredContent: redactSecretsDeep({ count: 0, models: [] }) },
+        );
+      }
+
+      const lines = all.map((m) => `- ${m.provider}/${m.id} (${m.name}) contextWindow=${m.contextWindow}`);
+      return textResult(`Registered models (${all.length}):\n\n${lines.join("\n")}`, {
+        structuredContent: redactSecretsDeep({ count: all.length, models: all }),
+      });
+    } catch (error) {
+      if (error instanceof Error) return errorResult(error.message);
+      throw error;
+    }
+  },
+};
+
+// ── Research pipeline tools ─────────────────────────────────────────────
+
+/*
+FNXC:McpServer 2026-07-11-16:00:
+FUSI-052: fn_research_run/list/get/cancel/retry mirror the pi-extension
+Research Tools section (packages/cli/src/extension.ts ~2344) 1:1, reusing
+the SAME `getResearchAvailability`/`toResearchRunDetails`/`isResearchRunTerminal`
+helpers (exported from extension.ts for this purpose — no duplicated
+availability gating or run-serialization logic) and dispatching to the SAME
+`store.getResearchStore()` ops (`createRun`, `listRuns`, `getRun`,
+`requestCancellation`, `createRetryRun`). All five gate on
+`getResearchAvailability(store)` FIRST and return an informational,
+NON-THROWING result when unavailable (feature disabled / missing search
+credentials) — never a thrown error for a simple "not configured yet" state.
+BASE-tier: creating/listing/inspecting/cancelling/retrying a bounded research
+run is a reversible, governed operation, not a `*_delete`-class mutation.
+
+FNXC:McpServer 2026-07-11-16:00:
+`fn_research_run`'s `wait_for_completion` path polls WITHOUT an abort signal
+— `McpToolRuntimeContext` carries no `AbortSignal` (unlike the pi extension's
+`execute(_, _, signal, ...)` param), so this handler uses a plain bounded
+`setTimeout`-based poll capped by `max_wait_ms` (default 90000) with no
+cancellation hook. Completion still requires a running Fusion engine process
+to actually process the queued run — the non-wait path's response text says
+so explicitly, matching the pi handler's guidance.
+*/
+async function sleepBounded(ms: number): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+const fnResearchRun: McpToolDefinition = {
+  name: "fn_research_run",
+  description: "Cited-research pipeline: create a bounded search/fetch/synthesis run (not an autonomous experiment loop) and optionally wait for completion.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "Research query or question" },
+      wait_for_completion: { type: "boolean", description: "Wait for the run to complete before returning (default: false)" },
+      max_wait_ms: { type: "number", description: "Max wait time when wait_for_completion=true (default: 90000, capped by settings)" },
+    },
+    required: ["query"],
+  },
+  async handler(store, args) {
+    const query = typeof args.query === "string" ? args.query.trim() : "";
+    if (!query) return errorResult("query is required.");
+
+    const availability = await getResearchAvailability(store);
+    if (!availability.ok) {
+      return textResult(availability.message ?? "Research is unavailable.", {
+        structuredContent: redactSecretsDeep({ runId: null, status: "unavailable", summary: null, findings: [], citations: [], error: availability.message, setup: { code: availability.code, message: availability.message } }),
+      });
+    }
+
+    const researchStore = store.getResearchStore();
+    const run = researchStore.createRun({ query, topic: query, providerConfig: {} });
+
+    if (args.wait_for_completion !== true) {
+      return textResult(`Created research run ${run.id}. Start the project engine to process pending runs, then use fn_research_get.`, {
+        structuredContent: redactSecretsDeep(toResearchRunDetails(run)),
+      });
+    }
+
+    const maxWaitMs = typeof args.max_wait_ms === "number" && Number.isFinite(args.max_wait_ms) ? Math.max(0, args.max_wait_ms) : 90_000;
+    const pollIntervalMs = 2_000;
+    const deadline = Date.now() + maxWaitMs;
+    let latestRun = run;
+
+    while (Date.now() <= deadline) {
+      const current = researchStore.getRun(run.id);
+      if (!current) break;
+      latestRun = current;
+      if (isResearchRunTerminal(current.status)) {
+        return textResult(`Research run ${current.id} is ${current.status}.`, { structuredContent: redactSecretsDeep(toResearchRunDetails(current)) });
+      }
+      await sleepBounded(pollIntervalMs);
+    }
+
+    return textResult(`Research run ${latestRun.id} is ${latestRun.status}.`, { structuredContent: redactSecretsDeep(toResearchRunDetails(latestRun)) });
+  },
+};
+
+const fnResearchList: McpToolDefinition = {
+  name: "fn_research_list",
+  description: "Cited-research pipeline: list recent search/fetch/synthesis runs (not experiment-loop sessions).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      status: { type: "string", enum: [...RESEARCH_RUN_STATUSES], description: "Filter by run status" },
+      limit: { type: "number", description: "Max runs to return (default: 10)" },
+    },
+  },
+  async handler(store, args) {
+    const availability = await getResearchAvailability(store);
+    if (!availability.ok) {
+      return textResult(availability.message ?? "Research is unavailable.", {
+        structuredContent: redactSecretsDeep({ runs: [], setup: { code: availability.code, message: availability.message } }),
+      });
+    }
+    const runs = store.getResearchStore().listRuns({
+      status: typeof args.status === "string" ? (args.status as ResearchRunStatus) : undefined,
+      limit: typeof args.limit === "number" ? args.limit : 10,
+    });
+    const text = runs.length ? runs.map((run) => `- ${run.id} [${run.status}] ${run.query}`).join("\n") : "No research runs found.";
+    return textResult(text, { structuredContent: redactSecretsDeep({ runs: runs.map(toResearchRunDetails) }) });
+  },
+};
+
+const fnResearchGet: McpToolDefinition = {
+  name: "fn_research_get",
+  description: "Cited-research pipeline: get one run with structured findings and citations (not experiment-loop state).",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string", description: "Research run ID" } },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    const availability = await getResearchAvailability(store);
+    if (!availability.ok) {
+      return textResult(availability.message ?? "Research is unavailable.", {
+        structuredContent: redactSecretsDeep({ runId: id, status: "unavailable", summary: null, findings: [], citations: [], error: availability.message, setup: { code: availability.code, message: availability.message } }),
+      });
+    }
+    const run = store.getResearchStore().getRun(id);
+    if (!run) {
+      return textResult(`Research run ${id} not found.`, {
+        structuredContent: redactSecretsDeep({ runId: id, status: "missing", summary: null, findings: [], citations: [], error: "not found", setup: { code: "NOT_FOUND", message: `Research run ${id} not found.` } }),
+      });
+    }
+    return textResult(`Research run ${run.id} is ${run.status}.`, { structuredContent: redactSecretsDeep(toResearchRunDetails(run)) });
+  },
+};
+
+const fnResearchCancel: McpToolDefinition = {
+  name: "fn_research_cancel",
+  description: "Cited-research pipeline: cancel an in-flight run; terminal runs return INVALID_TRANSITION (does not control experiment loops).",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string", description: "Research run ID" } },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    const availability = await getResearchAvailability(store);
+    if (!availability.ok) {
+      return errorResult(availability.message ?? "Research is unavailable.", {
+        structuredContent: redactSecretsDeep({ runId: id, status: "unavailable", error: availability.message, setup: { code: availability.code, message: availability.message } }),
+      });
+    }
+    const researchStore = store.getResearchStore();
+    const run = researchStore.getRun(id);
+    if (!run) {
+      return errorResult(`Research run ${id} not found.`, {
+        structuredContent: redactSecretsDeep({ runId: id, status: "missing", error: "not found", setup: { code: "NOT_FOUND", message: `Research run ${id} not found.` } }),
+      });
+    }
+    if (!["queued", "running", "cancelling", "retry_waiting"].includes(run.status)) {
+      return errorResult(`Research run ${id} cannot be cancelled from status ${run.status}.`, {
+        structuredContent: redactSecretsDeep({ ...toResearchRunDetails(run), error: "invalid transition", setup: { code: "INVALID_TRANSITION", message: "Cancel is only available for queued/running/cancelling/retry_waiting runs." } }),
+      });
+    }
+    const updated = researchStore.requestCancellation(id);
+    return textResult(`Requested cancellation for research run ${id} (status: ${updated.status}).`, { structuredContent: redactSecretsDeep(toResearchRunDetails(updated)) });
+  },
+};
+
+const fnResearchRetry: McpToolDefinition = {
+  name: "fn_research_retry",
+  description: "Cited-research pipeline: retry a failed run when lifecycle marks it retryable (not an autonomous experiment loop retry).",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string", description: "Research run ID" } },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    const availability = await getResearchAvailability(store);
+    if (!availability.ok) {
+      return errorResult(availability.message ?? "Research is unavailable.", {
+        structuredContent: redactSecretsDeep({ runId: id, status: "unavailable", error: availability.message, setup: { code: availability.code, message: availability.message } }),
+      });
+    }
+    const researchStore = store.getResearchStore();
+    const run = researchStore.getRun(id);
+    if (!run) {
+      return errorResult(`Research run ${id} not found.`, {
+        structuredContent: redactSecretsDeep({ runId: id, status: "missing", error: "not found", setup: { code: "NOT_FOUND", message: `Research run ${id} not found.` } }),
+      });
+    }
+    const isRetryExhausted = run.status === "retry_exhausted" || run.lifecycle?.errorCode === "RETRY_EXHAUSTED";
+    if ((run.status !== "failed" && run.status !== "timed_out") || run.lifecycle?.retryable === false || isRetryExhausted) {
+      return errorResult(`Research run ${id} is not retryable from status ${run.status}.`, {
+        structuredContent: redactSecretsDeep({ ...toResearchRunDetails(run), error: "not retryable", setup: { code: isRetryExhausted ? "RETRY_EXHAUSTED" : "INVALID_TRANSITION", message: "Retry is only available for failed/timed_out retryable runs." } }),
+      });
+    }
+    const retryRun = researchStore.createRetryRun(id);
+    return textResult(`Created retry run ${retryRun.id} from ${id}.`, { structuredContent: redactSecretsDeep(toResearchRunDetails(retryRun)) });
+  },
+};
+
 // ── Workflow tools ───────────────────────────────────────────────────────
 
 /*
@@ -838,7 +1333,7 @@ protects built-in workflows and re-homes occupants, so the destructive tier
 below does not re-implement any of that; it only gates registration of the
 name behind `allowDestructive` and adds a stderr audit line.
 */
-function bindWorkflowTool(name: "fn_workflow_list" | "fn_workflow_get" | "fn_workflow_create" | "fn_workflow_update" | "fn_workflow_select" | "fn_workflow_delete" | "fn_workflow_settings" | "fn_workflow_add_node" | "fn_workflow_remove_node" | "fn_workflow_add_edge" | "fn_workflow_remove_edge", description: string, inputSchema: McpJsonSchema): McpToolDefinition {
+function bindWorkflowTool(name: "fn_workflow_list" | "fn_workflow_get" | "fn_workflow_create" | "fn_workflow_update" | "fn_workflow_select" | "fn_workflow_delete" | "fn_workflow_settings" | "fn_workflow_add_node" | "fn_workflow_remove_node" | "fn_workflow_add_edge" | "fn_workflow_remove_edge" | "fn_trait_list", description: string, inputSchema: McpJsonSchema): McpToolDefinition {
   return {
     name,
     description,
@@ -1008,6 +1503,24 @@ const fnWorkflowRemoveEdge = bindWorkflowTool(
     "disambiguate when multiple edges share the same from/to pair). Built-ins cannot be edited. The resulting " +
     "graph is validated the same way fn_workflow_update validates a full IR replace.",
   jsonSchemaOf(workflowRemoveEdgeParams),
+);
+
+/*
+FNXC:McpServer 2026-07-11-16:00:
+FUSI-052: fn_trait_list closes the last workflow-authoring discoverability
+gap — an MCP client authoring a workflow IR via fn_workflow_create/
+fn_workflow_update had no way to discover valid trait ids for `columns[].traits`.
+`createWorkflowAuthoringTools` already includes `createTraitListTool()` in
+its returned array (packages/engine/src/agent-tools.ts), so this reuses the
+SAME `bindWorkflowTool` → factory dispatch as every other workflow tool —
+no hand-rolled trait catalog. `traitListParams` is `Type.Object({})` (no
+args).
+*/
+const fnTraitList = bindWorkflowTool(
+  "fn_trait_list",
+  "List the available column traits (the behavior building blocks for workflow columns): id, name, description, " +
+    "and behavior flags. Use when authoring or updating a workflow IR.",
+  jsonSchemaOf(traitListParams),
 );
 
 /*
@@ -1191,6 +1704,259 @@ const fnTaskUpdate: McpToolDefinition = {
     return textResult(`Updated ${id}: ${updatedFields.join(", ")}`, {
       structuredContent: redactSecretsDeep({ taskId: id, updatedFields }),
     });
+  },
+};
+
+// ── Task lifecycle tools (pause/unpause/retry/duplicate/refine/unarchive) ──
+
+/*
+FNXC:McpServer 2026-07-11-16:00:
+FUSI-052 closes six task-lifecycle-recovery gaps that had zero MCP surface:
+an operator could not pause/unpause a task for manual control, retry a
+failed/stranded task, unarchive a card, or duplicate/refine a task from an
+external MCP client — every one of these was reachable only via the
+pi-extension or the dashboard. Each handler below dispatches to the EXACT
+SAME store operation the pi-extension fn_* handler in
+packages/cli/src/extension.ts calls (fn_task_pause/fn_task_unpause ~line
+1316, fn_task_retry ~line 1368, fn_task_duplicate ~line 1571, fn_task_refine
+~line 1601, fn_task_unarchive ~line 1681) — no re-implemented classification
+or validation logic. All six are BASE-tier: pause/unpause/duplicate/refine
+are reversible in-place state changes or new-task creations (not deletions);
+fn_task_unarchive is the documented restore path fn_task_archive's own
+description already promises; fn_task_retry only clears failure state and
+moves a task forward through its own normal lifecycle. None is
+`DESTRUCTIVE:`-prefixed or `*_delete`-class.
+*/
+const fnTaskPause: McpToolDefinition = {
+  name: "fn_task_pause",
+  description:
+    "Pause a task for explicit user-requested manual control — stops all automated agent and scheduler interaction. Agents should not pause tasks to handle failures or blockers; use retry, create/delegate follow-up work, or let the task surface as failed instead.",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string", description: "Task ID (e.g. FN-001)" } },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    try {
+      const task = await store.pauseTask(id, true);
+      return textResult(`Paused ${task.id}`, { structuredContent: redactSecretsDeep({ taskId: task.id }) });
+    } catch (error) {
+      if (error instanceof Error) return errorResult(error.message);
+      throw error;
+    }
+  },
+};
+
+const fnTaskUnpause: McpToolDefinition = {
+  name: "fn_task_unpause",
+  description: "Unpause a task — resumes automated agent and scheduler interaction.",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string", description: "Task ID (e.g. FN-001)" } },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    try {
+      const task = await store.pauseTask(id, false);
+      return textResult(`Unpaused ${task.id}`, { structuredContent: redactSecretsDeep({ taskId: task.id }) });
+    } catch (error) {
+      if (error instanceof Error) return errorResult(error.message);
+      throw error;
+    }
+  },
+};
+
+/*
+FNXC:McpServer 2026-07-11-16:00:
+fn_task_retry reproduces the pi-extension fn_task_retry handler's retry
+classification EXACTLY — not-found guard, retryable-state validation,
+in-review execution-stall vs merge-retry vs missing-worktree-session-start
+recovery branching, `preserveProgress` on the todo move, and the SAME
+`buildAutoPauseClearPatch`/`buildManualRetryResetPatch`/
+`isInReviewMissingWorktreeSessionStartFailure` shared engine/core helpers —
+never re-derived thresholds inline, so behavior cannot drift between the pi
+extension and this MCP tool.
+*/
+const fnTaskRetry: McpToolDefinition = {
+  name: "fn_task_retry",
+  description:
+    "Retry a failed task — clears the error state. Non-review failures move to todo; in-review execution failures move to todo preserving progress; in-review merge failures stay in-place for auto-merge retry.",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string", description: "Task ID to retry (e.g. FN-001). Must be in 'failed' state." } },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+
+    let task: Task;
+    try {
+      task = await store.getTask(id);
+    } catch {
+      return errorResult(`Task ${id} not found`);
+    }
+
+    const isInReviewStatusNone = task.column === "in-review" && (task.status === null || task.status === undefined);
+    const hasIncompleteSteps = task.steps.some((s) => s.status === "pending" || s.status === "in-progress");
+    const isExecutionFailureInReview = hasIncompleteSteps || (task.steps.length === 0 && (task.mergeRetries ?? 0) === 0);
+    const isInReviewExecutionStall = isInReviewStatusNone && isExecutionFailureInReview;
+    const isInReviewMergeRetryStall = isInReviewStatusNone && (task.mergeRetries ?? 0) > 0;
+    const isInReviewRetry =
+      task.column === "in-review" &&
+      (task.status === "failed" || task.status === "stuck-killed" || isInReviewExecutionStall || isInReviewMergeRetryStall);
+    const isMissingWorktreeSessionRetry = isInReviewMissingWorktreeSessionStartFailure(task);
+
+    if (task.status !== "failed" && task.status !== "stuck-killed" && !isInReviewRetry && !isMissingWorktreeSessionRetry) {
+      return errorResult(`Task ${id} is not in a retryable state (status: ${task.status || "none"})`, {
+        structuredContent: { taskId: id, currentStatus: task.status },
+      });
+    }
+
+    const autoPauseClearPatch = buildAutoPauseClearPatch(task);
+    const clearedDeadlockAutoPause = Object.keys(autoPauseClearPatch).length > 0;
+    const retryLogSuffix = clearedDeadlockAutoPause ? ", cleared deadlock auto-pause" : "";
+
+    if (isMissingWorktreeSessionRetry) {
+      await store.updateTask(id, {
+        status: null,
+        error: null,
+        worktree: null,
+        branch: null,
+        sessionFile: null,
+        ...autoPauseClearPatch,
+        ...buildManualRetryResetPatch({ resetMergeRetries: true }),
+      });
+      await store.logEntry(id, `Retry requested via MCP operator server (unusable worktree session-start recovery → todo, preserving progress${retryLogSuffix})`);
+      await store.moveTask(id, "todo", { preserveProgress: true });
+      return textResult(`Retried ${id} → todo (unusable worktree session metadata cleared)`, {
+        structuredContent: { taskId: id, newColumn: "todo" },
+      });
+    }
+
+    if (isInReviewRetry) {
+      if (isExecutionFailureInReview) {
+        await store.updateTask(id, {
+          status: null,
+          error: null,
+          ...autoPauseClearPatch,
+          ...buildManualRetryResetPatch(),
+        });
+        await store.logEntry(
+          id,
+          isInReviewExecutionStall
+            ? `Retry requested via MCP operator server (stranded in-review execution retry → todo, preserving progress${retryLogSuffix})`
+            : `Retry requested via MCP operator server (execution failure in-review → todo, preserving progress${retryLogSuffix})`,
+        );
+        await store.moveTask(id, "todo", { preserveProgress: true });
+        return textResult(`Retried ${id} → todo (execution failure, preserving step progress)`, {
+          structuredContent: { taskId: id, newColumn: "todo" },
+        });
+      }
+
+      await store.updateTask(id, {
+        status: null,
+        error: null,
+        ...autoPauseClearPatch,
+        ...buildManualRetryResetPatch({ resetMergeRetries: true }),
+      });
+      await store.logEntry(id, `Retry requested via MCP operator server (in-review merge retry, mergeRetries reset${retryLogSuffix})`);
+      return textResult(`Retried ${id} → in-review (merge retry state cleared)`, {
+        structuredContent: { taskId: id, newColumn: "in-review" },
+      });
+    }
+
+    await store.updateTask(id, {
+      status: null,
+      error: null,
+      ...autoPauseClearPatch,
+      ...buildManualRetryResetPatch({ resetMergeRetries: true }),
+    });
+    await store.moveTask(id, "todo");
+    await store.logEntry(id, "Retry requested via MCP operator server", "Task reset to todo for retry");
+    return textResult(`Retried ${id} → todo (failure state cleared)`, { structuredContent: { taskId: id, newColumn: "todo" } });
+  },
+};
+
+const fnTaskDuplicate: McpToolDefinition = {
+  name: "fn_task_duplicate",
+  description:
+    "Duplicate an existing task, creating a fresh copy in planning. Copies the title and description but resets all execution state. The AI planning agent will replan the new task.",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string", description: "Source task ID to duplicate (e.g. FN-001)" } },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    try {
+      const newTask = await store.duplicateTask(id);
+      return textResult(`Duplicated ${id} → ${newTask.id}`, {
+        structuredContent: redactSecretsDeep({ sourceId: id, newTaskId: newTask.id }),
+      });
+    } catch (error) {
+      if (error instanceof Error) return errorResult(error.message);
+      throw error;
+    }
+  },
+};
+
+const fnTaskRefine: McpToolDefinition = {
+  name: "fn_task_refine",
+  description:
+    "Request a refinement of a completed or in-review task. Creates a new follow-up task in planning that references the original task as a dependency. Use this when a done or in-review task needs additional work, improvements, or follow-up changes.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "Task ID to refine (e.g. FN-001). Must be in 'done' or 'in-review' column." },
+      feedback: { type: "string", description: "Description of what needs to be refined or improved", minLength: 1, maxLength: 2000 },
+    },
+    required: ["id", "feedback"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    const feedback = typeof args.feedback === "string" ? args.feedback : "";
+    if (!feedback.trim()) return errorResult("feedback is required.");
+    if (feedback.length > 2000) return errorResult("feedback exceeds 2000 character limit.");
+    try {
+      const newTask = await store.refineTask(id, feedback);
+      return textResult(`Created refinement ${newTask.id} for ${id}`, {
+        structuredContent: redactSecretsDeep({ sourceId: id, newTaskId: newTask.id, feedback }),
+      });
+    } catch (error) {
+      if (error instanceof Error) return errorResult(error.message);
+      throw error;
+    }
+  },
+};
+
+const fnTaskUnarchive: McpToolDefinition = {
+  name: "fn_task_unarchive",
+  description:
+    "Unarchive an archived task (move from archived → its restore column). Restores to the pre-archive column when available, with active execution columns downgraded to todo.",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string", description: "Task ID to unarchive (e.g. FN-001). Must be in 'archived' column." } },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    try {
+      const task = await store.unarchiveTask(id);
+      return textResult(`Unarchived ${task.id} → ${columnLabel(task.column)}`, {
+        structuredContent: redactSecretsDeep({ taskId: task.id, column: task.column }),
+      });
+    } catch (error) {
+      if (error instanceof Error) return errorResult(error.message);
+      throw error;
+    }
   },
 };
 
@@ -2289,12 +3055,26 @@ export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnTaskSearch,
   fnTaskArchive,
   fnTaskUpdate,
+  fnTaskPause,
+  fnTaskUnpause,
+  fnTaskRetry,
+  fnTaskDuplicate,
+  fnTaskRefine,
+  fnTaskUnarchive,
   fnDelegateTask,
   fnListAgents,
   fnAgentShow,
   fnAgentCreate,
   fnAgentStart,
   fnAgentStop,
+  fnAgentUpdate,
+  fnAgentSetInstructions,
+  fnModelsList,
+  fnResearchRun,
+  fnResearchList,
+  fnResearchGet,
+  fnResearchCancel,
+  fnResearchRetry,
   fnWorkflowList,
   fnWorkflowGet,
   fnWorkflowCreate,
@@ -2305,6 +3085,7 @@ export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnWorkflowRemoveNode,
   fnWorkflowAddEdge,
   fnWorkflowRemoveEdge,
+  fnTraitList,
   fnMissionList,
   fnMissionShow,
   fnMilestoneList,
