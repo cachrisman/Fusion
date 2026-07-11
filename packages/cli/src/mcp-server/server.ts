@@ -17,6 +17,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z, type ZodTypeAny } from "zod";
 import type { TaskStore } from "@fusion/core";
 import { buildMcpToolRegistry, type McpJsonSchema, type McpToolRuntimeContext } from "./tools.js";
+import { buildServedMcpSkillMarkdown, FUSION_SKILL_RESOURCE_URI } from "./served-skill.js";
 
 /**
  * Converts one of this registry's plain JSON-Schema tool inputs into the raw
@@ -98,13 +99,24 @@ export interface FusionMcpServer {
  */
 export function buildMcpServer(options: BuildMcpServerOptions): FusionMcpServer {
   const { cwd, store, version, allowDestructive = false } = options;
+  /*
+  FNXC:McpServer 2026-07-11-12:00:
+  FUSI-045 discoverability pointer: appended (not replacing) the existing
+  instructions wording so a connecting MCP client is told, in-protocol,
+  where to find the full operator-surface writeup (transport model, curated
+  tool list, invocation conventions) without needing to read repo source.
+  Both the allowDestructive and non-allowDestructive instructions branches
+  get the SAME one-line pointer — the resource itself is flag-invariant (see
+  served-skill.ts), only the live tool registry differs by flag.
+  */
+  const instructionsPointer = `Read the "${FUSION_SKILL_RESOURCE_URI}" resource for the full operator surface (transport model, curated tool list, invocation conventions).`;
   const server = new McpServer(
     { name: "fusion", version: version ?? "0.0.0" },
     {
-      capabilities: { tools: {} },
+      capabilities: { tools: {}, resources: {} },
       instructions: allowDestructive
-        ? "Fusion operator MCP server — curated read + safe-mutation task/agent/workflow controls, PLUS destructive delete tools (--allow-destructive is enabled)."
-        : "Fusion operator MCP server — curated read + safe-mutation task/agent/workflow controls.",
+        ? `Fusion operator MCP server — curated read + safe-mutation task/agent/workflow controls, PLUS destructive delete tools (--allow-destructive is enabled). ${instructionsPointer}`
+        : `Fusion operator MCP server — curated read + safe-mutation task/agent/workflow controls. ${instructionsPointer}`,
     },
   );
 
@@ -122,6 +134,37 @@ export function buildMcpServer(options: BuildMcpServerOptions): FusionMcpServer 
       },
     );
   }
+
+  /*
+  FNXC:McpServer 2026-07-11-12:00:
+  Registers the readable `fusion://skill` resource (FUSI-045) — a stable,
+  documented URI an MCP client can `resources/read` to get a self-describing
+  operator-surface skill markdown (existing pi-extension SKILL.md body PLUS
+  the MCP-connection section). Deliberately a STATIC resource (fixed URI, no
+  template/params) since the served content never varies per-request — the
+  same markdown is returned to every reader, on both stdio and HTTP
+  transports. See served-skill.ts for composition and the flag-invariance
+  rationale (never gated on `allowDestructive`).
+  */
+  server.registerResource(
+    "fusion-skill",
+    FUSION_SKILL_RESOURCE_URI,
+    {
+      title: "Fusion operator skill",
+      description:
+        "Self-describing Fusion operator surface: task/agent/workflow/mission concepts, MCP transport model, curated tool list, and tool-invocation conventions.",
+      mimeType: "text/markdown",
+    },
+    async (uri) => ({
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: "text/markdown",
+          text: buildServedMcpSkillMarkdown(),
+        },
+      ],
+    }),
+  );
 
   return {
     server,

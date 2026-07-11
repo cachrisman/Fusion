@@ -23,6 +23,15 @@
  * "0 stray stdout lines" assertion against captured-string fixtures, and
  * `scripts/boot-smoke.mjs` can reuse the identical logic against a real
  * spawned child without duplicating the validator.
+ *
+ * FNXC:BootSmoke 2026-07-11-12:00:
+ * FUSI-045 extends the same real-spawned-binary proof to the `fusion://skill`
+ * MCP resource: `runMcpServeStdioSmoke` now also issues `resources/list` and
+ * `resources/read` requests and asserts the resource is listed and returns
+ * non-empty text, alongside (not instead of) the pre-existing tools/list and
+ * "0 stray stdout lines" assertions. This is the STDIO half of the FUSI-045
+ * both-transports proof; HTTP fetchability is covered separately by
+ * packages/cli/src/mcp-server/__tests__/skill-resource.test.ts.
  */
 
 import { spawn } from "node:child_process";
@@ -137,6 +146,40 @@ export function assertCuratedToolSet(actualNames, expectedNames) {
 }
 
 /**
+ * FNXC:BootSmoke 2026-07-11-12:00:
+ * FUSI-045 extends the same real-spawned-binary stdio proof to the
+ * `fusion://skill` MCP resource: `extractResourceListUris` mirrors
+ * {@link extractToolListNames}'s "find the response with this id, pull the
+ * relevant array out of result" shape for a `resources/list` response.
+ *
+ * @param {any[]} messages parsed JSON-RPC messages (from parseJsonRpcStream)
+ * @param {string|number} id the request id used for the `resources/list` call
+ * @returns {string[] | null}
+ */
+export function extractResourceListUris(messages, id) {
+  const response = messages.find((m) => m.id === id && m.result && Array.isArray(m.result.resources));
+  if (!response) return null;
+  return response.result.resources.map((r) => r.uri).sort();
+}
+
+/**
+ * Find the JSON-RPC response with the given `id` and, if it carries a
+ * `resources/read` result shape, return the first content block's `text`.
+ * Returns `null` when no matching response (or no readable text content)
+ * is present.
+ *
+ * @param {any[]} messages parsed JSON-RPC messages (from parseJsonRpcStream)
+ * @param {string|number} id the request id used for the `resources/read` call
+ * @returns {string | null}
+ */
+export function extractReadResourceText(messages, id) {
+  const response = messages.find((m) => m.id === id && m.result && Array.isArray(m.result.contents));
+  if (!response) return null;
+  const [content] = response.result.contents;
+  return typeof content?.text === "string" ? content.text : null;
+}
+
+/**
  * Seed a throwaway project directory with a real, minimal `.fusion/fusion.db`
  * so `fn mcp serve` (which requires an EXISTING project and never
  * auto-registers one, unlike `fn serve`) can detect it via CWD auto-detect
@@ -168,6 +211,10 @@ async function bootstrapIsolatedProject(projectDir) {
  *   2. every non-empty stdout line is valid JSON-RPC (the class-2
  *      FUSI-001 `[title-id-drift]` regression),
  *   3. `tools/list` returns exactly `expectedToolNames`.
+ *   4. `resources/list` includes the `fusion://skill` resource, and
+ *      `resources/read` of that URI returns non-empty text (FUSI-045 —
+ *      proves the resource is fetchable over the REAL spawned stdio
+ *      binary, not just via in-memory/HTTP test harnesses).
  *
  * FNXC:BootSmoke 2026-07-10-00:00:
  * Deliberately does NOT use the SDK's `Client`/`StdioClientTransport` — a
@@ -179,14 +226,16 @@ async function bootstrapIsolatedProject(projectDir) {
  * @param {object} options
  * @param {string} options.cliBin absolute path to `packages/cli/bin.mjs`
  * @param {string[]} options.expectedToolNames curated tool names to assert against
+ * @param {string} [options.expectedSkillResourceUri] resource URI expected in resources/list + read (default "fusion://skill")
  * @param {number} [options.timeoutMs] bound on waiting for the tools/list response (default 30_000)
  * @param {number} [options.shutdownTimeoutMs] bound on graceful SIGTERM shutdown (default 10_000)
  * @param {(spawn: typeof import("node:child_process").spawn) => typeof import("node:child_process").spawn} [options._spawn] test seam
- * @returns {Promise<{ toolNames: string[], stdout: string, stderr: string }>}
+ * @returns {Promise<{ toolNames: string[], resourceUris: string[], skillResourceText: string, stdout: string, stderr: string }>}
  */
 export async function runMcpServeStdioSmoke({
   cliBin,
   expectedToolNames,
+  expectedSkillResourceUri = "fusion://skill",
   timeoutMs = 30_000,
   shutdownTimeoutMs = 10_000,
   removeTempDir,
@@ -252,6 +301,15 @@ export async function runMcpServeStdioSmoke({
   const initializedNotification = { jsonrpc: "2.0", method: "notifications/initialized" };
   const toolsListId = "fusi-013-tools-list";
   const toolsListRequest = { jsonrpc: "2.0", id: toolsListId, method: "tools/list", params: {} };
+  const resourcesListId = "fusi-045-resources-list";
+  const resourcesListRequest = { jsonrpc: "2.0", id: resourcesListId, method: "resources/list", params: {} };
+  const resourceReadId = "fusi-045-resource-read";
+  const resourceReadRequest = {
+    jsonrpc: "2.0",
+    id: resourceReadId,
+    method: "resources/read",
+    params: { uri: expectedSkillResourceUri },
+  };
 
   const writeLine = (message) => {
     try {
@@ -270,22 +328,35 @@ export async function runMcpServeStdioSmoke({
   await new Promise((r) => setTimeout(r, 50));
   writeLine(initializedNotification);
   writeLine(toolsListRequest);
+  writeLine(resourcesListRequest);
+  writeLine(resourceReadRequest);
 
-  const waitForToolsListResponse = async () => {
+  const waitForResponse = async (extractFn, id) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const { messages } = parseJsonRpcStream(stdout);
-      const names = extractToolListNames(messages, toolsListId);
-      if (names !== null) return names;
+      const value = extractFn(messages, id);
+      if (value !== null) return value;
       await new Promise((r) => setTimeout(r, 100));
     }
     return null;
   };
 
+  const waitForAllResponses = async () => {
+    const [toolNames, resourceUris, skillResourceText] = await Promise.all([
+      waitForResponse(extractToolListNames, toolsListId),
+      waitForResponse(extractResourceListUris, resourcesListId),
+      waitForResponse(extractReadResourceText, resourceReadId),
+    ]);
+    return { toolNames, resourceUris, skillResourceText };
+  };
+
   let toolNames;
+  let resourceUris;
+  let skillResourceText;
   try {
     const raced = await Promise.race([
-      waitForToolsListResponse().then((names) => ({ kind: "response", names })),
+      waitForAllResponses().then((result) => ({ kind: "response", result })),
       exited.then((info) => ({ kind: "exited", info })),
     ]);
     if (raced.kind === "exited") {
@@ -293,13 +364,30 @@ export async function runMcpServeStdioSmoke({
         `mcp serve (stdio) exited before responding to tools/list (code=${raced.info.code ?? "null"} signal=${raced.info.signal ?? "null"})`,
       );
     }
-    if (raced.names === null) {
+    ({ toolNames, resourceUris, skillResourceText } = raced.result);
+    if (toolNames === null) {
       throw new Error(`mcp serve (stdio) did not respond to tools/list within ${timeoutMs}ms`);
     }
-    toolNames = raced.names;
+    if (resourceUris === null) {
+      throw new Error(`mcp serve (stdio) did not respond to resources/list within ${timeoutMs}ms`);
+    }
+    if (skillResourceText === null) {
+      throw new Error(
+        `mcp serve (stdio) did not respond to resources/read (${expectedSkillResourceUri}) within ${timeoutMs}ms`,
+      );
+    }
 
     assertOnlyJsonRpcLines(stdout);
     assertCuratedToolSet(toolNames, expectedToolNames);
+
+    if (!resourceUris.includes(expectedSkillResourceUri)) {
+      throw new Error(
+        `resources/list did not include ${expectedSkillResourceUri} (got: [${resourceUris.join(", ")}])`,
+      );
+    }
+    if (skillResourceText.trim().length === 0) {
+      throw new Error(`resources/read (${expectedSkillResourceUri}) returned empty text`);
+    }
   } catch (err) {
     // Attach captured stdio for the caller's diagnostic tail (e.g. boot-smoke's fail() stderr dump).
     if (err && typeof err === "object") {
@@ -325,5 +413,5 @@ export async function runMcpServeStdioSmoke({
     cleanupDirs();
   }
 
-  return { toolNames, stdout, stderr };
+  return { toolNames, resourceUris, skillResourceText, stdout, stderr };
 }
