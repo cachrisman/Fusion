@@ -315,6 +315,10 @@ function findMatchingBracket(source, openIndex) {
   return findMatchingDelimiter(source, openIndex, "[", "]");
 }
 
+function findMatchingParen(source, openIndex) {
+  return findMatchingDelimiter(source, openIndex, "(", ")");
+}
+
 function splitTopLevelProperties(objectBody) {
   const props = [];
   let start = 0;
@@ -426,13 +430,94 @@ function mapType(raw) {
   if (/^Type\.Union\(/.test(value)) return "union";
   if (/^Type\.Record\(/.test(value)) return "record";
   if (/^Type\.Unknown\(/.test(value)) return "unknown";
+  if (/^Type\.Object\(/.test(value)) return "object";
   if (/^StringEnum\(/.test(value)) return "string(enum)";
   if (/^Type\.Literal\(/.test(value)) return "literal";
   if (/^Type\.Null\(/.test(value)) return "null";
   return "unknown";
 }
 
-function parseParameters(block) {
+/*
+FNXC:McpWorkflow 2026-07-11-00:00:
+FUSI-043 introduced a shared `const workflowIrSchema = Type.Object(...)` in
+packages/engine/src/agent-tools.ts, referenced by IDENTIFIER (`ir:
+workflowIrSchema`) from workflowCreateParams/workflowUpdateParams rather than
+inlined — this keeps the create/update schemas byte-identical without
+duplicating a large nested schema. This static-source doc generator only ever
+saw `Type.X(...)` call expressions before, so a bare identifier fell through
+to "unknown" with no description. `resolveTopLevelConstExpression` looks up
+`const <name> = <expr>;` at module scope in the SAME source text and returns
+the RHS expression text so `mapType`/`extractParameterDescription` can resolve
+through the indirection exactly as if it had been inlined.
+*/
+function resolveTopLevelConstExpression(source, identifierName) {
+  const marker = `const ${identifierName} = `;
+  const declStart = source.indexOf(marker);
+  if (declStart === -1) return null;
+  const exprStart = declStart + marker.length;
+  let depthParen = 0;
+  let depthBrace = 0;
+  let depthBracket = 0;
+  let inSingle = false;
+  let inDouble = false;
+  let inTemplate = false;
+  let escaped = false;
+  for (let i = exprStart; i < source.length; i++) {
+    const ch = source[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inSingle || inDouble || inTemplate) {
+      if (ch === "\\") {
+        escaped = true;
+      } else if (inSingle && ch === "'") inSingle = false;
+      else if (inDouble && ch === '"') inDouble = false;
+      else if (inTemplate && ch === "`") inTemplate = false;
+      continue;
+    }
+    if (ch === "'") { inSingle = true; continue; }
+    if (ch === '"') { inDouble = true; continue; }
+    if (ch === "`") { inTemplate = true; continue; }
+    if (ch === "(") depthParen++;
+    else if (ch === ")") depthParen--;
+    else if (ch === "{") depthBrace++;
+    else if (ch === "}") depthBrace--;
+    else if (ch === "[") depthBracket++;
+    else if (ch === "]") depthBracket--;
+    else if (ch === ";" && depthParen === 0 && depthBrace === 0 && depthBracket === 0) {
+      return source.slice(exprStart, i);
+    }
+  }
+  return null;
+}
+
+/** Resolves `rawValue` to its Type.X(...) expression text, following ONE level
+ *  of bare-identifier indirection against `source` (a module-scope `const`)
+ *  when `rawValue` is not already a recognizable `Type.X(`/`StringEnum(` call.
+ *  See the FNXC:McpWorkflow comment above resolveTopLevelConstExpression. */
+function resolveParameterExpression(rawValue, source) {
+  const trimmed = rawValue.trim();
+  if (!source) return rawValue;
+
+  const isBareIdentifier = /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed);
+  if (isBareIdentifier) {
+    const resolved = resolveTopLevelConstExpression(source, trimmed);
+    return resolved !== null ? resolved : rawValue;
+  }
+
+  // `Type.Optional(someSharedConst)` — resolve the wrapped identifier and
+  // rewrap so the Type.Optional(...) unwrapping downstream still applies.
+  const optionalIdentMatch = trimmed.match(/^Type\.Optional\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)$/);
+  if (optionalIdentMatch) {
+    const resolved = resolveTopLevelConstExpression(source, optionalIdentMatch[1]);
+    if (resolved !== null) return `Type.Optional(${resolved})`;
+  }
+
+  return rawValue;
+}
+
+function parseParameters(block, engineSource) {
   const paramsStart = block.indexOf("parameters:");
   if (paramsStart === -1) return [];
 
@@ -442,7 +527,7 @@ function parseParameters(block) {
   const braceStart = block.indexOf("{", objectStart);
   if (braceStart === -1) return [];
   const braceEnd = findMatchingBrace(block, braceStart);
-  return parseTypeObjectParameterBody(block.slice(braceStart + 1, braceEnd));
+  return parseTypeObjectParameterBody(block.slice(braceStart + 1, braceEnd), engineSource);
 }
 
 function slicePropertyExpression(source, propertyName) {
@@ -504,7 +589,40 @@ function slicePropertyExpression(source, propertyName) {
   return source.slice(start);
 }
 
+/*
+FNXC:McpWorkflow 2026-07-11-00:00:
+FUSI-043: for a resolved `Type.Object({...properties}, { description: "..." })`
+expression (e.g. the shared `workflowIrSchema` const), the object's OWN
+description lives in the second call argument — searching the whole
+expression text for the first `description:` would instead grab a NESTED
+property's description (e.g. `version`'s). Slice to just the second-argument
+options object (after the first argument's matching `{...}`) before falling
+back to the generic whole-expression search used for every other Type.X(...)
+shape (which only ever have one `description:` site).
+*/
+function extractTypeObjectOwnDescription(rawValue) {
+  let trimmed = rawValue.trim();
+  // Peel a Type.Optional(...) wrapper so `ir: Type.Optional(workflowIrSchema)`
+  // resolves through to the same object-options lookup as the required case.
+  if (/^Type\.Optional\(/.test(trimmed)) {
+    trimmed = trimmed.replace(/^Type\.Optional\(/, "").replace(/\)\s*$/, "").trim();
+  }
+  if (!/^Type\.Object\(/.test(trimmed)) return null;
+  const callOpen = trimmed.indexOf("(");
+  const callClose = findMatchingParen(trimmed, callOpen);
+  const firstArgBraceStart = trimmed.indexOf("{", callOpen);
+  if (firstArgBraceStart === -1 || firstArgBraceStart > callClose) return null;
+  const firstArgBraceEnd = findMatchingBrace(trimmed, firstArgBraceStart);
+  const optionsSegment = trimmed.slice(firstArgBraceEnd + 1, callClose);
+  if (!optionsSegment.includes("description")) return "";
+  const descriptionExpression = slicePropertyExpression(optionsSegment, "description");
+  const concatenated = normalizeWhitespace(parseStringLiterals(descriptionExpression).join(" "));
+  return concatenated;
+}
+
 function extractParameterDescription(rawValue) {
+  const ownDescription = extractTypeObjectOwnDescription(rawValue);
+  if (ownDescription) return ownDescription;
   const descriptionExpression = slicePropertyExpression(rawValue, "description");
   const concatenated = normalizeWhitespace(parseStringLiterals(descriptionExpression).join(" "));
   if (concatenated) return concatenated;
@@ -512,12 +630,15 @@ function extractParameterDescription(rawValue) {
   return inlineDescription ? normalizeWhitespace(inlineDescription[1].replace(/\\n/g, " ")) : "";
 }
 
-function parseTypeObjectParameterBody(body) {
+function parseTypeObjectParameterBody(body, source) {
   const params = [];
   for (const prop of splitTopLevelProperties(body)) {
     const match = prop.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([\s\S]+)$/);
     if (!match) continue;
-    const [, name, rawValue] = match;
+    const [, name, rawValueRaw] = match;
+    // FUSI-043: resolve a bare-identifier property value (e.g. `ir: workflowIrSchema`)
+    // against a shared module-scope const before falling through to "unknown".
+    const rawValue = resolveParameterExpression(rawValueRaw, source);
     const optional = /^Type\.Optional\(/.test(rawValue.trim());
     const inner = optional
       ? rawValue.trim().replace(/^Type\.Optional\(/, "").replace(/\)\s*$/, "")
@@ -540,7 +661,7 @@ function getExportedTypeObjectParameters(source, exportName) {
   const braceStart = source.indexOf("{", exportStart);
   if (braceStart === -1) return [];
   const braceEnd = findMatchingBrace(source, braceStart);
-  return parseTypeObjectParameterBody(source.slice(braceStart + 1, braceEnd));
+  return parseTypeObjectParameterBody(source.slice(braceStart + 1, braceEnd), source);
 }
 
 function extractWorkflowExtensionSpecTools(source, engineSource) {
@@ -599,7 +720,7 @@ function extractTools(source, engineSource = "") {
         const labelMatch = block.match(/label:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/);
         const label = labelMatch ? labelMatch[1] : "";
         const description = extractDescription(block);
-        const parameters = parseParameters(block);
+        const parameters = parseParameters(block, engineSource);
         tools.push({ name, label, description, parameters });
         seen.add(name);
       }

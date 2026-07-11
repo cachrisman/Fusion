@@ -599,7 +599,11 @@ describe("createWorkflowGetTool", () => {
     const parsed = JSON.parse(text);
     expect(parsed).toMatchObject({ id: "WF-003", name: "QA", description: "QA flow", builtin: false });
     expect(parsed.ir.fields[0].id).toBe("severity");
-    expect(result.details).toMatchObject({ workflowId: "WF-003", builtin: false });
+    // FUSI-043: details must carry the full IR (not just workflowId/builtin) so
+    // the MCP structuredContent boundary is machine-readable enough to clone.
+    expect(result.details).toMatchObject({ workflowId: "WF-003", name: "QA", description: "QA flow", builtin: false, ir });
+    expect((result.details as any).ir.nodes).toEqual(ir.nodes);
+    expect((result.details as any).ir.columns).toEqual(ir.columns);
   });
 
   it("marks a builtin id as builtin", async () => {
@@ -634,6 +638,7 @@ describe("createWorkflowGetTool", () => {
     const text = result.content[0]?.type === "text" ? result.content[0].text : "";
     expect(JSON.parse(text).layout).toEqual(layout);
     expect(result.details).toMatchObject({ workflowId: "WF-005", layout });
+    expect((result.details as any).ir.nodes).toEqual([{ id: "n1", kind: "step-execute" }]);
   });
 
   it("omits layout when the definition has none", async () => {

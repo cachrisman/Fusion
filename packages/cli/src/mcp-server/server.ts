@@ -21,30 +21,59 @@ import { buildServedMcpSkillMarkdown, FUSION_SKILL_RESOURCE_URI } from "./served
 
 /**
  * Converts one of this registry's plain JSON-Schema tool inputs into the raw
- * zod shape `McpServer.registerTool` requires. Deliberately narrow: the
- * curated v1 registry only ever declares `string` / `number` / `boolean` /
- * `array` (of strings) / `enum` properties (see packages/cli/src/mcp-server/tools.ts),
- * so this adapter does not attempt to support arbitrary JSON Schema.
+ * zod shape `McpServer.registerTool` requires. Originally deliberately narrow
+ * (the curated v1 registry only ever declared `string` / `number` / `boolean` /
+ * `array` (of strings) / `enum` properties — see packages/cli/src/mcp-server/tools.ts).
+ *
+ * FNXC:McpWorkflow 2026-07-11-00:00:
+ * FUSI-043 extends this adapter to recurse into nested `type:"object"` (via
+ * `properties`/`required`) and `type:"array"` of objects, because the new
+ * typed `fn_workflow_create`/`fn_workflow_update` IR schema (see the
+ * `workflowIrSchema` FNXC comment in packages/engine/src/agent-tools.ts) is a
+ * nested object graph (nodes/edges/columns/...). Without this recursion any
+ * nested `type:"object"` property fell through to the `default: z.unknown()`
+ * branch below and the typed schema collapsed to `unknown` on the MCP wire —
+ * defeating the whole point of discoverability. An object with NO declared
+ * `properties` (a deliberately open bag, e.g. node `config`/`extensions`)
+ * converts to `z.record(z.unknown())` rather than a rigid empty object so
+ * forward-compatible fields are never rejected client-side.
  */
 function jsonSchemaPropertyToZod(prop: Record<string, unknown>): ZodTypeAny {
   const enumValues = Array.isArray(prop.enum) ? (prop.enum as string[]) : undefined;
   if (enumValues && enumValues.length > 0) {
     return z.enum(enumValues as [string, ...string[]]).describe(typeof prop.description === "string" ? prop.description : "");
   }
+  const description = typeof prop.description === "string" ? prop.description : "";
   switch (prop.type) {
     case "string":
-      return z.string().describe(typeof prop.description === "string" ? prop.description : "");
+      return z.string().describe(description);
     case "number":
-      return z.number().describe(typeof prop.description === "string" ? prop.description : "");
+      return z.number().describe(description);
     case "boolean":
-      return z.boolean().describe(typeof prop.description === "string" ? prop.description : "");
+      return z.boolean().describe(description);
     case "array": {
       const items = prop.items as Record<string, unknown> | undefined;
       const itemSchema = items ? jsonSchemaPropertyToZod(items) : z.string();
-      return z.array(itemSchema).describe(typeof prop.description === "string" ? prop.description : "");
+      return z.array(itemSchema).describe(description);
+    }
+    case "object": {
+      const properties = prop.properties as Record<string, unknown> | undefined;
+      if (!properties || Object.keys(properties).length === 0) {
+        // Open bag (e.g. node `config`/`extensions`) — keep permissive, not a rigid empty object.
+        return z.record(z.string(), z.unknown()).describe(description);
+      }
+      const required = new Set(Array.isArray(prop.required) ? (prop.required as string[]) : []);
+      const shape: Record<string, ZodTypeAny> = {};
+      for (const [key, childProp] of Object.entries(properties)) {
+        const zodType = jsonSchemaPropertyToZod(childProp as Record<string, unknown>);
+        shape[key] = required.has(key) ? zodType : zodType.optional();
+      }
+      // .passthrough() so unknown forward-compatible keys survive validation —
+      // authoritative validation stays server-side in the store.
+      return z.object(shape).passthrough().describe(description);
     }
     default:
-      return z.unknown().describe(typeof prop.description === "string" ? prop.description : "");
+      return z.unknown().describe(description);
   }
 }
 

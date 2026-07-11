@@ -831,6 +831,17 @@ function bindWorkflowTool(name: "fn_workflow_list" | "fn_workflow_get" | "fn_wor
   };
 }
 
+/*
+FNXC:McpWorkflow 2026-07-11-00:00:
+FUSI-043: TypeBox's `Type.Object(...)` already emits fully JSON-Schema-shaped
+output (nested `type`/`properties`/`items` all the way down — verified against
+the new `workflowIrSchema` in packages/engine/src/agent-tools.ts), so a shallow
+forward of `schema.properties` here is sufficient: nested object/array
+sub-schemas (e.g. `ir.properties.nodes.items.properties.id`) survive untouched.
+The adapter that DOES need to recurse is `jsonSchemaPropertyToZod` in
+packages/cli/src/mcp-server/server.ts, which converts this plain JSON Schema
+into the zod raw shape `McpServer.registerTool` requires.
+*/
 const jsonSchemaOf = (schema: { properties?: Record<string, unknown>; required?: string[] }): McpJsonSchema => ({
   type: "object",
   properties: schema.properties ?? {},
@@ -842,6 +853,17 @@ const fnWorkflowList = bindWorkflowTool(
   "List the custom workflows available for this project — read-only built-ins (ids starting with 'builtin:') and user-authored definitions. Use before fn_workflow_select to discover valid workflow IDs.",
   jsonSchemaOf(workflowListParams),
 );
+/*
+FNXC:McpWorkflow 2026-07-11-00:00:
+FUSI-043: fn_workflow_get's `structuredContent` now carries the definition's
+full `ir` (see createWorkflowGetTool's `details` payload in
+packages/engine/src/agent-tools.ts) so a source-blind MCP client can clone a
+workflow; fn_workflow_create/fn_workflow_update's `ir` input schema is now a
+typed, discoverable object (workflowIrSchema) instead of `Type.Unknown()`, so
+the same client can author a valid graph without reading Fusion source. Both
+fixes dispatch through the SAME createWorkflowAuthoringTools factory via
+bindWorkflowTool above — no duplicated validation here.
+*/
 const fnWorkflowGet = bindWorkflowTool(
   "fn_workflow_get",
   "Fetch a single workflow definition by its ID — its name, description, whether it is a read-only built-in, and its full IR (nodes, edges, columns, artifacts, and custom fields) as JSON. Use fn_workflow_list to discover IDs first.",

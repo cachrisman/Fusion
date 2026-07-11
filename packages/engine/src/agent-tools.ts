@@ -207,14 +207,207 @@ export const taskPromoteParams = Type.Object({
   ),
 });
 
+/*
+FNXC:McpWorkflow 2026-07-11-00:00:
+FUSI-043: this typed IR schema exists so a source-blind MCP client can author
+a valid workflow graph WITHOUT reading Fusion source. Prior to this the `ir`
+param on fn_workflow_create/fn_workflow_update was `Type.Unknown()` — the MCP
+wire schema advertised no node/edge/column shape at all, so a client had no
+discoverable way to construct a valid IR blind. This schema mirrors (loosely,
+for forward-compat) the authoritative shapes in
+`packages/core/src/workflow-ir-types.ts` (WorkflowIrNode/Edge/Column/
+Artifact/WorkflowFieldDefinition/WorkflowSettingDefinition). It is
+DELIBERATELY PERMISSIVE — no `additionalProperties:false`, `config`/
+`extensions`/`traits`/`options` stay open records/unknowns — because the goal
+is discoverability, not gating; authoritative validation remains server-side
+in the store (parseWorkflowIr et al). Do NOT tighten this to reject
+forward-compatible IR fields.
+Also note: the CLI MCP server's `jsonSchemaPropertyToZod` adapter
+(packages/cli/src/mcp-server/server.ts) must recurse into nested
+`type:"object"`/`type:"array"` properties or this schema collapses back to
+`z.unknown()` on the wire — see the matching FNXC:McpWorkflow comment there.
+*/
+const workflowIrNodeSchema = Type.Object({
+  id: Type.String({ description: "Unique node id within the graph." }),
+  kind: Type.String({
+    description:
+      "Node kind, e.g. 'start'|'prompt'|'script'|'gate'|'end'|'hold'|'split'|'join'|'foreach'|'loop'|" +
+      "'optional-group'|'step-review'|'parse-steps'|'code'|'notify'|'merge-gate'|'merge-attempt'|" +
+      "'manual-merge-hold'|'retry-backoff'|'recovery-router'|'branch-group-member-integration'|" +
+      "'branch-group-promotion'|'pr-create'|'pr-respond'|'pr-merge'|'ask-user'|'exit-gate'.",
+  }),
+  column: Type.Optional(Type.String({ description: "v2: the column id this node is placed in." })),
+  extensions: Type.Optional(
+    Type.Record(Type.String(), Type.Record(Type.String(), Type.Unknown()), {
+      description: "Plugin-namespaced extension metadata keyed as 'plugin:<pluginId>:<extensionId>'.",
+    }),
+  ),
+  config: Type.Optional(
+    Type.Record(Type.String(), Type.Unknown(), {
+      description: "Node-kind-specific config bag (open; e.g. foreach/loop template, prompt text, executor settings).",
+    }),
+  ),
+});
+
+const workflowIrEdgeSchema = Type.Object({
+  from: Type.String({ description: "Source node id." }),
+  to: Type.String({ description: "Target node id." }),
+  condition: Type.Optional(Type.String({ description: "Optional edge condition (e.g. 'success', 'failure')." })),
+  kind: Type.Optional(
+    Type.Literal("rework", {
+      description: "'rework' marks the only legal cycle edges (bounded rework/loop regions).",
+    }),
+  ),
+});
+
+const workflowIrColumnTraitSchema = Type.Object({
+  trait: Type.String({ description: "Opaque trait registry id (see fn_trait_list)." }),
+  config: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Trait-specific config." })),
+});
+
+const workflowIrColumnSchema = Type.Object({
+  id: Type.String({ description: "Unique column id." }),
+  name: Type.String({ description: "Display name for the column." }),
+  traits: Type.Array(workflowIrColumnTraitSchema, { description: "Trait configurations applied to this column." }),
+  extensions: Type.Optional(
+    Type.Record(Type.String(), Type.Record(Type.String(), Type.Unknown()), {
+      description: "Plugin-namespaced extension metadata keyed as 'plugin:<pluginId>:<extensionId>'.",
+    }),
+  ),
+  agent: Type.Optional(
+    Type.Object({
+      agentId: Type.String({ description: "Registry agent id that staffs the column." }),
+      mode: Type.Union([Type.Literal("defer"), Type.Literal("override")], {
+        description: "Precedence mode against node/task-level agent and model settings.",
+      }),
+    }, { description: "Optional permanent-agent binding for this column." }),
+  ),
+});
+
+const workflowIrArtifactSchema = Type.Object({
+  key: Type.String({ description: "Task document key this artifact declaration produces/consumes." }),
+  title: Type.Optional(Type.String({ description: "Optional display title." })),
+  producedBy: Type.Optional(Type.Union([Type.Literal("planning"), Type.Literal("manual")])),
+  role: Type.Optional(Type.Union([Type.Literal("step-source"), Type.Literal("context")])),
+});
+
+const workflowFieldOptionSchema = Type.Object({
+  value: Type.String(),
+  label: Type.String(),
+  color: Type.Optional(Type.String()),
+});
+
+const workflowFieldRenderSchema = Type.Object({
+  placement: Type.Optional(Type.Union([Type.Literal("card"), Type.Literal("detail"), Type.Literal("detail-section")])),
+  widget: Type.Optional(
+    Type.Union([
+      Type.Literal("select"),
+      Type.Literal("radio"),
+      Type.Literal("chips"),
+      Type.Literal("input"),
+      Type.Literal("textarea"),
+      Type.Literal("toggle"),
+    ]),
+  ),
+  badge: Type.Optional(Type.Boolean()),
+});
+
+const workflowFieldDefinitionSchema = Type.Object({
+  id: Type.String({ description: "Custom field id." }),
+  name: Type.String({ description: "Display name." }),
+  type: Type.Union(
+    [
+      Type.Literal("string"),
+      Type.Literal("text"),
+      Type.Literal("number"),
+      Type.Literal("boolean"),
+      Type.Literal("enum"),
+      Type.Literal("multi-enum"),
+      Type.Literal("date"),
+      Type.Literal("url"),
+    ],
+    { description: "Custom field value type." },
+  ),
+  required: Type.Optional(Type.Boolean()),
+  default: Type.Optional(Type.Unknown()),
+  options: Type.Optional(Type.Array(workflowFieldOptionSchema, { description: "Options for enum/multi-enum fields." })),
+  render: Type.Optional(workflowFieldRenderSchema),
+});
+
+const workflowSettingOptionSchema = Type.Object({
+  value: Type.String(),
+  label: Type.String(),
+  color: Type.Optional(Type.String()),
+});
+
+const workflowSettingRenderSchema = Type.Object({
+  widget: Type.Optional(
+    Type.Union([
+      Type.Literal("select"),
+      Type.Literal("radio"),
+      Type.Literal("chips"),
+      Type.Literal("input"),
+      Type.Literal("textarea"),
+      Type.Literal("toggle"),
+    ]),
+  ),
+});
+
+const workflowSettingDefinitionSchema = Type.Object({
+  id: Type.String({ description: "Workflow setting id." }),
+  name: Type.String({ description: "Display name." }),
+  type: Type.Union(
+    [
+      Type.Literal("string"),
+      Type.Literal("text"),
+      Type.Literal("number"),
+      Type.Literal("boolean"),
+      Type.Literal("enum"),
+      Type.Literal("multi-enum"),
+    ],
+    { description: "Workflow setting value type." },
+  ),
+  default: Type.Optional(Type.Unknown()),
+  options: Type.Optional(Type.Array(workflowSettingOptionSchema, { description: "Options for enum/multi-enum settings." })),
+  description: Type.Optional(Type.String()),
+  render: Type.Optional(workflowSettingRenderSchema),
+});
+
+const workflowIrSchema = Type.Object(
+  {
+    version: Type.Optional(
+      Type.Union([Type.Literal("v1"), Type.Literal("v2")], {
+        description: "IR schema version. v2 adds columns/artifacts/fields/settings; v1 graphs upgrade to v2 on parse.",
+      }),
+    ),
+    name: Type.Optional(Type.String({ description: "Workflow display name (usually mirrors the top-level name)." })),
+    columns: Type.Optional(
+      Type.Array(workflowIrColumnSchema, { description: "v2: workflow-defined board columns." }),
+    ),
+    nodes: Type.Array(workflowIrNodeSchema, { description: "Graph nodes." }),
+    edges: Type.Array(workflowIrEdgeSchema, { description: "Graph edges connecting node ids." }),
+    artifacts: Type.Optional(
+      Type.Array(workflowIrArtifactSchema, { description: "Optional workflow-declared task documents." }),
+    ),
+    fields: Type.Optional(
+      Type.Array(workflowFieldDefinitionSchema, { description: "Optional workflow-defined custom task fields." }),
+    ),
+    settings: Type.Optional(
+      Type.Array(workflowSettingDefinitionSchema, { description: "Optional typed workflow setting declarations." }),
+    ),
+  },
+  {
+    description:
+      "Workflow graph (intermediate representation): nodes/edges plus (v2) columns/artifacts/fields/settings. " +
+      "Validated server-side; a malformed graph is rejected. Schema is permissive for forward-compatibility.",
+  },
+);
+
 export const workflowCreateParams = Type.Object({
   name: Type.String({ description: "Workflow name (required, non-empty)." }),
   description: Type.Optional(Type.String({ description: "Optional human-readable description." })),
   icon: Type.Optional(Type.String({ description: "Optional compact plain-text icon for this custom workflow." })),
-  ir: Type.Unknown({
-    description:
-      "Workflow graph (intermediate representation). Validated server-side; a malformed graph is rejected.",
-  }),
+  ir: workflowIrSchema,
   layout: Type.Optional(
     Type.Record(Type.String(), Type.Unknown(), {
       description: "Optional node layout map keyed by node id.",
@@ -235,7 +428,7 @@ export const workflowUpdateParams = Type.Object({
   name: Type.Optional(Type.String({ description: "New name." })),
   description: Type.Optional(Type.String({ description: "New description." })),
   icon: Type.Optional(Type.String({ description: "New compact plain-text icon; blank clears it." })),
-  ir: Type.Optional(Type.Unknown({ description: "Replacement workflow graph (validated server-side)." })),
+  ir: Type.Optional(workflowIrSchema),
   layout: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Replacement node layout map." })),
   rehome_to: Type.Optional(
     Type.String({
@@ -2160,9 +2353,30 @@ export function createWorkflowGetTool(store: TaskStore): ToolDefinition {
           // when present to keep the payload tidy.
           ...(def.layout ? { layout: def.layout } : {}),
         };
+        /*
+        FNXC:McpWorkflow 2026-07-11-00:00:
+        FUSI-043: `details` must carry the FULL machine-readable definition (not
+        just `{workflowId, builtin, layout}`), because the CLI MCP server's
+        `bindWorkflowTool` (packages/cli/src/mcp-server/tools.ts) maps a tool's
+        `details` straight into the MCP response's `structuredContent` — that is
+        the ONLY machine-readable channel a source-blind MCP client has. A client
+        that wants to clone a workflow reads `structuredContent.ir`/`.name`/
+        `.description`/`.layout`; the previous details-shape omitted `ir` and
+        `name`/`description` entirely, contradicting this tool's own docstring
+        ("...its full IR ... as JSON") and making MCP-only cloning impossible.
+        `content[0].text` already serialized the full payload as a JSON string,
+        so this mirrors that shape into `details` instead of inventing a new one.
+        */
         return {
           content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
-          details: { workflowId: def.id, builtin, ...(def.layout ? { layout: def.layout } : {}) },
+          details: {
+            workflowId: def.id,
+            name: def.name,
+            description: def.description,
+            builtin,
+            ir: def.ir,
+            ...(def.layout ? { layout: def.layout } : {}),
+          },
         };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } catch (err: any) {

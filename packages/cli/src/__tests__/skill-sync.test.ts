@@ -457,7 +457,13 @@ describe("Skill-Extension Sync", () => {
     expect(workflowSection).toContain("### fn_workflow_create");
     expect(workflowSection).toContain("### fn_workflow_settings");
     expect(workflowSection).toContain("### fn_trait_list");
-    expect(workflowSection).toContain("| `ir` | unknown | ✓ |");
+    /*
+    FNXC:McpWorkflow 2026-07-11-00:00:
+    FUSI-043: `ir` on fn_workflow_create is now a typed, discoverable TypeBox
+    object (workflowIrSchema in packages/engine/src/agent-tools.ts) instead of
+    Type.Unknown() — the generated doc's type column reflects that.
+    */
+    expect(workflowSection).toContain("| `ir` | object | ✓ |");
   });
 
   it("engine-tools.md documents all engine session-scoped tools", () => {
@@ -483,6 +489,7 @@ describe("Skill-Extension Sync", () => {
       "references/engine-tools.md",
       "references/extension-tools.md",
       "references/fusion-capabilities.md",
+      "references/mcp-connection.md",
       "references/skill-patterns.md",
       "references/task-structure.md",
       "workflows/dashboard-cli.md",

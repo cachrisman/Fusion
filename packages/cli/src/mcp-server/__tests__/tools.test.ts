@@ -473,6 +473,114 @@ describe("fn mcp serve — in-memory server smoke test", () => {
     }
   });
 
+  /*
+  FNXC:McpWorkflow 2026-07-11-00:00:
+  FUSI-043 symptom-verification regression: proves defects #1/#3/#4 are all
+  fixed together over the REAL MCP boundary (in-memory transport, not a
+  direct tool-factory call) — (a) fn_workflow_get's structuredContent carries
+  the full ir (nodes/edges/columns) + layout, (b) a get→modify→update
+  round-trip via fn_workflow_update persists both the modification and the
+  layout, and (c) the advertised fn_workflow_create input schema exposes a
+  typed `ir` object (node/edge/column sub-shapes), not `unknown`.
+  */
+  it("fn_workflow_get → modify → fn_workflow_update round-trip survives the MCP boundary (nodes/edges/layout)", async () => {
+    const { client, mcpServer } = await connectClient();
+    try {
+      const layout = { start: { x: 0, y: 0 }, end: { x: 200, y: 0 } };
+      const created = await store.createWorkflowDefinition({
+        name: "Round Trip Workflow",
+        ir: workflowIr("Round Trip Workflow") as any,
+        layout,
+      } as any);
+
+      // (a) fn_workflow_get returns the full IR + layout in structuredContent.
+      const getResult = await client.callTool({ name: "fn_workflow_get", arguments: { workflow_id: created.id } });
+      expect(getResult.isError).not.toBe(true);
+      const getStructured = getResult.structuredContent as {
+        ir?: { nodes?: unknown[]; edges?: unknown[]; columns?: unknown[] };
+        layout?: Record<string, unknown>;
+      };
+      expect(getStructured.ir?.nodes).toBeDefined();
+      expect(getStructured.ir?.edges).toBeDefined();
+      expect(getStructured.ir?.columns).toBeDefined();
+      expect((getStructured.ir?.nodes as any[]).some((n) => n.id === "start")).toBe(true);
+      expect(getStructured.layout).toEqual(layout);
+
+      // (b) modify the IR (add a node + connecting edge) and rename a node, then
+      // fn_workflow_update over MCP; re-get and assert both the modification AND
+      // the layout persisted.
+      const modifiedIr = {
+        ...getStructured.ir,
+        nodes: [
+          ...(getStructured.ir!.nodes as any[]).map((n) => (n.id === "end" ? { ...n, id: "finish" } : n)),
+          { id: "gate1", kind: "gate", column: "todo" },
+        ],
+        edges: [
+          { from: "start", to: "gate1", condition: "success" },
+          { from: "gate1", to: "finish", condition: "success" },
+        ],
+      };
+      const updatedLayout = { ...layout, gate1: { x: 100, y: 50 } };
+      const updateResult = await client.callTool({
+        name: "fn_workflow_update",
+        arguments: { workflow_id: created.id, ir: modifiedIr, layout: updatedLayout },
+      });
+      expect(updateResult.isError).not.toBe(true);
+
+      const reGetResult = await client.callTool({ name: "fn_workflow_get", arguments: { workflow_id: created.id } });
+      expect(reGetResult.isError).not.toBe(true);
+      const reGetStructured = reGetResult.structuredContent as {
+        ir?: { nodes?: any[]; edges?: any[] };
+        layout?: Record<string, unknown>;
+      };
+      const nodeIds = (reGetStructured.ir?.nodes ?? []).map((n) => n.id);
+      expect(nodeIds).toContain("finish");
+      expect(nodeIds).toContain("gate1");
+      expect(nodeIds).not.toContain("end");
+      expect(reGetStructured.ir?.edges).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ from: "start", to: "gate1" }),
+          expect.objectContaining({ from: "gate1", to: "finish" }),
+        ]),
+      );
+      expect(reGetStructured.layout).toEqual(updatedLayout);
+
+      // (c) the advertised fn_workflow_create input schema's `ir` property is a
+      // typed object exposing node/edge/column sub-shapes, not `unknown`.
+      const { tools } = await client.listTools();
+      const createTool = tools.find((t) => t.name === "fn_workflow_create");
+      expect(createTool).toBeTruthy();
+      const irSchema = (createTool!.inputSchema as any).properties?.ir;
+      expect(irSchema).toBeTruthy();
+      expect(irSchema.type).toBe("object");
+      expect(irSchema.properties?.nodes).toBeTruthy();
+      expect(irSchema.properties?.nodes.type).toBe("array");
+      expect(irSchema.properties?.nodes.items?.properties?.id).toBeTruthy();
+      expect(irSchema.properties?.edges).toBeTruthy();
+      expect(irSchema.properties?.columns).toBeTruthy();
+
+      // (d) redactSecretsDeep is still applied — no regression on the shared
+      // secret-redaction pass over structuredContent.
+      const secretIr = {
+        ...modifiedIr,
+        nodes: modifiedIr.nodes.map((n: any) =>
+          n.id === "gate1" ? { ...n, config: { ...(n.config ?? {}), apiKey: "sk-should-be-redacted-1234567890" } } : n,
+        ),
+      };
+      const secretUpdate = await client.callTool({
+        name: "fn_workflow_update",
+        arguments: { workflow_id: created.id, ir: secretIr },
+      });
+      expect(secretUpdate.isError).not.toBe(true);
+      const secretGet = await client.callTool({ name: "fn_workflow_get", arguments: { workflow_id: created.id } });
+      const serializedSecretGet = JSON.stringify(secretGet.structuredContent);
+      expect(serializedSecretGet).not.toContain("sk-should-be-redacted-1234567890");
+    } finally {
+      await client.close();
+      await mcpServer.close();
+    }
+  });
+
   it("never surfaces a raw secret-shaped value in a tool result", async () => {
     const { client, mcpServer } = await connectClient();
     try {
