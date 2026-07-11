@@ -303,6 +303,53 @@ export function normalizeNullableStringInput(value: string | null | undefined): 
   return trimmed;
 }
 
+/*
+FNXC:McpServer 2026-07-11-15:00:
+FUSI-066 — fn_task_update paired model-lane override fields (model_provider/model_id,
+planning_model_provider/planning_model_id, validator_model_provider/validator_model_id).
+Task.modelProvider/modelId, planningModelProvider/planningModelId, and
+validatorModelProvider/validatorModelId (packages/core/src/types.ts) must be set together per
+pair — the dashboard's ModelSelectorTab.tsx already enforces this via its PATCH payload. This
+helper mirrors that null-clears/both-set-applies invariant for the MCP surface: omitting both
+args of a pair is a no-op, both null clears the override, both non-empty strings applies it, and
+any other combination (exactly one side provided) is a rejected error. No new store op — the
+resulting patch merges into the same `updates` object dispatched through the existing
+`store.updateTask(id, updates)` call fn_task_update already makes.
+*/
+function resolvePairedModelUpdate(
+  providerArg: string | null | undefined,
+  idArg: string | null | undefined,
+  providerField: string,
+  idField: string,
+  providerArgName: string,
+  idArgName: string,
+): { ok: true; patch: Record<string, unknown> } | { ok: false; message: string } {
+  const normalizedProvider = normalizeNullableStringInput(providerArg);
+  const normalizedId = normalizeNullableStringInput(idArg);
+
+  if (normalizedProvider === undefined && normalizedId === undefined) {
+    return { ok: true, patch: {} };
+  }
+
+  if (normalizedProvider === null && normalizedId === null) {
+    return { ok: true, patch: { [providerField]: null, [idField]: null } };
+  }
+
+  if (
+    typeof normalizedProvider === "string" &&
+    normalizedProvider.length > 0 &&
+    typeof normalizedId === "string" &&
+    normalizedId.length > 0
+  ) {
+    return { ok: true, patch: { [providerField]: normalizedProvider, [idField]: normalizedId } };
+  }
+
+  return {
+    ok: false,
+    message: `${providerArgName} and ${idArgName} must be set together (both provided, or both null to clear).`,
+  };
+}
+
 const INSIGHT_CATEGORIES: InsightCategory[] = [
   "quality",
   "performance",
@@ -919,12 +966,15 @@ export default function kbExtension(pi: ExtensionAPI) {
     label: "fn: Update Task",
     description:
       "Update fields on an existing task. Supports modifying the title, " +
-      "description, dependencies, assigned agent, priority, and workflow_id after task creation. " +
-      "Set workflow_id to a workflow ID to select it, or null to clear the workflow selection.",
+      "description, dependencies, assigned agent, priority, workflow_id, and per-task " +
+      "execution/planning/validator model-lane overrides after task creation. " +
+      "Set workflow_id to a workflow ID to select it, or null to clear the workflow selection. " +
+      "Set both provider and id together to apply a model-lane override, or both to null to clear it.",
     promptSnippet: "Update fields on an existing Fusion task",
     promptGuidelines: [
-      "Use fn_task_update to modify task title, description, dependencies, assigned agent, priority, or workflow_id after creation.",
+      "Use fn_task_update to modify task title, description, dependencies, assigned agent, priority, workflow_id, or model-lane overrides after creation.",
       "Set workflow_id to null to clear a task's workflow selection and enabled workflow steps.",
+      "model_provider/model_id, planning_model_provider/planning_model_id, and validator_model_provider/validator_model_id must each be set together: both non-empty strings to apply, both null to clear.",
       "At least one field must be provided to update.",
     ],
     parameters: Type.Object({
@@ -958,6 +1008,48 @@ export default function kbExtension(pi: ExtensionAPI) {
             "Workflow ID to select for this task (e.g. 'WF-003' or 'builtin:coding'), " +
             "or null to clear the workflow selection and revert to the project default. " +
             "Use fn_workflow_list to discover valid IDs.",
+        }),
+      ),
+      model_provider: Type.Optional(
+        Type.Union([Type.String(), Type.Null()], {
+          description:
+            "Execution-lane model provider override (maps to Task.modelProvider). " +
+            "Must be set together with model_id: both non-empty strings to apply the override, or both null to clear it.",
+        }),
+      ),
+      model_id: Type.Optional(
+        Type.Union([Type.String(), Type.Null()], {
+          description:
+            "Execution-lane model ID override (maps to Task.modelId). " +
+            "Must be set together with model_provider: both non-empty strings to apply the override, or both null to clear it.",
+        }),
+      ),
+      planning_model_provider: Type.Optional(
+        Type.Union([Type.String(), Type.Null()], {
+          description:
+            "Planning-lane model provider override (maps to Task.planningModelProvider). " +
+            "Must be set together with planning_model_id: both non-empty strings to apply the override, or both null to clear it.",
+        }),
+      ),
+      planning_model_id: Type.Optional(
+        Type.Union([Type.String(), Type.Null()], {
+          description:
+            "Planning-lane model ID override (maps to Task.planningModelId). " +
+            "Must be set together with planning_model_provider: both non-empty strings to apply the override, or both null to clear it.",
+        }),
+      ),
+      validator_model_provider: Type.Optional(
+        Type.Union([Type.String(), Type.Null()], {
+          description:
+            "Validator-lane model provider override (maps to Task.validatorModelProvider). " +
+            "Must be set together with validator_model_id: both non-empty strings to apply the override, or both null to clear it.",
+        }),
+      ),
+      validator_model_id: Type.Optional(
+        Type.Union([Type.String(), Type.Null()], {
+          description:
+            "Validator-lane model ID override (maps to Task.validatorModelId). " +
+            "Must be set together with validator_model_provider: both non-empty strings to apply the override, or both null to clear it.",
         }),
       ),
     }),
@@ -1057,9 +1149,69 @@ export default function kbExtension(pi: ExtensionAPI) {
         }
       }
 
+      const modelLanePairs: Array<{
+        providerArg: string | null | undefined;
+        idArg: string | null | undefined;
+        providerField: string;
+        idField: string;
+        providerArgName: string;
+        idArgName: string;
+        fieldName: string;
+      }> = [
+        {
+          providerArg: params.model_provider,
+          idArg: params.model_id,
+          providerField: "modelProvider",
+          idField: "modelId",
+          providerArgName: "model_provider",
+          idArgName: "model_id",
+          fieldName: "modelProvider",
+        },
+        {
+          providerArg: params.planning_model_provider,
+          idArg: params.planning_model_id,
+          providerField: "planningModelProvider",
+          idField: "planningModelId",
+          providerArgName: "planning_model_provider",
+          idArgName: "planning_model_id",
+          fieldName: "planningModel",
+        },
+        {
+          providerArg: params.validator_model_provider,
+          idArg: params.validator_model_id,
+          providerField: "validatorModelProvider",
+          idField: "validatorModelId",
+          providerArgName: "validator_model_provider",
+          idArgName: "validator_model_id",
+          fieldName: "validatorModel",
+        },
+      ];
+
+      for (const pair of modelLanePairs) {
+        const resolved = resolvePairedModelUpdate(
+          pair.providerArg,
+          pair.idArg,
+          pair.providerField,
+          pair.idField,
+          pair.providerArgName,
+          pair.idArgName,
+        );
+        if (!resolved.ok) {
+          return {
+            content: [{ type: "text", text: `ERROR: ${resolved.message}` }],
+            isError: true,
+            details: { error: resolved.message },
+          };
+        }
+        if (Object.keys(resolved.patch).length > 0) {
+          Object.assign(updates, resolved.patch);
+          updatedFields.push(pair.fieldName);
+        }
+      }
+
       if (updatedFields.length === 0) {
         return {
-          content: [{ type: "text", text: "No fields to update. Provide at least one of: title, description, depends, agentId, nodeId, priority, workflow_id." }],
+          content: [{ type: "text", text: "No fields to update. Provide at least one of: title, description, depends, agentId, nodeId, priority, workflow_id, model_provider/model_id, planning_model_provider/planning_model_id, validator_model_provider/validator_model_id." }],
           isError: true,
           details: { error: "No fields provided" },
         };

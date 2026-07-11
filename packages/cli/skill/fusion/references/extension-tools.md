@@ -22,7 +22,7 @@ Create a new task on the Fusion task board. The task enters the planning column 
 
 ### fn_task_update
 
-Update fields on an existing task. Supports modifying the title, description, dependencies, assigned agent, priority, and workflow_id after task creation. Set workflow_id to a workflow ID to select it, or null to clear the workflow selection.
+Update fields on an existing task. Supports modifying the title, description, dependencies, assigned agent, priority, workflow_id, and per-task execution/planning/validator model-lane overrides after task creation. Set workflow_id to a workflow ID to select it, or null to clear the workflow selection. Set both provider and id together to apply a model-lane override, or both to null to clear it.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -34,6 +34,12 @@ Update fields on an existing task. Supports modifying the title, description, de
 | `nodeId` | union | — | Node ID override for this task, or null to clear |
 | `priority` | string(enum) | — | Task priority (low, normal, high, urgent) |
 | `workflow_id` | union | — | Workflow ID to select for this task (e.g. 'WF-003' or 'builtin:coding'), or null to clear the workflow selection and revert to the project default. Use fn_workflow_list to discover valid IDs. |
+| `model_provider` | union | — | Execution-lane model provider override (maps to Task.modelProvider). Must be set together with model_id: both non-empty strings to apply the override, or both null to clear it. |
+| `model_id` | union | — | Execution-lane model ID override (maps to Task.modelId). Must be set together with model_provider: both non-empty strings to apply the override, or both null to clear it. |
+| `planning_model_provider` | union | — | Planning-lane model provider override (maps to Task.planningModelProvider). Must be set together with planning_model_id: both non-empty strings to apply the override, or both null to clear it. |
+| `planning_model_id` | union | — | Planning-lane model ID override (maps to Task.planningModelId). Must be set together with planning_model_provider: both non-empty strings to apply the override, or both null to clear it. |
+| `validator_model_provider` | union | — | Validator-lane model provider override (maps to Task.validatorModelProvider). Must be set together with validator_model_id: both non-empty strings to apply the override, or both null to clear it. |
+| `validator_model_id` | union | — | Validator-lane model ID override (maps to Task.validatorModelId). Must be set together with validator_model_provider: both non-empty strings to apply the override, or both null to clear it. |
 
 ### fn_task_list
 

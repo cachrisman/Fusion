@@ -3343,6 +3343,208 @@ describe("fn pi extension (runnable structured-output regression slice)", () => 
     expect(result.content[0].text).toContain("requires an \"executor\"-role agent");
   });
 
+  /*
+  FNXC:McpServer 2026-07-11-15:30:
+  FUSI-066 — these fn_task_update model-lane override tests must live in this unguarded
+  "runnable structured-output regression slice" describe block (not the
+  FUSION_TEST_LEGACY_EXTENSION_INTEGRATION-gated "legacy exhaustive suite" above, which is
+  skipped by default per FN-3189/FN-3204) so the paired-field set/clear/reject invariant is
+  actually exercised by the default `pnpm test` gate lane rather than only under an opt-in flag.
+  */
+  describe("FUSI-066: fn_task_update model-lane overrides", () => {
+    it("sets and clears the execution model-lane override pair", async () => {
+      const createTool = api.tools.get("fn_task_create")!;
+      const created = await createTool.execute("c1", { description: "Original" }, undefined, undefined, makeCtx(tmpDir));
+      const taskId = created.details.taskId as string;
+
+      const updateTool = api.tools.get("fn_task_update")!;
+      const showTool = api.tools.get("fn_task_show")!;
+
+      const setResult = await updateTool.execute(
+        "u1",
+        { id: taskId, model_provider: "anthropic", model_id: "claude-opus-4" },
+        undefined,
+        undefined,
+        makeCtx(tmpDir),
+      );
+      expect(setResult.isError).not.toBe(true);
+      expect(setResult.details.updatedFields).toEqual(["modelProvider"]);
+
+      let show = await showTool.execute("s1", { id: taskId }, undefined, undefined, makeCtx(tmpDir));
+      expect(show.details.task.modelProvider).toBe("anthropic");
+      expect(show.details.task.modelId).toBe("claude-opus-4");
+
+      const clearResult = await updateTool.execute(
+        "u2",
+        { id: taskId, model_provider: null, model_id: null },
+        undefined,
+        undefined,
+        makeCtx(tmpDir),
+      );
+      expect(clearResult.isError).not.toBe(true);
+      expect(clearResult.details.updatedFields).toEqual(["modelProvider"]);
+
+      show = await showTool.execute("s2", { id: taskId }, undefined, undefined, makeCtx(tmpDir));
+      expect(show.details.task.modelProvider).toBeUndefined();
+      expect(show.details.task.modelId).toBeUndefined();
+    });
+
+    it("sets and clears the planning model-lane override pair", async () => {
+      const createTool = api.tools.get("fn_task_create")!;
+      const created = await createTool.execute("c1", { description: "Original" }, undefined, undefined, makeCtx(tmpDir));
+      const taskId = created.details.taskId as string;
+
+      const updateTool = api.tools.get("fn_task_update")!;
+      const showTool = api.tools.get("fn_task_show")!;
+
+      const setResult = await updateTool.execute(
+        "u1",
+        { id: taskId, planning_model_provider: "openai", planning_model_id: "gpt-5" },
+        undefined,
+        undefined,
+        makeCtx(tmpDir),
+      );
+      expect(setResult.isError).not.toBe(true);
+      expect(setResult.details.updatedFields).toEqual(["planningModel"]);
+
+      let show = await showTool.execute("s1", { id: taskId }, undefined, undefined, makeCtx(tmpDir));
+      expect(show.details.task.planningModelProvider).toBe("openai");
+      expect(show.details.task.planningModelId).toBe("gpt-5");
+
+      const clearResult = await updateTool.execute(
+        "u2",
+        { id: taskId, planning_model_provider: null, planning_model_id: null },
+        undefined,
+        undefined,
+        makeCtx(tmpDir),
+      );
+      expect(clearResult.isError).not.toBe(true);
+      expect(clearResult.details.updatedFields).toEqual(["planningModel"]);
+
+      show = await showTool.execute("s2", { id: taskId }, undefined, undefined, makeCtx(tmpDir));
+      expect(show.details.task.planningModelProvider).toBeUndefined();
+      expect(show.details.task.planningModelId).toBeUndefined();
+    });
+
+    it("sets and clears the validator model-lane override pair", async () => {
+      const createTool = api.tools.get("fn_task_create")!;
+      const created = await createTool.execute("c1", { description: "Original" }, undefined, undefined, makeCtx(tmpDir));
+      const taskId = created.details.taskId as string;
+
+      const updateTool = api.tools.get("fn_task_update")!;
+      const showTool = api.tools.get("fn_task_show")!;
+
+      const setResult = await updateTool.execute(
+        "u1",
+        { id: taskId, validator_model_provider: "cursor-cli", validator_model_id: "grok-4" },
+        undefined,
+        undefined,
+        makeCtx(tmpDir),
+      );
+      expect(setResult.isError).not.toBe(true);
+      expect(setResult.details.updatedFields).toEqual(["validatorModel"]);
+
+      let show = await showTool.execute("s1", { id: taskId }, undefined, undefined, makeCtx(tmpDir));
+      expect(show.details.task.validatorModelProvider).toBe("cursor-cli");
+      expect(show.details.task.validatorModelId).toBe("grok-4");
+
+      const clearResult = await updateTool.execute(
+        "u2",
+        { id: taskId, validator_model_provider: null, validator_model_id: null },
+        undefined,
+        undefined,
+        makeCtx(tmpDir),
+      );
+      expect(clearResult.isError).not.toBe(true);
+      expect(clearResult.details.updatedFields).toEqual(["validatorModel"]);
+
+      show = await showTool.execute("s2", { id: taskId }, undefined, undefined, makeCtx(tmpDir));
+      expect(show.details.task.validatorModelProvider).toBeUndefined();
+      expect(show.details.task.validatorModelId).toBeUndefined();
+    });
+
+    it("rejects an unpaired model_provider with no model_id", async () => {
+      const createTool = api.tools.get("fn_task_create")!;
+      const created = await createTool.execute("c1", { description: "Original" }, undefined, undefined, makeCtx(tmpDir));
+      const taskId = created.details.taskId as string;
+
+      const updateTool = api.tools.get("fn_task_update")!;
+      const result = await updateTool.execute(
+        "u1",
+        { id: taskId, model_provider: "anthropic" },
+        undefined,
+        undefined,
+        makeCtx(tmpDir),
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("model_provider");
+      expect(result.content[0].text).toContain("model_id");
+    });
+
+    it("rejects an unpaired planning_model_id with no planning_model_provider", async () => {
+      const createTool = api.tools.get("fn_task_create")!;
+      const created = await createTool.execute("c1", { description: "Original" }, undefined, undefined, makeCtx(tmpDir));
+      const taskId = created.details.taskId as string;
+
+      const updateTool = api.tools.get("fn_task_update")!;
+      const result = await updateTool.execute(
+        "u1",
+        { id: taskId, planning_model_id: "gpt-5" },
+        undefined,
+        undefined,
+        makeCtx(tmpDir),
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("planning_model_provider");
+      expect(result.content[0].text).toContain("planning_model_id");
+    });
+
+    it("rejects an unpaired validator_model_provider with no validator_model_id", async () => {
+      const createTool = api.tools.get("fn_task_create")!;
+      const created = await createTool.execute("c1", { description: "Original" }, undefined, undefined, makeCtx(tmpDir));
+      const taskId = created.details.taskId as string;
+
+      const updateTool = api.tools.get("fn_task_update")!;
+      const result = await updateTool.execute(
+        "u1",
+        { id: taskId, validator_model_provider: "cursor-cli" },
+        undefined,
+        undefined,
+        makeCtx(tmpDir),
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("validator_model_provider");
+      expect(result.content[0].text).toContain("validator_model_id");
+    });
+
+    it("rejects a lone null on one side of a pair when the other side is a non-empty string", async () => {
+      const createTool = api.tools.get("fn_task_create")!;
+      const created = await createTool.execute("c1", { description: "Original" }, undefined, undefined, makeCtx(tmpDir));
+      const taskId = created.details.taskId as string;
+
+      const updateTool = api.tools.get("fn_task_update")!;
+      const result = await updateTool.execute(
+        "u1",
+        { id: taskId, model_provider: "anthropic", model_id: null },
+        undefined,
+        undefined,
+        makeCtx(tmpDir),
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("model_provider");
+      expect(result.content[0].text).toContain("model_id");
+
+      const showTool = api.tools.get("fn_task_show")!;
+      const show = await showTool.execute("s1", { id: taskId }, undefined, undefined, makeCtx(tmpDir));
+      expect(show.details.task.modelProvider).toBeUndefined();
+      expect(show.details.task.modelId).toBeUndefined();
+    });
+  });
+
   describe("FN-3799 assignment normalization", () => {
     it("FN-3799: treats empty-string agentId as unassigned on create", async () => {
       const createTool = api.tools.get("fn_task_create")!;
