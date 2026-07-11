@@ -77,6 +77,15 @@ vi.mock("../../api", async (importOriginal) => {
     nudgeOverseer: vi.fn().mockResolvedValue({ applied: false, reason: "oversight-off" }),
     stopOverseer: vi.fn().mockResolvedValue({ applied: true, reason: "stopped" }),
     explainOverseer: vi.fn().mockResolvedValue({ snapshot: null }),
+    /*
+    FNXC:RateLimitResume 2026-07-11-00:00 (FUSI-065):
+    RateLimitedTaskNotice (rendered for a usage-limit-classified failed task)
+    calls useUsageData -> fetchUsageData for the reset ETA. Default to an
+    empty-providers resolve so every existing TaskDetailModal suite keeps its
+    deterministic no-crash behavior; per-test suites override via
+    `vi.mocked(api.fetchUsageData).mockResolvedValue(...)` as needed.
+    */
+    fetchUsageData: vi.fn().mockResolvedValue({ providers: [] }),
   });
 });
 
@@ -140,6 +149,10 @@ vi.mock("lucide-react", () => ({
   // FN-7582's copy change) — keep this list in sync with the node-editor icon set.
   HelpCircle: () => null,
   DoorOpen: () => null,
+  // FNXC:RateLimitResume 2026-07-11-00:00 (FUSI-065): RateLimitedTaskNotice (rendered for a
+  // usage-limit-classified failed task) uses Clock/RotateCw — keep in sync with that icon set.
+  Clock: () => null,
+  RotateCw: () => null,
 }));
 
 vi.mock("../../hooks/useAgentLogs", () => ({

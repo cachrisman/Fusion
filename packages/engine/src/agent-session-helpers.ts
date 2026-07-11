@@ -617,7 +617,6 @@ export async function createResolvedAgentSession(
       + fallbackModelDegraded.reason,
     );
   }
-
   try {
     await runAuditor?.database({
       type: "session:runtime-resolved",

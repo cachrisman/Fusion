@@ -30,6 +30,7 @@ import { writeBoardWorkflowsCache } from "../utils/boardWorkflowsCache";
 import { useBoardWorkflows } from "../hooks/useBoardWorkflows";
 import { TaskContextMenu, buildTaskActionMenuModel, getTaskPrAutomationLabel, type TaskContextMenuColumnMetadata, type TaskMenuActionDescriptor } from "./TaskContextMenu";
 import type { DetailTaskOpenOptions } from "../hooks/useModalManager";
+import { isRateLimitedTask } from "../utils/rateLimitedTaskState";
 
 const COLUMN_COLOR_MAP: Record<Column, string> = {
   triage: "var(--triage)",
@@ -234,6 +235,8 @@ interface ListViewProps {
   onPopOut?: (task: Task | TaskDetail) => void;
   addToast: (message: string, type?: ToastType) => void;
   globalPaused?: boolean;
+  /** Board-level pause reason (from useAppSettings). Threaded so rate-limited rows can classify calm vs genuine failure — see rateLimitedTaskState.ts. */
+  globalPauseReason?: string;
   onNewTask?: () => void;
   onQuickCreate?: (input: TaskCreateInput) => Promise<Task | void>;
   availableModels?: ModelInfo[];
@@ -323,6 +326,7 @@ export function ListView({
   onOpenDetail,
   addToast,
   globalPaused,
+  globalPauseReason,
   onNewTask,
   onQuickCreate,
   availableModels,
@@ -2587,6 +2591,13 @@ export function ListView({
                           const isDoneColumn = isCompleteColumn(task.column);
                           const visualStatus = isDoneColumn ? "done" : task.status;
                           const isFailed = !isDoneColumn && task.status === "failed";
+                          /*
+                          FNXC:RateLimitResume 2026-07-11-00:00 (FUSI-065):
+                          A usage-limit/429 pause is self-recovering, not a genuine crash — the
+                          row/badge must use the warning-tier "rate-limited" modifier instead of
+                          "failed". See rateLimitedTaskState.ts for the shared classifier contract.
+                          */
+                          const isRateLimited = isFailed && isRateLimitedTask(task, { globalPaused, globalPauseReason });
                           const isPaused = !isDoneColumn && task.paused === true;
                           const isStuckState = isTaskStuck(task, taskStuckTimeoutMs, lastFetchTimeMs);
                           const isAgentActive =
@@ -2650,8 +2661,11 @@ export function ListView({
                                 ) : isStuckState ? (
                                   <span className="list-status-badge stuck">{t("listView.stuck", "Stuck")}</span>
                                 ) : hasStatus ? (
-                                  <span className={`list-status-badge list-status-badge--${task.column}${isFailed ? " failed" : ""}${isAgentActive ? " pulsing" : ""}`}>
-                                    {getTaskStatusLabel(visualStatus ?? "", t)}
+                                  <span
+                                    className={`list-status-badge list-status-badge--${task.column}${isFailed && !isRateLimited ? " failed" : ""}${isRateLimited ? " rate-limited" : ""}${isAgentActive ? " pulsing" : ""}`}
+                                    title={isRateLimited ? t("taskStatus.rateLimited.badge", "Rate limited") : undefined}
+                                  >
+                                    {isRateLimited ? t("taskStatus.rateLimited.badge", "Rate limited") : getTaskStatusLabel(visualStatus ?? "", t)}
                                   </span>
                                 ) : null}
                               </div>
@@ -2788,6 +2802,13 @@ export function ListView({
                             const isDoneColumn = isCompleteColumn(task.column);
                             const visualStatus = isDoneColumn ? "done" : task.status;
                             const isFailed = !isDoneColumn && task.status === "failed";
+                            /*
+                            FNXC:RateLimitResume 2026-07-11-00:00 (FUSI-065):
+                            A usage-limit/429 pause is self-recovering, not a genuine crash — the
+                            row/badge must use the warning-tier "rate-limited" modifier instead of
+                            "failed". See rateLimitedTaskState.ts for the shared classifier contract.
+                            */
+                            const isRateLimited = isFailed && isRateLimitedTask(task, { globalPaused, globalPauseReason });
                             const isPaused = !isDoneColumn && task.paused === true;
                             const isStuckState = isTaskStuck(task, taskStuckTimeoutMs, lastFetchTimeMs);
                             const isAgentActive =
@@ -2801,7 +2822,7 @@ export function ListView({
                             return (
                               <tr
                                 key={task.id}
-                                className={`list-row${isFailed ? " failed" : ""}${isPaused ? " paused" : ""}${
+                                className={`list-row${isFailed && !isRateLimited ? " failed" : ""}${isRateLimited ? " rate-limited" : ""}${isPaused ? " paused" : ""}${
                                   isStuckState ? " stuck" : ""
                                 }${isAgentActive ? " agent-active" : ""}${
                                   isDragging ? " dragging" : ""
@@ -2861,11 +2882,12 @@ export function ListView({
                                       </span>
                                     ) : visualStatus ? (
                                       <span
-                                        className={`list-status-badge list-status-badge--${task.column}${isFailed ? " failed" : ""}${
+                                        className={`list-status-badge list-status-badge--${task.column}${isFailed && !isRateLimited ? " failed" : ""}${isRateLimited ? " rate-limited" : ""}${
                                           isAgentActive ? " pulsing" : ""
                                         }`}
+                                        title={isRateLimited ? t("taskStatus.rateLimited.badge", "Rate limited") : undefined}
                                       >
-                                        {getTaskStatusLabel(visualStatus ?? "", t)}
+                                        {isRateLimited ? t("taskStatus.rateLimited.badge", "Rate limited") : getTaskStatusLabel(visualStatus ?? "", t)}
                                       </span>
                                     ) : (
                                       <span className="list-status-badge">-</span>

@@ -1025,6 +1025,13 @@ for a "skipped" outcome upstream).
 }
 
 
+/*
+FNXC:RateLimitResume 2026-07-11-00:00 (FUSI-065):
+.detail-error-alert now renders ONLY for a genuine terminal failure
+(TaskDetailModal.tsx branches on isRateLimitedTask(task) before choosing
+between this box and RateLimitedTaskNotice's own warning-tier styling in
+RateLimitedTaskNotice.css) — the two never co-apply.
+*/
 /* Error alert in task detail modal */
 .detail-error-alert {
   display: flex;

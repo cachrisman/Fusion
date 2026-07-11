@@ -346,6 +346,17 @@ FN-7780 anchors the created-by-agent badge in its own bottom-left row before wor
   color: var(--color-error-dark);
 }
 
+/*
+FNXC:RateLimitResume 2026-07-11-00:00 (FUSI-065):
+Warning-tier badge for a usage-limit task pause — the `failed` class is
+suppressed on this element whenever `rate-limited` is applied (see TaskCard.tsx),
+so the two classes never co-apply. Must never reuse the error-tier tokens above.
+*/
+.card-status-badge.rate-limited {
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+  color: var(--color-warning);
+}
+
 .card-status-badge.stuck {
   background: var(--status-triage-bg-deep);
   color: var(--triage);
@@ -576,6 +587,11 @@ falling through to an unstyled transparent shell.
 
 .card.failed {
   border-left: 3px solid var(--color-error-dark);
+}
+
+/* FNXC:RateLimitResume 2026-07-11-00:00 (FUSI-065): warning-tier left border for a self-recovering usage-limit pause — mutually exclusive with .card.failed. */
+.card.rate-limited {
+  border-left: 3px solid var(--color-warning);
 }
 
 /* Error display on failed task cards */

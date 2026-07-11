@@ -48,6 +48,7 @@ interface BoardProps {
   planAutoApproveEnabled: boolean;
   onTogglePlanAutoApprove: () => void;
   globalPaused?: boolean;
+  globalPauseReason?: string;
   onUpdateTask?: (
     id: string,
     updates: { title?: string; description?: string; dependencies?: string[] }
@@ -166,7 +167,7 @@ function BoardWorkflowSkeleton({ empty = false }: { empty?: boolean }) {
   );
 }
 
-export function Board({ tasks, projectId, maxConcurrent, showWorktreeGrouping, onMoveTask, onPauseTask, onUnpauseTask, onResetTask, onDuplicateTask, onMergeTask, onOpenDetail, onOpenRefine, onOpenGroupModal, addToast, onQuickCreate, onNewTask, autoMerge, mergeStrategy = "direct", onToggleAutoMerge, planAutoApproveEnabled, onTogglePlanAutoApprove, globalPaused, onUpdateTask, onRetryTask, onArchiveTask, onUnarchiveTask, onRevertTask, onDeleteTask, onArchiveAllDone, onLoadArchivedTasks, onLoadMoreArchivedTasks, archivedHasMore, archivedLoadingMore, searchQuery = "", availableModels, onPlanningMode, onSubtaskBreakdown, onOpenDetailWithTab, favoriteProviders, favoriteModels, onToggleFavorite, onToggleModelFavorite, taskStuckTimeoutMs, onOpenMission, staleHighFanoutBlockerAgeThresholdMs, lastFetchTimeMs, prAuthAvailable, onOpenWorkflowEditor, onCreateWorkflow, workflowColumnsEnabled, settingsLoaded, workflowControlsInHeader = false }: BoardProps) {
+export function Board({ tasks, projectId, maxConcurrent, showWorktreeGrouping, onMoveTask, onPauseTask, onUnpauseTask, onResetTask, onDuplicateTask, onMergeTask, onOpenDetail, onOpenRefine, onOpenGroupModal, addToast, onQuickCreate, onNewTask, autoMerge, mergeStrategy = "direct", onToggleAutoMerge, planAutoApproveEnabled, onTogglePlanAutoApprove, globalPaused, globalPauseReason, onUpdateTask, onRetryTask, onArchiveTask, onUnarchiveTask, onRevertTask, onDeleteTask, onArchiveAllDone, onLoadArchivedTasks, onLoadMoreArchivedTasks, archivedHasMore, archivedLoadingMore, searchQuery = "", availableModels, onPlanningMode, onSubtaskBreakdown, onOpenDetailWithTab, favoriteProviders, favoriteModels, onToggleFavorite, onToggleModelFavorite, taskStuckTimeoutMs, onOpenMission, staleHighFanoutBlockerAgeThresholdMs, lastFetchTimeMs, prAuthAvailable, onOpenWorkflowEditor, onCreateWorkflow, workflowColumnsEnabled, settingsLoaded, workflowControlsInHeader = false }: BoardProps) {
   const [archivedCollapsed, setArchivedCollapsed] = useState(true);
   /*
   FNXC:DoneColumnSorting 2026-06-29-16:57:
@@ -889,6 +890,7 @@ export function Board({ tasks, projectId, maxConcurrent, showWorktreeGrouping, o
                   onOpenGroupModal={onOpenGroupModal}
                   addToast={addToast}
                   globalPaused={globalPaused}
+                  globalPauseReason={globalPauseReason}
                   onUpdateTask={onUpdateTask}
                   onRetryTask={onRetryTask}
                   onArchiveTask={onArchiveTask}
@@ -973,6 +975,7 @@ export function Board({ tasks, projectId, maxConcurrent, showWorktreeGrouping, o
                 onOpenGroupModal={onOpenGroupModal}
                 addToast={addToast}
                 globalPaused={globalPaused}
+                  globalPauseReason={globalPauseReason}
                 onUpdateTask={onUpdateTask}
                 onRetryTask={onRetryTask}
                 onArchiveTask={onArchiveTask}
@@ -1031,6 +1034,7 @@ export function Board({ tasks, projectId, maxConcurrent, showWorktreeGrouping, o
               onOpenGroupModal={onOpenGroupModal}
               addToast={addToast}
               globalPaused={globalPaused}
+                  globalPauseReason={globalPauseReason}
               onUpdateTask={onUpdateTask}
               onRetryTask={onRetryTask}
               onArchiveTask={onArchiveTask}
@@ -1086,6 +1090,7 @@ export function Board({ tasks, projectId, maxConcurrent, showWorktreeGrouping, o
             onOpenGroupModal={onOpenGroupModal}
             addToast={addToast}
             globalPaused={globalPaused}
+                  globalPauseReason={globalPauseReason}
             onUpdateTask={onUpdateTask}
             onRetryTask={onRetryTask}
             onArchiveTask={onArchiveTask}

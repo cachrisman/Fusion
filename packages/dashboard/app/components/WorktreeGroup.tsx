@@ -20,6 +20,7 @@ interface WorktreeGroupProps {
   onMoveTask?: (id: string, column: ColumnId, optionsOrPosition?: { preserveProgress?: boolean } | number) => Promise<Task>;
   addToast: (message: string, type?: ToastType) => void;
   globalPaused?: boolean;
+  globalPauseReason?: string;
   onUpdateTask?: (
     id: string,
     updates: { title?: string; description?: string; dependencies?: string[] }
@@ -75,6 +76,7 @@ function WorktreeGroupComponent({
   onMoveTask,
   addToast,
   globalPaused,
+  globalPauseReason,
   onUpdateTask,
   onPauseTask,
   onRetryTask,
@@ -130,6 +132,7 @@ function WorktreeGroupComponent({
           taskMoveColumns={getTaskContextMenuColumns(task)}
           addToast={addToast}
           globalPaused={globalPaused}
+                  globalPauseReason={globalPauseReason}
           onUpdateTask={onUpdateTask}
           onPauseTask={onPauseTask}
           onRetryTask={onRetryTask}
@@ -167,6 +170,7 @@ function WorktreeGroupComponent({
           taskMoveColumns={getTaskContextMenuColumns(task)}
           addToast={addToast}
           globalPaused={globalPaused}
+                  globalPauseReason={globalPauseReason}
           onUpdateTask={onUpdateTask}
           onPauseTask={onPauseTask}
           onRetryTask={onRetryTask}

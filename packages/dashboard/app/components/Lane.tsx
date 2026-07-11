@@ -46,6 +46,7 @@ export interface LaneProps {
   autoMerge?: boolean;
   onToggleAutoMerge?: () => void;
   globalPaused?: boolean;
+  globalPauseReason?: string;
   onUpdateTask?: (id: string, updates: { title?: string; description?: string; dependencies?: string[] }) => Promise<Task>;
   onRetryTask?: (id: string) => Promise<Task>;
   onArchiveTask?: (id: string, options?: { removeLineageReferences?: boolean }) => Promise<Task>;
@@ -197,6 +198,7 @@ function LaneComponent(props: LaneProps) {
               onOpenGroupModal={props.onOpenGroupModal}
               addToast={props.addToast}
               globalPaused={props.globalPaused}
+              globalPauseReason={props.globalPauseReason}
               onUpdateTask={props.onUpdateTask}
               onRetryTask={props.onRetryTask}
               onArchiveTask={props.onArchiveTask}

@@ -49,6 +49,8 @@ import { extractDependencyDeleteConflict, extractLineageDeleteConflict } from ".
 import { MAX_AUTO_MERGE_RETRIES, type BlockerFanoutEntry } from "../hooks/useBlockerFanout";
 import { useRetryWarning } from "../context/RetryWarningContext";
 import { useColumnLabel } from "../i18n/labels";
+import { isRateLimitedTask } from "../utils/rateLimitedTaskState";
+import { RateLimitedTaskNotice } from "./RateLimitedTaskNotice";
 import { WorkspaceWorktreesSummary, isWorkspaceTask } from "./WorkspaceWorktreesSummary";
 import { WorkflowIcon } from "./WorkflowIcon";
 import { TaskContextMenu, buildTaskActionMenuModel, getTaskPrAutomationLabel, type TaskContextMenuColumnFlags, type TaskContextMenuColumnMetadata, type TaskMenuActionDescriptor } from "./TaskContextMenu";
@@ -484,6 +486,8 @@ interface TaskCardProps {
   onOpenGroupModal?: (groupId: string) => void;
   addToast: (message: string, type?: ToastType) => void;
   globalPaused?: boolean;
+  /** Board-level pause reason (from useAppSettings). Threaded alongside globalPaused so the rate-limit calm classifier can distinguish a systemic usage-limit pause from a manual pause. */
+  globalPauseReason?: string;
   onUpdateTask?: (
     id: string,
     updates: { title?: string; description?: string; dependencies?: string[]; dismissNearDuplicate?: boolean; githubTracking?: { enabled?: boolean } }
@@ -694,6 +698,7 @@ function areTaskCardPropsEqual(previous: TaskCardProps, next: TaskCardProps): bo
     previous.queued === next.queued &&
     previous.projectId === next.projectId &&
     previous.globalPaused === next.globalPaused &&
+    previous.globalPauseReason === next.globalPauseReason &&
     previous.taskStuckTimeoutMs === next.taskStuckTimeoutMs &&
     previous.prAuthAvailable === next.prAuthAvailable &&
     previous.autoMergeEnabled === next.autoMergeEnabled &&
@@ -858,6 +863,7 @@ function TaskCardComponent({
   onOpenGroupModal,
   addToast,
   globalPaused,
+  globalPauseReason,
   onUpdateTask,
   onArchiveTask,
   onUnarchiveTask,
@@ -1247,6 +1253,15 @@ function TaskCardComponent({
   const isDoneColumn = task.column === "done";
   const visualStatus = isDoneColumn ? "done" : task.status;
   const isFailed = !isDoneColumn && task.status === "failed";
+  /*
+  FNXC:RateLimitResume 2026-07-11-00:00 (FUSI-065):
+  A usage-limit/429 failure is a self-recovering pause, not a genuine crash.
+  When true, the card suppresses the red `failed` modifier/badge/card-error
+  box in favor of the warning-tier RateLimitedTaskNotice below. Genuine
+  terminal failures (isFailed && !isRateLimited) keep the red treatment
+  byte-for-byte unchanged.
+  */
+  const isRateLimited = isFailed && isRateLimitedTask(task, { globalPaused, globalPauseReason });
   const canRetryTask =
     task.status === "failed" ||
     task.status === "stuck-killed" ||
@@ -2620,8 +2635,8 @@ function TaskCardComponent({
     }
   }, [addToast, isAddressingPrFeedback, projectId, t, task.id]);
 
-  const handleRetryTask = useCallback(async (e: React.MouseEvent<HTMLButtonElement>) => {
-    e.stopPropagation();
+  const handleRetryTask = useCallback(async (e?: React.MouseEvent<HTMLButtonElement>) => {
+    e?.stopPropagation();
     if (!onRetryTask || isRetrying) return;
 
     setIsRetrying(true);
@@ -2634,7 +2649,7 @@ function TaskCardComponent({
     }
   }, [addToast, isRetrying, onRetryTask, task.id]);
 
-  const cardClass = `card${dragging ? " dragging" : ""}${queued ? " queued" : ""}${isAgentActive ? " agent-active" : ""}${isFailed ? " failed" : ""}${isPaused ? " paused" : ""}${isStuck ? " stuck" : ""}${isAwaitingApproval ? " awaiting-approval" : ""}${isAwaitingInput ? " awaiting-input" : ""}${fileDragOver ? " file-drop-target" : ""}${isEditing ? " card-editing" : ""}${isSaving ? " card-saving" : ""}`;
+  const cardClass = `card${dragging ? " dragging" : ""}${queued ? " queued" : ""}${isAgentActive ? " agent-active" : ""}${isFailed && !isRateLimited ? " failed" : ""}${isRateLimited ? " rate-limited" : ""}${isPaused ? " paused" : ""}${isStuck ? " stuck" : ""}${isAwaitingApproval ? " awaiting-approval" : ""}${isAwaitingInput ? " awaiting-input" : ""}${fileDragOver ? " file-drop-target" : ""}${isEditing ? " card-editing" : ""}${isSaving ? " card-saving" : ""}`;
 
   const filesChangedButton = (() => {
     if (task.column === "in-progress") {
@@ -2824,7 +2839,7 @@ function TaskCardComponent({
         )}
         {!isPaused && visualStatus && visualStatus !== "queued" && (
           <span
-            className={`card-status-badge card-status-badge--${task.column}${isAwaitingApproval ? " awaiting-approval" : ""}${isAwaitingInput ? " awaiting-input" : ""}${ACTIVE_STATUSES.has(visualStatus) ? " pulsing" : ""}${isFailed ? " failed" : ""}${isStuck ? " stuck" : ""}`}
+            className={`card-status-badge card-status-badge--${task.column}${isAwaitingApproval ? " awaiting-approval" : ""}${isAwaitingInput ? " awaiting-input" : ""}${ACTIVE_STATUSES.has(visualStatus) ? " pulsing" : ""}${isFailed && !isRateLimited ? " failed" : ""}${isRateLimited ? " rate-limited" : ""}${isStuck ? " stuck" : ""}`}
           >
             {isStuck ? t("tasks.stuck", "Stuck") : isAwaitingApproval ? t("tasks.awaitingApproval", "Awaiting Approval") : isAwaitingInput ? t("tasks.needsInput", "Needs input") : visualStatus === "merging-fix" ? t("tasks.statusMergingFix", "Merging fixes…") : getTaskStatusLabel(visualStatus, t)}
           </span>
@@ -3179,7 +3194,15 @@ function TaskCardComponent({
           {stalledReview.reason}
         </div>
       )}
-      {isFailed && task.error && (
+      {isFailed && task.error && isRateLimited && (
+        <RateLimitedTaskNotice
+          error={task.error}
+          variant="compact"
+          onRetry={onRetryTask ? () => handleRetryTask() : undefined}
+          retrying={isRetrying}
+        />
+      )}
+      {isFailed && task.error && !isRateLimited && (
         <div className="card-error" title={task.error}>
           <span className="card-error-icon">⚠</span>
           <span className="card-error-text">{task.error.length > 60 ? task.error.slice(0, 60) + "…" : task.error}</span>

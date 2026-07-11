@@ -76,6 +76,8 @@ import { TaskContextMenu, buildTaskActionMenuModel, getTaskPrAutomationLabel } f
 import { FLOATING_WINDOW_GEOMETRY_CHANGE_EVENT } from "./FloatingWindow";
 import { useFileBrowser } from "../context/FileBrowserContext";
 import type { DetailTaskInitialActionRequest } from "../hooks/useModalManager";
+import { isRateLimitedTask } from "../utils/rateLimitedTaskState";
+import { RateLimitedTaskNotice } from "./RateLimitedTaskNotice";
 
 const STALE_PAUSED_REVIEW_LOG_REGEX = /^Stale paused review surfaced \[([^\]]+)\]/;
 const EMPTY_MARKDOWN_CHILD_SEPARATOR = "";
@@ -3262,6 +3264,15 @@ export function TaskDetailContent({
   Maximized Planner Chat reserves vertical room for task identity and the planner conversation, so failed-task chrome is not mounted in that state. Normal detail, Activity expansion, and collapsed Planner Chat still surface task failures immediately.
   */
   const shouldShowTaskFailureAlert = Boolean(task.status === "failed" && task.error && !isPlannerChatExpanded);
+  /*
+  FNXC:RateLimitResume 2026-07-11-00:00 (FUSI-065):
+  shouldShowTaskFailureAlert already requires task.error to be present, so the
+  classifier only needs task.error text here — no globalPauseReason plumbing
+  needed on this surface (unlike TaskCard/ListView, where the row/badge/card
+  render even without error text). See rateLimitedTaskState.ts for the shared
+  contract.
+  */
+  const isTaskDetailRateLimited = isRateLimitedTask(task, {});
 
   const taskActionMenuModel = useMemo(() => buildTaskActionMenuModel({
     task,
@@ -4330,7 +4341,14 @@ export function TaskDetailContent({
               {isWorkspaceTask(workingTask) && <WorkspaceWorktreesSummary task={workingTask} />}
             </>
           )}
-          {shouldShowTaskFailureAlert && (
+          {shouldShowTaskFailureAlert && isTaskDetailRateLimited && (
+            <RateLimitedTaskNotice
+              error={task.error}
+              variant="full"
+              onRetry={onRetryTask ? handleRetry : undefined}
+            />
+          )}
+          {shouldShowTaskFailureAlert && !isTaskDetailRateLimited && (
             <div className="detail-error-alert">
               <span className="detail-error-icon">⚠</span>
               <div className="detail-error-content">

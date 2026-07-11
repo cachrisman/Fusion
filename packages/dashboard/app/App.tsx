@@ -1391,6 +1391,7 @@ function AppInner() {
     toggleAutoMerge,
     togglePlanAutoApprove,
     globalPaused,
+    globalPauseReason,
     updateTask,
     retryTask,
     archiveTask,

@@ -1312,6 +1312,21 @@ If the dashboard is running without engine management, the banner stays informat
 
 When the board is globally paused for `rate-limit` (a Claude subscription rate limit tripped `globalPause`), Fusion shows a **Paused — Claude 5h/weekly limit, resumes ~HH:MM (in Xh Ym)** banner with a live countdown, computed from the same usage data shown in the Usage dropown. If the reset time is not yet known, the banner falls back to **Paused — Claude limit, resuming automatically** rather than showing a fabricated time. The banner is not shown for a manual global pause (`globalPauseReason: "manual"`) or when the board is not paused. Self-healing schedules the actual auto-unpause using the same reset time (see `docs/architecture.md`), so the countdown reflects when the engine will actually resume, not a blind backoff guess.
 
+### Per-task rate-limited calm state (vs genuine failure)
+
+<!-- FNXC:RateLimitResume 2026-07-11-00:00 (FUSI-065): previously a usage-limit/429 condition rendered IDENTICALLY to a hard crash on the card/detail/list surfaces — red "failed"/"Task Failed" badge, raw `rate_limit_error` JSON dumped inline, and manual Retry as the primary CTA. A self-recovering pause is now visually distinct from a real terminal failure. -->
+
+When a task's own AI lane hits a usage-limit/429 condition, the task card, task detail, and list row render a dedicated **warning-tier** (`--color-warning`, never `--color-error`) calm state instead of the red failure treatment:
+
+- **Headline:** "Rate limit reached — waiting for reset", with a subcopy of **Resumes automatically ~HH:MM (in Xh Ym)** when a reset is known (reusing the same `resolveRateLimitResetAt` resolver and `useUsageData` hook that power the board-level `GlobalPauseBanner` above — no separate polling), or a graceful **Resuming automatically once the provider limit resets** fallback (never a fabricated time) when the reset is unknown.
+- **Raw error text** is collapsed behind a `<details>`/summary disclosure ("Show raw error details") instead of being dumped inline.
+- **Retry** is demoted to a secondary action while auto-resume is pending — it is never presented as the primary CTA for a rate-limited task.
+- The card `failed` red modifier, the `card-status-badge … failed` badge, and the `detail-error-alert` "Task Failed" box are all suppressed for a rate-limited task and replaced with warning-tier equivalents (`card.rate-limited`, `card-status-badge.rate-limited`, `list-row.rate-limited`/`list-status-badge.rate-limited`); the two treatments never co-apply.
+
+Classification is intentionally conservative: a task is only treated as rate-limited when its `status` is `failed` AND either (a) its own `error` text matches a usage-limit pattern (`rate_limit_error`, `429`, `overloaded`, `quota`, `billing`, `credit`, `529`, mirroring the engine's `isUsageLimitError` detector), or (b) the whole board is currently paused for `globalPauseReason: "rate-limit"` while the task carries some error text. A genuine terminal failure (build/type/lint errors, permission denials, etc.) always keeps the existing red "Task Failed" treatment with a primary Retry, even while the board happens to be paused for an unrelated reason. The per-task calm state and the board-level `GlobalPauseBanner` coexist without duplicating the "paused & will resume" messaging — the banner covers the board/column-level signal, the per-task notice covers the individual card/detail/row.
+
+This UI-only calm treatment applies regardless of whether the engine has landed FUSI-064 (making usage-limit conditions non-terminal); today the engine can still mark such a task `failed`, so the classifier keys off the task's error text and the board pause reason rather than a dedicated engine-set field.
+
 ### Identifying high-impact blockers
 
 Use blocker fan-out signals on task cards and in the footer status bar to spot blockers with high downstream impact:

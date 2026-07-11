@@ -126,6 +126,7 @@ export function MainContent({
   toggleAutoMerge,
   togglePlanAutoApprove,
   globalPaused,
+  globalPauseReason,
   updateTask,
   retryTask,
   archiveTask,
@@ -719,6 +720,7 @@ export function MainContent({
             planAutoApproveEnabled={planAutoApproveEnabled}
             onTogglePlanAutoApprove={togglePlanAutoApprove}
             globalPaused={globalPaused}
+            globalPauseReason={globalPauseReason}
             onUpdateTask={updateTask}
             onRetryTask={retryTask}
             onUnpauseTask={unpauseTask}
@@ -836,6 +838,7 @@ export function MainContent({
           planAutoApproveEnabled={planAutoApproveEnabled}
           onTogglePlanAutoApprove={togglePlanAutoApprove}
           globalPaused={globalPaused}
+            globalPauseReason={globalPauseReason}
           onUpdateTask={updateTask}
           onRetryTask={retryTask}
           onUnpauseTask={unpauseTask}
@@ -893,6 +896,7 @@ export function MainContent({
         onPopOut={popOutTaskDetail}
         addToast={addToast}
         globalPaused={globalPaused}
+            globalPauseReason={globalPauseReason}
         onNewTask={openNewTaskWithNav}
         onQuickCreate={handleBoardQuickCreate}
         onPlanningMode={openPlanningWithInitialPlanWithNav}

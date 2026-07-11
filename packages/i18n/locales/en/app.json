@@ -8956,5 +8956,15 @@
     "toolResult": "Tool result",
     "you": "You",
     "youMessage": "You message"
+  },
+  "taskStatus": {
+    "rateLimited": {
+      "headline": "Rate limit reached — waiting for reset",
+      "subcopyWithEta": "Resumes automatically ~{{clockTime}} (in {{countdown}})",
+      "subcopyUnknownEta": "Resuming automatically once the provider limit resets",
+      "rawErrorSummary": "Show raw error details",
+      "retry": "Retry now",
+      "badge": "Rate limited"
+    }
   }
 }

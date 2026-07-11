@@ -607,6 +607,11 @@ No border-left on the detail pane. Keeping a border-left here would produce a se
   border-left: 3px solid var(--color-error-dark);
 }
 
+/* FNXC:RateLimitResume 2026-07-11-00:00 (FUSI-065): warning-tier left border for a self-recovering usage-limit pause — mutually exclusive with .list-row.failed. */
+.list-row.rate-limited {
+  border-left: 3px solid var(--color-warning);
+}
+
 .list-row.paused {
   opacity: 0.55;
 }
@@ -753,6 +758,12 @@ In the split sidebar the title cell must allow the title to wrap to two lines (h
 .list-status-badge.failed {
   background: var(--status-error-bg);
   color: var(--color-error-dark);
+}
+
+/* FNXC:RateLimitResume 2026-07-11-00:00 (FUSI-065): warning-tier badge for a self-recovering usage-limit pause — mutually exclusive with .list-status-badge.failed. */
+.list-status-badge.rate-limited {
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+  color: var(--color-warning);
 }
 
 .list-status-badge.stuck {

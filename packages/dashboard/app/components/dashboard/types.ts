@@ -172,6 +172,8 @@ export interface MainContentProps {
   toggleAutoMerge: () => Promise<void>;
   togglePlanAutoApprove: () => Promise<void>;
   globalPaused: boolean;
+  /* FNXC:RateLimitResume 2026-07-11-00:00 (FUSI-065): threaded to Board/ListView so TaskCard/list rows can classify a per-task usage-limit pause as calm rather than a genuine failure. */
+  globalPauseReason: string | undefined;
   updateTask: (
     id: string,
     updates: { title?: string; description?: string; dependencies?: string[]; dismissNearDuplicate?: boolean },
