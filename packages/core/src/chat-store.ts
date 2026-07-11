@@ -85,6 +85,7 @@ interface ChatSessionRow {
   projectId: string | null;
   modelProvider: string | null;
   modelId: string | null;
+  thinkingLevel: string | null;
   createdAt: string;
   updatedAt: string;
   cliSessionFile: string | null;
@@ -179,6 +180,7 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
       projectId: row.projectId ?? null,
       modelProvider: row.modelProvider ?? null,
       modelId: row.modelId ?? null,
+      thinkingLevel: row.thinkingLevel ?? null,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       cliSessionFile: row.cliSessionFile ?? null,
@@ -293,6 +295,7 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
       projectId: input.projectId ?? null,
       modelProvider: input.modelProvider ?? null,
       modelId: input.modelId ?? null,
+      thinkingLevel: input.thinkingLevel ?? null,
       createdAt: now,
       updatedAt: now,
       cliSessionFile: null,
@@ -301,8 +304,8 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
     };
 
     this.db.prepare(`
-      INSERT INTO chat_sessions (id, agentId, title, status, projectId, modelProvider, modelId, createdAt, updatedAt, inFlightGeneration, cliExecutorAdapterId)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO chat_sessions (id, agentId, title, status, projectId, modelProvider, modelId, thinkingLevel, createdAt, updatedAt, inFlightGeneration, cliExecutorAdapterId)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       session.id,
       session.agentId,
@@ -311,6 +314,7 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
       session.projectId,
       session.modelProvider,
       session.modelId,
+      session.thinkingLevel,
       session.createdAt,
       session.updatedAt,
       null,
@@ -468,6 +472,10 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
     if (input.modelId !== undefined) {
       setClauses.push("modelId = ?");
       params.push(input.modelId);
+    }
+    if (input.thinkingLevel !== undefined) {
+      setClauses.push("thinkingLevel = ?");
+      params.push(input.thinkingLevel);
     }
 
     params.push(id);

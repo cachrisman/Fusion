@@ -76,7 +76,8 @@
 
 - `artifacts` is the first-class metadata registry for generated or uploaded task artifacts. Rows store ID, `type` (`document`, `image`, `video`, `audio`, or `other`), title/description, MIME type, size, author identity/type, optional task linkage, metadata JSON, textual `content`, a relative `uri`, and timestamps; binary bytes are not stored in SQLite.
 - `TaskStore.registerArtifact()` writes task-scoped binary payloads under `<rootDir>/.fusion/tasks/{ID}/artifacts/` and task-less registry payloads under `<rootDir>/.fusion/artifacts/`, then records a relative `artifacts/<file>` URI in SQLite. If the DB insert fails after a binary write, the store removes the orphaned file before surfacing the error.
-- Inline text/document artifacts may store `content` directly in SQLite and therefore have no media file. The dashboard media route streams `GET /api/artifacts/:id/media` from disk when `uri` is present, or returns inline `content` with the persisted MIME type when no `uri` exists.
+- Image task attachments (`image/png`, `image/jpeg`, `image/gif`, `image/webp`) are bridged into the artifact registry by `TaskStore.addAttachment()` as `image` rows with `metadata.source: "attachment"` and a relative `attachments/<file>` URI. This keeps one copy of the bytes under `<rootDir>/.fusion/tasks/{ID}/attachments/` while making the image discoverable through artifact list APIs and the Documents/Task Artifacts galleries. Non-image attachments remain attachment-only. Deleting an attachment also deletes its bridged artifact row before removing the attachment file so `/api/artifacts/:id/media` does not point at a deleted attachment.
+- Inline text/document artifacts may store `content` directly in SQLite and therefore have no media file. The dashboard media route streams `GET /api/artifacts/:id/media` from disk when `uri` is present, accepting task-scoped artifact URIs under `artifacts/` and bridged image-attachment URIs under `attachments/`, or returns inline `content` with the persisted MIME type when no `uri` exists.
 - `getArtifact(id)` returns metadata by ID, `getArtifacts(taskId)` returns active-task artifacts newest-first, and `listArtifacts(...)` is the cross-agent query path with type/author/task/search filters and pagination. List reads hide artifacts whose parent task is soft-deleted while preserving task-less artifacts.
 - Task-linked artifact registration requires an active, non-archived task. Archived tasks are read-only for artifact writes; soft-deleted or missing tasks are rejected.
 - Retention follows the existing task lifecycle rather than a separate artifact policy: soft-deleted parent tasks keep artifact rows/files for forensics but normal live-reader APIs hide them; hard deletion from the active `tasks` table cascades artifact metadata through the `taskId` foreign key, and archive cleanup removes the task directory that contains task-scoped artifact binaries. Task-less artifacts live under `<rootDir>/.fusion/artifacts/` and are not tied to task archival cleanup.
@@ -296,6 +297,7 @@ API endpoints reviewed:
 | `defaultModelId` | Global | `GET/PUT /api/settings/global` | Default model id |
 | `fallbackProvider` | Global | `GET/PUT /api/settings/global` | Fallback model provider |
 | `fallbackModelId` | Global | `GET/PUT /api/settings/global` | Fallback model id |
+| `fallbackThinkingLevel` | Global | `GET/PUT /api/settings/global` | Fallback model reasoning effort; unset inherits |
 | `defaultThinkingLevel` | Global | `GET/PUT /api/settings/global` | Default reasoning effort |
 | `ntfyEnabled` | Global | `GET/PUT /api/settings/global` | Notifications enabled |
 | `ntfyTopic` | Global | `GET/PUT /api/settings/global` | Ntfy topic |
@@ -347,12 +349,14 @@ API endpoints reviewed:
 | `executionModelId` | Project | `GET/PUT /api/settings` | AI model ID for task execution |
 | `planningProvider` | Project | `GET/PUT /api/settings` | Planning model provider |
 | `planningModelId` | Project | `GET/PUT /api/settings` | Planning model id |
-| `planningFallbackProvider` | Project | `GET/PUT /api/settings` | Planning fallback provider |
-| `planningFallbackModelId` | Project | `GET/PUT /api/settings` | Planning fallback model id |
+| `planningFallbackProvider` | Workflow | `fn_workflow_settings` / workflow settings API | Planning fallback provider |
+| `planningFallbackModelId` | Workflow | `fn_workflow_settings` / workflow settings API | Planning fallback model id |
+| `planningFallbackThinkingLevel` | Workflow | `fn_workflow_settings` / workflow settings API | Planning fallback reasoning effort; unset inherits |
 | `validatorProvider` | Project | `GET/PUT /api/settings` | Validator model provider |
 | `validatorModelId` | Project | `GET/PUT /api/settings` | Validator model id |
-| `validatorFallbackProvider` | Project | `GET/PUT /api/settings` | Validator fallback provider |
-| `validatorFallbackModelId` | Project | `GET/PUT /api/settings` | Validator fallback model id |
+| `validatorFallbackProvider` | Workflow | `fn_workflow_settings` / workflow settings API | Validator fallback provider |
+| `validatorFallbackModelId` | Workflow | `fn_workflow_settings` / workflow settings API | Validator fallback model id |
+| `validatorFallbackThinkingLevel` | Workflow | `fn_workflow_settings` / workflow settings API | Validator fallback reasoning effort; unset inherits |
 | `modelPresets` | Project | `GET/PUT /api/settings` | Reusable model presets |
 | `autoSelectModelPreset` | Project | `GET/PUT /api/settings` | Auto-preset by task size |
 | `defaultPresetBySize` | Project | `GET/PUT /api/settings` | Size→preset mapping |
@@ -381,6 +385,7 @@ API endpoints reviewed:
 | `titleSummarizerModelId` | Project | `GET/PUT /api/settings` | Title model id |
 | `titleSummarizerFallbackProvider` | Project | `GET/PUT /api/settings` | Title fallback provider |
 | `titleSummarizerFallbackModelId` | Project | `GET/PUT /api/settings` | Title fallback model id |
+| `titleSummarizerFallbackThinkingLevel` | Project | `GET/PUT /api/settings` | Title fallback reasoning effort; unset inherits |
 | `scripts` | Project | `GET/PUT /api/settings` | Named script map |
 | `setupScript` | Project | `GET/PUT /api/settings` | Named setup script reference |
 | `insightExtractionEnabled` | Project | `GET/PUT /api/settings` | Insight extraction toggle |

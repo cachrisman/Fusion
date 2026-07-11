@@ -288,6 +288,9 @@ FUSI-003 adds a second transport (`--transport http`) alongside the stdio defaul
 
 FNXC:McpDocs 2026-07-10-23:59:
 FUSI-006 adds `fn_task_archive` to the base v1 tool set (fifteen → sixteen; twenty-two → twenty-three with `--allow-destructive`). It is base-tier, NOT destructive, because it is a reversible soft-move restorable via `fn_task_unarchive`. `fn_goal_archive` was evaluated and explicitly DEFERRED (no `fn_goal_list`/`fn_goal_show` base tools exist yet to discover goal IDs) — see the filed follow-up task.
+
+FNXC:McpDocs 2026-07-11-08:30:
+FUSI-017 adds the read half of the mission hierarchy to the base v1 tool set (sixteen → twenty-four; twenty-three → thirty-one with `--allow-destructive`): `fn_mission_list`, `fn_mission_show`, `fn_milestone_list`/`fn_milestone_show`, `fn_slice_list`/`fn_slice_show`, `fn_feature_list`/`fn_feature_show`. All eight are base-tier reads (no `--allow-destructive` gate) that dispatch to the same `MissionStore` reads the pi-extension `fn_mission_list`/`fn_mission_show` handlers use; the per-level milestone/slice/feature tools have no pi-extension precedent and are net-new here.
 -->
 
 Every other command on this page configures Fusion as an MCP **client**. `fn mcp serve` is the inverse: it starts Fusion as an MCP **server**, so an operator's own MCP client (Claude Desktop, Claude Code, or any other MCP-compatible client) can connect to Fusion and drive the board directly — creating and inspecting tasks, delegating work to agents, and managing workflows — without going through the dashboard UI. Two transports are available: **stdio** (default, local subprocess) and **streamable HTTP** (network-facing, added by FUSI-003 for remote MCP clients).
@@ -330,6 +333,14 @@ fn mcp serve [--project <name>] [--allow-destructive]
 - `fn_workflow_create` — create a custom workflow definition
 - `fn_workflow_update` — update a custom workflow definition
 - `fn_workflow_select` — assign a workflow to a task (`task_id` is required — there is no ambient task context on this server)
+
+**Missions**
+- `fn_mission_list` — list all missions with their current status (plus in-flight mission interview drafts by default; pass `includeDrafts: false` to omit them). Dispatches to `store.getMissionStore().listMissions()`, the same operation the pi-extension `fn_mission_list` tool uses.
+- `fn_mission_show` — show a single mission's full hierarchy (milestones → slices → features, plus linked goals). Dispatches to `getMissionWithHierarchy(id)`, the same operation the pi-extension `fn_mission_show` tool uses; a missing id returns an error result.
+- `fn_milestone_list` / `fn_slice_list` / `fn_feature_list` — list the milestones under a mission, the slices under a milestone, or the features under a slice. Dispatch to `MissionStore.listMilestones(missionId)` / `.listSlices(milestoneId)` / `.listFeatures(sliceId)` respectively. An unknown parent id returns an empty (not an error) result.
+- `fn_milestone_show` / `fn_slice_show` / `fn_feature_show` — show a single milestone, slice, or feature by ID (status, acceptance criteria/verification, parent/task links). Dispatch to `MissionStore.getMilestone(id)` / `.getSlice(id)` / `.getFeature(id)` respectively; a missing id returns an error result.
+
+All eight mission tools are base-tier reads — they do NOT require `--allow-destructive`. The per-level `fn_milestone_*`/`fn_slice_*`/`fn_feature_*` tools have no pi-extension precedent; they exist so every hierarchy level is independently discoverable from an external MCP client without always walking the full mission tree via `fn_mission_show`. These read tools were added to unblock the create/update, settings, and project follow-up tools that need mission-hierarchy IDs to operate on.
 
 ### Destructive tools (`--allow-destructive`, off by default)
 
@@ -409,7 +420,7 @@ Add `"--allow-destructive"` to `args` to also opt into the destructive tool tier
 }
 ```
 
-Omit `--project` (and its argument) to have Fusion auto-detect the project from the working directory the client launches the process in. Expected outcome (no `--allow-destructive`): the client lists the sixteen curated Fusion tools above and can call them directly to manage the board. Expected outcome (with `--allow-destructive`): the client lists those sixteen tools **plus** `fn_task_delete`, `fn_agent_delete`, `fn_workflow_delete`, `fn_mission_delete`, `fn_milestone_delete`, `fn_slice_delete`, and `fn_feature_delete` — twenty-three tools total.
+Omit `--project` (and its argument) to have Fusion auto-detect the project from the working directory the client launches the process in. Expected outcome (no `--allow-destructive`): the client lists the twenty-four curated Fusion tools above and can call them directly to manage the board. Expected outcome (with `--allow-destructive`): the client lists those twenty-four tools **plus** `fn_task_delete`, `fn_agent_delete`, `fn_workflow_delete`, `fn_mission_delete`, `fn_milestone_delete`, `fn_slice_delete`, and `fn_feature_delete` — thirty-one tools total.
 
 ### Connecting a remote client over HTTP
 

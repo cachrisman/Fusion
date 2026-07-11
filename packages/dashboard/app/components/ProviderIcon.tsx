@@ -1,5 +1,7 @@
 import { Cpu } from "lucide-react";
 
+import { inferProviderIconKey } from "../utils/providerIconKey";
+
 function LlamaCppIcon({ size, color, label = "llama.cpp" }: { size: number; color: string; label?: string }) {
   return <Cpu size={size} color={color} aria-label={label} data-testid="llama-cpp-icon" />;
 }
@@ -829,7 +831,14 @@ const providerConfig: Record<
 
 export function ProviderIcon({ provider, size = "sm" }: ProviderIconProps) {
   const normalizedProvider = provider.toLowerCase();
-  const config = providerConfig[normalizedProvider];
+  const directConfig = providerConfig[normalizedProvider];
+  /*
+  FNXC:ProviderIcons 2026-07-10-00:00:
+  FN-7801: dashboard surfaces can pass model-id-shaped provider strings such as grok-4.5 or grok-cli/grok-4-fast, which strict providerConfig lookups miss.
+  Fall through to the shared inferProviderIconKey normalizer before the Cpu default so Grok/xAI and other provider families keep their brand icons, while exact keys and genuinely unknown providers retain existing behavior.
+  */
+  const inferredConfig = directConfig ? undefined : providerConfig[inferProviderIconKey(provider)];
+  const config = directConfig ?? inferredConfig;
   const IconComponent = config?.component;
   const color = config?.color ?? "var(--text-muted)";
   const label = config?.label;

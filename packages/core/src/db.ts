@@ -194,7 +194,7 @@ export function isFts5CorruptionError(error: unknown): boolean {
 
 // ── Schema Definition ────────────────────────────────────────────────
 
-const SCHEMA_VERSION = 139;
+const SCHEMA_VERSION = 141;
 
 const TASKS_FTS_AUTOMERGE = 8;
 const TASKS_FTS_CRISISMERGE = 16;
@@ -1531,6 +1531,7 @@ export const MIGRATION_ONLY_TABLE_SCHEMAS: Record<string, Record<string, string>
     projectId: "TEXT",
     modelProvider: "TEXT",
     modelId: "TEXT",
+    thinkingLevel: "TEXT",
     createdAt: "TEXT NOT NULL",
     updatedAt: "TEXT NOT NULL",
     cliSessionFile: "TEXT",
@@ -5651,6 +5652,34 @@ export class Database {
        */
       this.applyMigration(139, () => {
         this.addColumnIfMissing("tasks", "approvedPlanFingerprint", "TEXT");
+      });
+    }
+
+    if (version < 140) {
+      /*
+       * FNXC:Chat-ThinkingLevel 2026-07-10-00:00:
+       * Chat sessions store an optional per-session reasoning-effort level so model-loop chats can pass it as the engine `defaultThinkingLevel`; NULL means inherit the resolved project/global default.
+       */
+      this.applyMigration(140, () => {
+        if (this.hasTable("chat_sessions")) {
+          this.addColumnIfMissing("chat_sessions", "thinkingLevel", "TEXT");
+        }
+      });
+    }
+
+    if (version < 141) {
+      /*
+       * FNXC:Chat-ThinkingLevelRepair 2026-07-11-03:40:
+       * Some live project databases reached schemaVersion 140 without the
+       * chat_sessions.thinkingLevel column, which made POST /api/chat/sessions
+       * fail with "table chat_sessions has no column named thinkingLevel".
+       * Re-run the additive column repair under a fresh schema version so
+       * already-v140 databases converge instead of being skipped forever.
+       */
+      this.applyMigration(141, () => {
+        if (this.hasTable("chat_sessions")) {
+          this.addColumnIfMissing("chat_sessions", "thinkingLevel", "TEXT");
+        }
       });
     }
 

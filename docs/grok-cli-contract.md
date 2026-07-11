@@ -1,309 +1,189 @@
-# Grok CLI Contract (FN-7722)
+# Grok CLI Contract (FN-7790, updated by FN-7796)
 
-Date: 2026-07-09
+Date: 2026-07-10
 
 <!--
-FNXC:GrokCli 2026-07-09-00:00:
-FN-7715 shipped GrokRuntimeAdapter.promptWithFallback as an intentional no-op,
-justified by an FNXC comment asserting "no documented non-interactive
-prompt/stream subcommand" for the `grok` CLI. FN-7722 (this doc) corrects that
-assumption: upstream grok-cli DOES document and implement a non-interactive
-`grok --prompt <text> --format json` NDJSON event stream
-(src/headless/output.ts's `createHeadlessJsonlEmitter`), and this task lands a
-real streaming GrokRuntimeAdapter against that verified contract. See
-"Decision" below.
+FNXC:GrokCli 2026-07-10-12:58:
+FN-7796 supersedes FN-7790's streaming assumption. Operators run xAI's official Grok Build TUI (`grok 0.2.93`); its `--output-format streaming-json` path intermittently ends `stopReason:"Cancelled"` with zero `text` events, so Fusion's reliable headless prompt path invokes `grok -p <prompt> --output-format json` and parses the single `{text,stopReason,sessionId,requestId,thought}` object. A non-`EndTurn` stop reason with empty text is a concrete diagnostic, never a silent no-message response.
 -->
 
-## Research method
+## Ground truth
 
-- `fn_web_fetch` against the canonical upstream repository
-  (https://github.com/superagent-ai/grok-cli), specifically:
-  - `README.md` (headless-mode overview, feature summary).
-  - `src/index.ts` (commander CLI argument parsing — the exact flag
-    spellings and headless dispatch).
-  - `src/headless/output.ts` (the actual NDJSON event emitter — the
-    authoritative schema source, not just docs prose).
-  - `src/headless/output.test.ts` (fixture-level confirmation of the emitted
-    JSONL shapes, used as ground truth for this plugin's own fixture tests).
-- No live `grok` binary was invoked; no field name or flag spelling in this
-  document is guessed — every claim below traces to one of the four files
-  above. Raw captured research (queries + verbatim schema) is preserved as
-  this task's `research` task document (`fn_task_document_read` key
-  `research` on FN-7722).
+Fusion shells out to an **operator-installed** `grok` binary. The binary is not downloaded or bundled by Fusion, so the authoritative contract is the installed xAI CLI's own help/version output plus live execution on an authenticated machine.
 
-## Confirmed non-interactive invocation
+External integration evidence:
+
+- Canonical upstream: xAI official Grok CLI / Grok Build TUI, surfaced by the installed binary as `grok 0.2.93 (f00f96316d4b)`.
+- Docs/homepage: https://grok.com/, https://docs.x.ai/, and `grok --help` / `grok agent --help` for exact flags.
+- Release/download: operator-installed; Fusion resolves `grok` from PATH or `grokCliBinaryPath` and does not bundle a release artifact.
+- Binary name: `grok`.
+- Checksum: `upstream-pending-verification` because Fusion does not pin or download the operator's binary.
+
+The previously documented https://github.com/superagent-ai/grok-cli contract is a different product that happens to use the same binary name. Its `grok --prompt <text> --format json` invocation is not accepted by xAI's CLI.
+
+## Failures that shaped the contract
+
+### Wrong-product flags (FN-7790)
+
+The old adapter invocation fails against the real xAI binary:
 
 ```bash
-grok --prompt "<text>" --format json
-# short flags:
-grok -p "<text>" --format json
+grok --prompt "say hello" --format json
 ```
 
-- `-p, --prompt <prompt>` — run a single prompt headlessly, then exit.
-- `--format <format>` — headless output format, `text` (default) or `json`;
-  invalid values are rejected by commander's `InvalidArgumentError`
-  (`parseHeadlessOutputFormat`/`isHeadlessOutputFormat` in `src/index.ts`).
-- Useful companion flags confirmed in the same `program.option(...)` chain:
-  `-d, --directory <dir>` (cwd), `-m, --model <model>`, `-s, --session <id>`
-  (resume a saved session, or `latest`), `-k, --api-key <key>` (inline key).
-- `--format json` output is **newline-delimited JSON (NDJSON/JSONL)** — one
-  JSON object per line — not a single JSON document. This is directly
-  confirmed by `createHeadlessJsonlEmitter()`'s `jsonLine()` helper in
-  `src/headless/output.ts`, which appends `\n` after each `JSON.stringify`.
+Observed result:
 
-## Verified NDJSON event schema (verbatim)
+```text
+exit 2
+stdout: <empty>
+stderr:
+error: unexpected argument '--prompt' found
 
-Source: `HeadlessJsonEvent` union type in `src/headless/output.ts`.
+  tip: a similar argument exists: '--prompt-file'
+
+Usage: grok --prompt-file <PATH> [PROMPT]
+```
+
+Because no renderable assistant text is produced, Fusion surfaced a blank/no-message assistant response.
+
+### Streaming JSON cancellation with zero text (FN-7796)
+
+FN-7790 correctly switched to xAI's real flags and streaming event union, but live triage found `--output-format streaming-json` is intermittently unreliable. The same authenticated `grok 0.2.93` binary sometimes emits only reasoning events, then ends with `stopReason:"Cancelled"` and no `text` event while still exiting 0 with empty stderr.
+
+Live-captured shape:
+
+```jsonl
+{"type":"thought","data":"..."}
+{"type":"thought","data":"..."}
+{"type":"end","stopReason":"Cancelled","sessionId":"...","requestId":"..."}
+```
+
+The adapter previously saw parsed events and a successful close, accumulated empty assistant text, set no error, and produced a silent no-message bubble. The reliable replacement is the single-object JSON contract below.
+
+## Confirmed non-interactive invocation used by Fusion
+
+Use xAI Grok Build TUI's single-turn prompt mode with **single-object JSON**:
+
+```bash
+grok -p "<text>" --output-format json
+# equivalent long prompt flag:
+grok --single "<text>" --output-format json
+```
+
+Supported companion flags used by Fusion:
+
+- `-p, --single <PROMPT>` — run a single prompt, print the response, and exit. This does not require interactive stdin.
+- `--output-format <plain|json|streaming-json>` — Fusion uses `json` for reliable headless prompts.
+- `-m, --model <MODEL>` — optional concrete model id. Fusion omits this for the model-less `grok/default` Runtime-mode path.
+- `--cwd <CWD>` — optional working directory. This replaces the wrong-product `--directory` flag.
+
+Other observed flags include `--prompt-file <PATH>`, `--prompt-json <JSON>`, `-s/--session-id <UUID>`, `--sandbox <PROFILE>`, `--system-prompt-override <PROMPT>`, and `--max-turns <N>`, but Fusion's adapter does not currently use them.
+
+## Reliable JSON response schema
+
+`--output-format json` emits one final JSON object rather than an NDJSON stream. Observed shape:
 
 ```ts
-type HeadlessJsonEvent =
-  | { type: "step_start"; sessionID?: string; stepNumber: number; timestamp: number }
-  | { type: "text"; sessionID?: string; stepNumber: number; text: string; timestamp: number }
-  | {
-      type: "tool_use";
-      sessionID?: string;
-      stepNumber: number;
-      timestamp: number;
-      toolCall: ToolCall;
-      toolResult: ToolResult;
-      timing?: { startedAt?: number; finishedAt?: number; durationMs?: number };
-    }
-  | {
-      type: "step_finish";
-      sessionID?: string;
-      stepNumber: number;
-      timestamp: number;
-      finishReason: string;
-      usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number; costUsdTicks?: number };
-    }
-  | { type: "error"; sessionID?: string; message: string; timestamp: number };
+interface GrokJsonResponse {
+  text?: string;
+  stopReason?: string;
+  sessionId?: string;
+  requestId?: string;
+  thought?: string;
+}
 ```
 
-Notes:
+Example:
 
-- `sessionID` appears on every event type when a session id is available
-  (`agent.getSessionId()`); it is simply absent from the JSON object
-  otherwise (not `null`).
-- `text` events are per-step, buffered assistant content — one `text` event
-  per step carrying the accumulated text for that step, flushed either right
-  before a tool-triggering `step_finish` or inline with a tool-less
-  `step_finish`.
-- **No `thinking`/`reasoning` NDJSON event exists.** The underlying
-  `StreamChunk` union used internally does carry a `"reasoning"` chunk type,
-  but `createHeadlessJsonlEmitter().consumeChunk()` explicitly no-ops on it
-  (`case "reasoning": break;` in `src/headless/output.ts`) — reasoning
-  content is never surfaced through `--format json`. This is a **confirmed
-  absence**, not `upstream-pending-verification`: the Grok streaming adapter
-  therefore drives `onText` only; there is no `onThinking` signal to bridge
-  for this CLI path today.
-- There is **no explicit terminal `done`/`result` event type**. A prompt run
-  can contain multiple `step_start`/`step_finish` pairs (multi-round tool
-  use); the authoritative "the run is over" signal is the headless process's
-  stdout stream ending (readline `close`) / subprocess exit, mirroring how
-  the Droid CLI adapter treats subprocess `close` as terminal. `error` events
-  (`{ type: "error", message, timestamp }`) can also appear inline without
-  necessarily ending the process.
-- A **fatal, pre-JSON failure** (e.g. missing API key) is not a JSON line at
-  all: `src/index.ts`'s `requireApiKey()` writes a plain `console.error(...)`
-  line to stderr and calls `process.exit(1)` before any NDJSON is emitted.
-  Consumers must therefore also treat a non-zero exit with no JSON output as
-  a distinct failure mode from a well-formed `error` event.
+```json
+{
+  "text": "Hello",
+  "stopReason": "EndTurn",
+  "sessionId": "019f4d81-8fb1-7f11-98ca-5ae00654b518",
+  "requestId": "bb7952e2-f1bc-4574-b409-5cc568817fe5",
+  "thought": "The user wants me to say hello in one word..."
+}
+```
 
-## Auth / readiness
+Mapping in Fusion:
 
-- **The `grok` CLI owns authentication end-to-end for CLI-routed execution.**
-  `runHeadless()` in `src/index.ts` is only reached via
-  `requireApiKey(config.apiKey)`, which resolves the key from (in order via
-  `resolveConfig`/`getApiKey()`): `-k/--api-key` flag, `GROK_API_KEY` env var,
-  project `.env`, or `~/.grok/user-settings.json`'s `apiKey` field. If none
-  resolve, the CLI itself exits 1 with an actionable error — Fusion does not
-  need to pass, see, or validate a key for this path to work, as long as the
-  operator's `grok` install already has one configured by any of those
-  methods.
-- **Auth implication for this task:** because CLI-routed model selections let
-  the `grok` binary own both auth and inference, the direct-endpoint
-  `GROK_API_KEY` Fusion-visibility requirement established by FN-7711
-  (built-in `xai`/`openai-completions` provider) and FN-7714 (hydrating
-  `GROK_API_KEY` from `~/.grok/user-settings.json` when the env var is unset)
-  becomes **unnecessary for CLI-routed selections specifically**. It remains
-  necessary and unchanged for the direct xAI OpenAI-compatible path, which
-  stays the default (see "What stays unchanged" below).
-- This mirrors FN-7716's separate finding that Grok CLI *readiness* (probe/
-  auth-status surfacing) does not require Fusion to see a key either — that
-  surface (`probe.ts`, `register-auth-routes.ts`,
-  `GrokCliProviderCard.tsx`) is out of scope for this task and is not
-  modified here.
+- `thought` → `onThinking(thought)` when non-empty.
+- `text` → `onText(text)` and accumulated assistant content when non-empty.
+- `sessionId` → `session.sessionId` when present.
+- subprocess `close` remains the authoritative promise resolution point because it carries exit status/stderr diagnostics.
 
-## Wiring (resolved — FN-7725, extended by FN-7753/FN-7758/FN-7761)
+Live reliability evidence from FN-7796: `grok -p "say hello in one word" --output-format json` returned real text with `stopReason:"EndTurn"` on 4/4 direct runs, and the built `GrokRuntimeAdapter` carried real text through `onText`/persisted assistant content on 3/3 end-to-end runs against the real binary.
 
-<!--
-FNXC:GrokCli 2026-07-09-00:00:
-FN-7725 requirement: close the wiring gap below by making GrokRuntimeAdapter
-reachable through a real, exercised, additive/opt-in path, decision-first
-between option (a) formalizing the agent Runtime-mode hint path vs option (b)
-a new "prefer CLI runtime" settings toggle deriving the hint from a
-grok-cli/* model selection. Decision: option (a). Direct xAI endpoint stays
-default and unchanged.
--->
+## Streaming JSON event schema (not the primary prompt path)
 
-**Decision: option (a) — formalize, document, and test the existing agent
-Runtime-mode picker path. Do NOT add a new settings toggle (option (b)).**
-FN-7753 later closed the deferred no-key model-selection fallback without adding
-that rejected UI toggle: the session seam derives the same runtime hint
-automatically only when the direct endpoint cannot work because no Fusion-visible
-GROK_API_KEY resolves.
+`--output-format streaming-json` emits one JSON object per line:
 
-**Explicit trigger:** an agent's `runtimeConfig.runtimeHint === "grok"`, set today
-via the dashboard's agent **Runtime Source → Runtime** picker
-(`NewAgentDialog.tsx` / `AgentDetailView.tsx`), which is populated from
-`GET /api/plugins/runtimes` (already generic — surfaces every registered
-plugin runtime, including the bundled Grok Runtime plugin's `runtimeId:
-"grok"`, with no Grok-specific code required).
+```ts
+type GrokStreamingJsonEvent =
+  | { type: "thought"; data: string }
+  | { type: "text"; data: string }
+  | { type: "end"; stopReason?: string; sessionId?: string; requestId?: string };
+```
 
-**Automatic no-key fallback (FN-7753/FN-7758/FN-7761):** when `createResolvedAgentSession()` sees
-all of the following, it derives the same effective `runtimeHint: "grok"` before
-calling `resolveRuntime()`:
+Successful captured tail:
 
-1. no explicit runtime hint was supplied (explicit hints, including `"pi"`,
-   always win);
-2. the resolved primary/default provider is `grok-cli`, or the configured
-   fallback provider is `grok-cli`;
-3. Fusion cannot see a non-empty `GROK_API_KEY` either in the environment or in
-   `~/.grok/user-settings.json`'s `apiKey` field; and
-4. the bundled Grok Runtime plugin has registered runtime id `"grok"`.
+```jsonl
+{"type":"thought","data":" one"}
+{"type":"thought","data":"-"}
+{"type":"thought","data":"word"}
+{"type":"thought","data":" greeting"}
+{"type":"thought","data":"."}
+{"type":"text","data":"Hello"}
+{"type":"text","data":"!"}
+{"type":"end","stopReason":"EndTurn","sessionId":"019f4d1e-2582-70e0-a174-c8774782ab01","requestId":"2233f1dc-e9ad-4ae4-8221-caa6afade07f"}
+```
 
-<!--
-FNXC:GrokCliRouting 2026-07-09-23:05:
-FN-7761 closes the packaged-host availability gap. Packaged `fn serve`, `fn daemon`, and `fn dashboard` now eagerly ensure the bundled `fusion-plugin-grok-runtime` before `loadAllPlugins()`, so fresh installs expose runtime id `"grok"` to the shared session seam without requiring the operator to first open plugin settings. If the runtime still cannot be loaded, Fusion fails before pi session creation with a dual-remediation error: install/enable the Grok CLI runtime plugin, or set `GROK_API_KEY` to use the direct xAI endpoint.
--->
+Fusion does not use streaming-json as the primary headless prompt path because it intermittently produces the cancelled/no-text shape documented above. Parser support remains only to keep diagnostics and regression tests concrete if captured streaming output appears in buffered stdout.
 
-FN-7758 also requires dashboard Chat/QuickChat and room responders to forward
-the configured default provider/model into this same session seam when a send has
-no explicit model and no bound agent runtime model. That keeps the no-key routing
-invariant identical across executor, reviewer/validator/merger-adjacent, single
-chat, QuickChat, and room responder surfaces instead of letting model-less chat
-bypass the auto-derive by omitting `defaultProvider`.
+## Other output formats
 
-If a Fusion-visible key exists, the direct xAI OpenAI-compatible endpoint remains
-the default. If the Grok runtime is not registered or cannot be loaded in the
-no-visible-key `grok-cli` case, Fusion no longer leaves the session on the
-existing PI/direct path because that path produces the misleading missing-key
-error. Instead it raises an actionable error that names both supported recovery
-paths: install/enable the Grok CLI runtime plugin so the logged-in `grok` CLI
-owns auth, or set `GROK_API_KEY` so the direct xAI endpoint can authenticate.
+`--output-format plain` prints renderable response text, but does not expose `sessionId`, `requestId`, `stopReason`, or `thought`.
 
-**Exact seam:** `packages/engine/src/agent-session-helpers.ts`'s
-`extractRuntimeHint(runtimeConfig)` reads that hint from the assigned agent's
-`runtimeConfig` and threads it, as `runtimeHint`, into
-`packages/engine/src/runtime-resolution.ts`'s `resolveRuntime()` — which is
-totally runtime-agnostic: when the hint matches a registered plugin
-`runtimeId`, `resolvePluginRuntime()` calls that plugin's `runtime.factory`
-(the Grok plugin's factory returns `new GrokRuntimeAdapter()`,
-`plugins/fusion-plugin-grok-runtime/src/index.ts`) and the resolved adapter
-becomes the session's runtime. This same generic chain already carries
-`"hermes"` and `"droid"` runtime hints end-to-end (see
-`hermes-runtime-integration.test.ts`, `droid-runtime-e2e.test.ts`) — Grok's
-plugin registration alone was sufficient for the chain to reach it; **no
-engine or dashboard code changed for this task**, because the generic
-Runtime-mode picker → `extractRuntimeHint` → `resolveRuntime` →
-`resolvePluginRuntime` → plugin `factory` chain was already correct and
-exercised for other plugin runtimes. FN-7725 formalizes this as the *decided*
-Grok wiring, adds `packages/engine/src/__tests__/grok-runtime-routing.test.ts`
-proving the chain specifically resolves `GrokRuntimeAdapter` (id `"grok"`)
-and drives its `onText` streaming seam via a faked spawn (see
-`runtime-adapter.ts`'s injectable `spawn` option; no live `grok` binary), and
-records the decision here plus in `plugins/fusion-plugin-grok-runtime/README.md`.
+## Model discovery
 
-**Why option (a), not (b):** option (b) (an opt-in "prefer CLI runtime"
-setting deriving `runtimeHint: "grok"` from a `grok-cli/*` model selection)
-would add a new `Settings` field, defaulting/resolution logic, and a
-SettingsModal UI toggle (desktop + mobile) — net-new surface area for a path
-that, on inspection, was **already fully wired generically** by the existing
-Runtime-mode picker. Per the Decision guidance's preference for "the smaller,
-additive change," formalizing + testing + documenting the already-working
-path is lower risk and closes the actual gap (an *exercised* path, not just
-an implemented adapter) without adding new user-facing config surface.
+`grok models` is plain text, not JSON. Observed shape:
 
-**Model plumbing (FN-7753/FN-7758/FN-7761):** for the automatic no-key fallback, the selected
-`grok-cli/*` model id is preserved through `AgentRuntimeOptions.defaultModelId`
-(or promoted from `fallbackModelId` when the fallback provider is the grok-cli
-selection), normalized by stripping a leading `grok-cli/` (or `grok/`) prefix,
-and passed to the CLI as `grok --model <id>` alongside `--prompt` and
-`--format json`. Runtime-mode remains model-agnostic when chosen explicitly from
-the dashboard; that no-model path still uses the adapter's historical
-`"grok/default"` session fallback and omits `--model`.
+```text
+You are logged in with grok.com.
 
-**Why the direct xAI endpoint stays default:** a `grok-cli/*` **model** selection
-continues to route through the direct xAI OpenAI-compatible endpoint
-(FN-7711/FN-7714, `packages/core/src/grok-provider.ts`, `packages/engine/src/pi.ts`)
-whenever Fusion can see a key. FN-7753 changes only the failing no-visible-key
-case, where the direct path would otherwise hard-fail even though the installed
-CLI may be authenticated by a source Fusion cannot inspect (project `.env`,
-`grok -k`, OAuth/login token store, sandbox secrets, etc.).
+Default model: grok-4.5
 
-## Decision
+Available models:
+  * grok-4.5 (default)
+  - grok-composer-2.5-fast
+```
 
-**Route Grok execution through the CLI: YES, as a scoped, additive
-`GrokRuntimeAdapter` implementation.**
+Fusion parses the bullet list conservatively and exposes ids under provider `grok-cli` when the `useGrokCli` toggle is enabled.
 
-Rationale:
+## Auth and readiness
 
-- The non-interactive contract is fully pinned to primary source code
-  (`src/index.ts` CLI parsing + `src/headless/output.ts` emitter +
-  `src/headless/output.test.ts` fixtures), not just README prose — this
-  clears the External Integration Evidence bar and the "testable from
-  fixture lines without a live binary" bar from the task mission — the
-  parser can be fixture-tested exactly like the Droid plugin's
-  `stream-parser.ts`, with no live-binary dependency in tests.
-- The event schema is simple (`step_start` / `text` / `tool_use` /
-  `step_finish` / `error`) and text-only for this scoped adapter (no
-  `thinking` event exists to bridge), so the implementation stays narrow: a
-  resilient NDJSON line parser plus an `onText` bridge, deliberately leaving
-  tool-call/break-early bridging as a documented follow-up (the Droid
-  adapter's much larger `provider.ts` is the effort ceiling, not the target
-  shape).
-- It is fully reversible: the adapter is reachable via either an explicit
-  `runtimeHint === "grok"` or FN-7753's narrow no-visible-key `grok-cli`
-  fallback. The direct endpoint remains the key-visible default.
+The CLI owns authentication for CLI-routed execution. Fusion's readiness probe uses `grok --version`; a passing probe proves only that a compatible-looking binary exists, not that the prompt path is authenticated or serviceable. The prompt path is proven by a real `grok -p ... --output-format json` run.
 
-## What stays unchanged
+Fusion-visible `GROK_API_KEY` remains relevant for the direct xAI OpenAI-compatible endpoint. For CLI-routed sessions, Fusion does not need to see a key as long as the operator-installed CLI is authenticated by its own supported mechanism.
 
-- The **direct xAI OpenAI-compatible streaming path** (base URL
-  `https://api.x.ai/v1`, api type `openai-completions`, `GROK_API_KEY`
-  sourced per FN-7711/FN-7714) remains the default when a Fusion-visible key
-  exists. FN-7753 adds a read-only key-visibility check in
-  `packages/core/src/grok-provider.ts` and derives CLI routing only when no
-  such key is visible and the Grok runtime is registered.
-- FN-7716's probe/auth-readiness surface (`probe.ts`,
-  `register-auth-routes.ts`, `GrokCliProviderCard.tsx`) is untouched by this
-  task.
-- End-to-end routing was out of scope for FN-7722 and is resolved by
-  FN-7725 (see "Wiring" above): decision option (a), formalizing the
-  existing agent Runtime-mode picker path. No settings toggle was added.
+## Runtime routing
 
-## Follow-ups filed from this task
+The Grok runtime adapter is reached when:
 
-See the task's `fn_task_create` calls (linked from FN-7722) for:
+1. an agent explicitly sets `runtimeConfig.runtimeHint === "grok"`; or
+2. the FN-7753/FN-7758 no-visible-key fallback derives the same runtime hint for a `grok-cli/*` default/fallback provider selection and the bundled Grok Runtime plugin is registered.
 
-1. ~~End-to-end routing wiring~~ — **closed by FN-7725** (see "Wiring"
-   above): the agent Runtime-mode picker path was formalized, documented,
-   and covered by `packages/engine/src/__tests__/grok-runtime-routing.test.ts`.
-2. ~~Full tool-call bridging for `tool_use` NDJSON events~~ — **closed by
-   FN-7724**: `GrokRuntimeAdapter` now bridges `tool_use` into
-   `onToolStart`/`onToolEnd` (no Grok→pi tool-name mapping was added — the
-   verified schema does not pin grok-cli's tool-name vocabulary, so
-   names/args pass through unchanged). Break-early on `step_finish` was
-   deliberately NOT adopted: this doc's own "Verified NDJSON event schema"
-   notes above establish `step_finish` is a per-step boundary (a run can
-   contain multiple `step_start`/`step_finish` pairs), not the run
-   terminal — the adapter's terminal signal remains subprocess
-   `close`/`error`, unchanged from FN-7722. See
-   `plugins/fusion-plugin-grok-runtime/README.md`'s "Tool execution
-   bridging (FN-7724)" section.
-3. ~~Preserving a specific `grok-cli/*` model selection when routing through
-   the CLI runtime~~ — **closed by FN-7753** for the automatic no-visible-key
-   fallback: `createResolvedAgentSession()` derives runtime hint `"grok"` only
-   when no explicit hint is set, provider is `grok-cli`, no Fusion-visible
-   `GROK_API_KEY`/user-settings `apiKey` resolves, and runtime id `"grok"` is
-   registered; the selected model is passed to the CLI via `--model <id>`.
-   Explicit Runtime-mode remains model-agnostic by design.
+The selected `grok-cli/<id>` or `grok/<id>` model is normalized to `<id>` and passed to the CLI as `-m <id>`. The explicit no-model Runtime-mode path keeps `grok/default` and omits `-m`.
+
+## Diagnostics and empty-output invariant
+
+The adapter preserves the resolve-never-reject runtime contract while surfacing concrete diagnostics:
+
+- spawn failure → `session.state.errorMessage` and diagnostic `onText`.
+- non-zero subprocess close with no text → stderr/exit diagnostic.
+- code-0 close with no parseable JSON response → wrong-binary/interactive-EOF diagnostic.
+- parseable response with no text and `stopReason !== "EndTurn"` → stop-reason diagnostic, e.g. `Grok CLI ended with stopReason Cancelled and produced no assistant text.`
+- parseable `EndTurn` response with no assistant text → legitimate silent response, not a diagnostic.
+- text emitted before a noisy/non-zero close → keep the assistant text and avoid replacing it with an error.
+
+This invariant prevents the original blank/no-message symptom while still allowing genuinely empty model turns.

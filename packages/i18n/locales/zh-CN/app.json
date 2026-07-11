@@ -1386,7 +1386,8 @@
     "untitledSession": "无标题",
     "workingStatus": "处理中……",
     "you": "你",
-    "contextWindowAria": "Estimated {{used}} of {{total}} context tokens"
+    "contextWindowAria": "Estimated {{used}} of {{total}} context tokens",
+    "noMessage": ""
   },
   "chatRooms": {
     "error": {
@@ -2281,7 +2282,9 @@
     "closeLightbox": "Close artifact preview",
     "expandArtifact": "Expand {{title}}",
     "expandArtifactHint": "Click to expand",
-    "lightboxLabel": "Artifact media preview"
+    "lightboxLabel": "Artifact media preview",
+    "readOnly": "",
+    "readOnlyHint": ""
   },
   "droidCli": {
     "active": "活跃",
@@ -3422,6 +3425,7 @@
     "dreamProcessingFailed": "运行梦境处理失败",
     "dreamsEnabledHint": "将每日笔记转换为 DREAMS.md，并将可复用的经验提升到 MEMORY.md。",
     "dreamsEnabledLabel": "从每日记忆中处理梦境",
+    "dreamsEnabledTooltip": "每日笔记会被提炼到 DREAMS.md，可复用的经验会被提升到 MEMORY.md。",
     "dreamsScheduleHint": "梦境处理的 Cron 表达式。",
     "dreamsScheduleLabel": "梦境计划",
     "editorDefaultDescription": "编辑所选记忆文件。",
@@ -6837,6 +6841,7 @@
     "githubCliAuthBody": "GitHub CLI is installed but not authenticated on the Fusion host. Run this command in the environment where Fusion is running, then return here and continue.",
     "githubCliAuthTitle": "Authenticate GitHub CLI",
     "githubCliInstallBody": "Fusion could not find `gh` on the host running Fusion. Install GitHub CLI there to import issues and track pull requests with CLI authentication.",
+    "githubCliInstallShowInstructions": "显示安装说明",
     "githubCliInstallLink": "Open GitHub CLI releases",
     "githubCliInstallLinux": "Linux: install `gh` with your distribution package manager or the packages from cli.github.com.",
     "githubCliInstallMac": "macOS: `brew install gh` or download the installer from GitHub CLI releases.",
@@ -6916,12 +6921,14 @@
     "projectRegisteredSuccess": "您的项目已成功注册。",
     "projectRequired": "在可以使用第一个任务操作之前，需要先有一个项目。",
     "projectSelected": "已选择项目——任务创建和导入功能已可用。",
+    "projectStepContext": "第 3 步（共 5 步）— 项目 · Fusion 设置",
     "projectSetupDescription": "在创建或导入任务之前，请选择您的第一个项目。您可以注册现有的本地目录，或通过设置向导克隆 GitHub 仓库 URL。",
     "providersConnectedSummary": "✓ {{total}} 个提供商中已连接 {{connected}} 个",
     "providersSkippedSummary_one_one": "",
     "providersSkippedSummary_one_other": "",
     "providersSkippedSummary_other_one": "",
     "providersSkippedSummary_other_other": "",
+    "quickStartAllConnected": "所有快速开始提供商均已连接。",
     "quickStartProviders": "快速启动提供商",
     "readinessAiProviderConnected": "{{name}} 已连接——AI 代理可以处理任务",
     "readinessAiProviderLabel": "AI 提供商",
@@ -6953,6 +6960,7 @@
     "retry": "重试",
     "reviewStep": "查看{{label}}",
     "runtimeNode": "运行时节点",
+    "runtimeNodeHint": "运行时节点是运行此项目任务的机器。\"本地节点\"即这台电脑；选择远程节点可在其他地方运行任务。",
     "savedProfileButFailedToActivate": "配置文件已保存但激活失败",
     "saveKey": "保存",
     "saveRemoteServer": "保存远程服务器",

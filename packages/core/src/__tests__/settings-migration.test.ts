@@ -180,8 +180,16 @@ describe("settings hard-move migration (U4)", () => {
     expect(DEFAULT_PROJECT_SETTINGS).toHaveProperty("titleSummarizerModelId", undefined);
     expect(DEFAULT_PROJECT_SETTINGS).toHaveProperty("titleSummarizerFallbackProvider", undefined);
     expect(DEFAULT_PROJECT_SETTINGS).toHaveProperty("titleSummarizerFallbackModelId", undefined);
-    // 26 keys after removing buildTimeoutMs plus the summarizer lane from the moved catalog.
-    expect(MOVED_SETTINGS_KEYS.length).toBe(26);
+    /*
+     * FNXC:Settings-ThinkingLevel 2026-07-10-12:30:
+     * 31 keys after removing buildTimeoutMs plus the summarizer lane from the moved catalog, plus the
+     * primary-lane thinking companions (executionThinkingLevel/planningThinkingLevel/validatorThinkingLevel,
+     * FN-7770-7772) and the fallback-lane thinking companions (planningFallbackThinkingLevel/
+     * validatorFallbackThinkingLevel, FN-7793) declared alongside their provider/model pairs above.
+     * Review FN-7795 found this count stale at 26 (pre-existing drift from earlier thinking-level tasks,
+     * not introduced by FN-7795) and corrected it here so `pnpm test`/`verify:fast` stay green.
+     */
+    expect(MOVED_SETTINGS_KEYS.length).toBe(31);
   });
 
   it("workflow-native triage policy settings are excluded from moved/project schemas", () => {
@@ -190,7 +198,7 @@ describe("settings hard-move migration (U4)", () => {
       expect(PROJECT_SETTINGS_KEYS, `${setting.id} must not be a project schema key`).not.toContain(setting.id);
       expect(DEFAULT_PROJECT_SETTINGS as Record<string, unknown>).not.toHaveProperty(setting.id);
     }
-    expect(MOVED_SETTINGS_KEYS.length).toBe(26);
+    expect(MOVED_SETTINGS_KEYS.length).toBe(31);
   });
 
   it("fresh project post-init: marker set, effective values equal declaration defaults, no moved key in PROJECT_SETTINGS_KEYS", async () => {

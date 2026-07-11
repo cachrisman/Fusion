@@ -60,6 +60,15 @@
  * stderr audit convention, no second gate and no new approval hook (see the
  * FNXC:McpServer 2026-07-10-23:45 comment above {@link DESTRUCTIVE_TOOL_TIER}
  * for the recorded design decision).
+ *
+ * FNXC:McpServer 2026-07-11-08:30:
+ * FUSI-017 adds the read half of the mission hierarchy to the BASE registry
+ * (base tool count fifteen → sixteen → twenty-four; combined with
+ * --allow-destructive: twenty-three → thirty-one): `fn_mission_list`,
+ * `fn_mission_show`, `fn_milestone_list`/`fn_milestone_show`,
+ * `fn_slice_list`/`fn_slice_show`, `fn_feature_list`/`fn_feature_show`. See
+ * the FNXC:McpServer 2026-07-11-08:30 comment above the "Mission hierarchy
+ * tools (read-only)" section for the full rationale.
  */
 import {
   TaskStore,
@@ -849,6 +858,286 @@ const fnTaskArchive: McpToolDefinition = {
  * is reversible (restorable via fn_task_unarchive) so it stays here, NOT in
  * the destructive tier.
  */
+// ── Mission hierarchy tools (read-only) ────────────────────────────────
+
+/*
+FNXC:McpServer 2026-07-11-08:30:
+FUSI-017 adds the read half of the mission hierarchy to the BASE registry
+(no --allow-destructive gate — these are plain reads): fn_mission_list,
+fn_mission_show, fn_milestone_list/show, fn_slice_list/show,
+fn_feature_list/show. Every handler dispatches to the SAME MissionStore
+read the pi-extension fn_mission_list/fn_mission_show handlers in
+packages/cli/src/extension.ts already call (listMissions,
+getMissionWithHierarchy, getMilestone/listMilestones, getSlice/listSlices,
+getFeature/listFeatures) — no duplicated validation, no HTTP round-trip.
+fn_mission_list/fn_mission_show mirror the pi-extension tools 1:1 (name,
+param shape, text rendering, details payload). The per-level
+fn_milestone_show/list, fn_slice_show/list, fn_feature_show/list tools have
+NO pi-extension precedent — they are net-new here so every hierarchy level
+is independently discoverable/addressable from an external MCP client
+without always walking the full mission tree. These eight tools unblock
+FUSI-018/019/020, which all depend on ID discovery this task provides.
+*/
+
+const fnMissionList: McpToolDefinition = {
+  name: "fn_mission_list",
+  description: "List all missions with their current status.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      includeDrafts: { type: "boolean", description: "Include in-flight mission interview drafts (default: true)" },
+    },
+  },
+  async handler(store, args) {
+    const missionStore = store.getMissionStore();
+    const includeDrafts = args.includeDrafts === false ? false : true;
+
+    const missions = missionStore.listMissions();
+    const drafts = includeDrafts
+      ? (store.getDatabase()
+        .prepare(
+          `SELECT id, title, status, updatedAt
+           FROM ai_sessions
+           WHERE type = 'mission_interview'
+             AND status IN ('generating', 'awaiting_input', 'error', 'complete')
+             AND COALESCE(archived, 0) = 0
+           ORDER BY updatedAt DESC`,
+        )
+        .all() as Array<{ id: string; title: string; status: "generating" | "awaiting_input" | "error" | "complete"; updatedAt: string }>)
+      : [];
+
+    if (missions.length === 0 && drafts.length === 0) {
+      return textResult("No missions yet.", { structuredContent: { count: 0, drafts: [] } });
+    }
+
+    const summary = {
+      planning: missions.filter((m) => m.status === "planning").length,
+      active: missions.filter((m) => m.status === "active").length,
+      blocked: missions.filter((m) => m.status === "blocked").length,
+      complete: missions.filter((m) => m.status === "complete").length,
+      archived: missions.filter((m) => m.status === "archived").length,
+    };
+
+    const lines: string[] = [];
+    lines.push(`Missions (${missions.length})`);
+    lines.push(
+      `Summary: active ${summary.active}, planning ${summary.planning}, blocked ${summary.blocked}, complete ${summary.complete}, archived ${summary.archived}`,
+    );
+    lines.push("");
+
+    if (drafts.length > 0) {
+      lines.push(`Drafts (${drafts.length})`);
+      for (const draft of drafts) {
+        const draftStatus = draft.status === "complete" ? "plan ready" : draft.status;
+        lines.push(`  \u25cc ${draft.id}: ${draft.title} (draft \u00b7 interview ${draftStatus})`);
+      }
+      lines.push("");
+    }
+
+    for (const mission of missions) {
+      const statusIcon = mission.status === "complete" ? "\u2713" : mission.status === "active" ? "\u25cf" : mission.status === "blocked" ? "\u26a0" : "\u25cb";
+      const autoAdvance = mission.autoAdvance ? " \u00b7 auto-advance" : "";
+      lines.push(`  ${statusIcon} ${mission.id}: ${mission.title} (${mission.status}${autoAdvance})`);
+    }
+
+    return textResult(lines.join("\n"), {
+      structuredContent: redactSecretsDeep({
+        count: missions.length,
+        missions: missions.map((m) => ({ id: m.id, title: m.title, status: m.status })),
+        drafts: drafts.map((draft) => ({ id: draft.id, title: draft.title, status: draft.status, updatedAt: draft.updatedAt })),
+      }),
+    });
+  },
+};
+
+const fnMissionShow: McpToolDefinition = {
+  name: "fn_mission_show",
+  description: "Show mission details with full hierarchy: milestones \u2192 slices \u2192 features.",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string", description: "Mission ID (e.g., M-001)" } },
+    required: ["id"],
+  },
+  async handler(store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+    const missionStore = store.getMissionStore();
+    const mission = missionStore.getMissionWithHierarchy(id);
+    if (!mission) return errorResult(`Mission ${id} not found`);
+
+    const lines: string[] = [];
+    const renderGateLine = (indent: string, label: string, value: string | undefined) => {
+      const trimmed = value?.trim();
+      if (!trimmed) return;
+      if (trimmed.length > 240) {
+        lines.push(`${indent}${label} ${trimmed.slice(0, 240)}\u2026 (truncated, ${trimmed.length} chars)`);
+        return;
+      }
+      lines.push(`${indent}${label} ${trimmed}`);
+    };
+
+    lines.push(`${mission.id}: ${mission.title}`);
+    lines.push(`Status: ${mission.status}`);
+    if (mission.description) lines.push(`Description: ${mission.description}`);
+    lines.push("");
+
+    lines.push("Linked Goals:");
+    if ((mission.linkedGoals?.length ?? 0) === 0) {
+      lines.push("No linked goals.");
+    } else {
+      for (const goal of mission.linkedGoals ?? []) lines.push(`- ${goal.id}: ${goal.title}`);
+    }
+    lines.push("");
+
+    if (mission.milestones.length === 0) {
+      lines.push("No milestones yet.");
+    } else {
+      lines.push("Milestones:");
+      for (const milestone of mission.milestones) {
+        const mIcon = milestone.status === "complete" ? "\u2713" : milestone.status === "active" ? "\u25cf" : "\u25cb";
+        lines.push(`  ${mIcon} ${milestone.id}: ${milestone.title} (${milestone.status})`);
+        renderGateLine("    ", "AC:", milestone.acceptanceCriteria);
+
+        for (const slice of milestone.slices) {
+          const sIcon = slice.status === "complete" ? "\u2713" : slice.status === "active" ? "\u25cf" : "\u25cb";
+          lines.push(`    ${sIcon} ${slice.id}: ${slice.title} (${slice.status})`);
+          renderGateLine("      ", "Verification:", slice.verification);
+
+          for (const feature of slice.features) {
+            const fIcon = feature.status === "done" ? "\u2713" : feature.status === "in-progress" ? "\u25b8" : feature.status === "triaged" ? "\u25cf" : "\u25cb";
+            const taskLink = feature.taskId ? ` \u2192 ${feature.taskId}` : "";
+            lines.push(`      ${fIcon} ${feature.id}: ${feature.title} (${feature.status})${taskLink}`);
+            renderGateLine("        ", "AC:", feature.acceptanceCriteria);
+          }
+        }
+      }
+    }
+
+    return textResult(lines.join("\n").trimEnd(), { structuredContent: redactSecretsDeep({ mission }) });
+  },
+};
+
+function bindMissionHierarchyListTool(config: {
+  name: "fn_milestone_list" | "fn_slice_list" | "fn_feature_list";
+  parentParamKey: "missionId" | "milestoneId" | "sliceId";
+  childLabel: string;
+  listOp: (missionStore: ReturnType<TaskStore["getMissionStore"]>, parentId: string) => Array<{ id: string; title: string; status: string; acceptanceCriteria?: string; taskId?: string }>;
+}): McpToolDefinition {
+  return {
+    name: config.name,
+    description: `List the ${config.childLabel}s under a given ${config.parentParamKey}.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        [config.parentParamKey]: { type: "string", description: `Parent ${config.parentParamKey} to list ${config.childLabel}s for` },
+      },
+      required: [config.parentParamKey],
+    },
+    async handler(store, args) {
+      const parentId = String(args[config.parentParamKey] ?? "").trim();
+      if (!parentId) return errorResult(`${config.parentParamKey} is required.`);
+      const missionStore = store.getMissionStore();
+      const items = config.listOp(missionStore, parentId);
+
+      if (items.length === 0) {
+        return textResult(`No ${config.childLabel}s for ${parentId}.`, {
+          structuredContent: { [config.parentParamKey]: parentId, count: 0, [`${config.childLabel}s`]: [] },
+        });
+      }
+
+      const lines = [`${config.childLabel}s for ${parentId} (${items.length}):`];
+      for (const item of items) {
+        const taskLink = item.taskId ? ` \u2192 ${item.taskId}` : "";
+        lines.push(`  ${item.id}: ${item.title} (${item.status})${taskLink}`);
+      }
+
+      return textResult(lines.join("\n"), {
+        structuredContent: redactSecretsDeep({
+          [config.parentParamKey]: parentId,
+          count: items.length,
+          [`${config.childLabel}s`]: items,
+        }),
+      });
+    },
+  };
+}
+
+const fnMilestoneList = bindMissionHierarchyListTool({
+  name: "fn_milestone_list",
+  parentParamKey: "missionId",
+  childLabel: "milestone",
+  listOp: (missionStore, missionId) => missionStore.listMilestones(missionId),
+});
+
+const fnSliceList = bindMissionHierarchyListTool({
+  name: "fn_slice_list",
+  parentParamKey: "milestoneId",
+  childLabel: "slice",
+  listOp: (missionStore, milestoneId) => missionStore.listSlices(milestoneId),
+});
+
+const fnFeatureList = bindMissionHierarchyListTool({
+  name: "fn_feature_list",
+  parentParamKey: "sliceId",
+  childLabel: "feature",
+  listOp: (missionStore, sliceId) => missionStore.listFeatures(sliceId),
+});
+
+function bindMissionHierarchyShowTool(config: {
+  name: "fn_milestone_show" | "fn_slice_show" | "fn_feature_show";
+  paramKey: "id";
+  entityLabel: string;
+  getOp: (missionStore: ReturnType<TaskStore["getMissionStore"]>, id: string) => { id: string; title: string; status: string; acceptanceCriteria?: string; verification?: string; taskId?: string; missionId?: string; milestoneId?: string; sliceId?: string } | undefined;
+}): McpToolDefinition {
+  return {
+    name: config.name,
+    description: `Show full details for a single ${config.entityLabel} by ID.`,
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", description: `${config.entityLabel} ID` } },
+      required: ["id"],
+    },
+    async handler(store, args) {
+      const id = String(args.id ?? "").trim();
+      if (!id) return errorResult("id is required.");
+      const missionStore = store.getMissionStore();
+      const entity = config.getOp(missionStore, id);
+      if (!entity) return errorResult(`${config.entityLabel[0].toUpperCase()}${config.entityLabel.slice(1)} ${id} not found`);
+
+      const lines: string[] = [`${entity.id}: ${entity.title}`, `Status: ${entity.status}`];
+      if (entity.missionId) lines.push(`Mission: ${entity.missionId}`);
+      if (entity.milestoneId) lines.push(`Milestone: ${entity.milestoneId}`);
+      if (entity.sliceId) lines.push(`Slice: ${entity.sliceId}`);
+      if (entity.taskId) lines.push(`Linked task: ${entity.taskId}`);
+      if (entity.verification) lines.push(`Verification: ${entity.verification}`);
+      if (entity.acceptanceCriteria) lines.push(`Acceptance Criteria: ${entity.acceptanceCriteria}`);
+
+      return textResult(lines.join("\n"), { structuredContent: redactSecretsDeep(entity) });
+    },
+  };
+}
+
+const fnMilestoneShow = bindMissionHierarchyShowTool({
+  name: "fn_milestone_show",
+  paramKey: "id",
+  entityLabel: "milestone",
+  getOp: (missionStore, id) => missionStore.getMilestone(id),
+});
+
+const fnSliceShow = bindMissionHierarchyShowTool({
+  name: "fn_slice_show",
+  paramKey: "id",
+  entityLabel: "slice",
+  getOp: (missionStore, id) => missionStore.getSlice(id),
+});
+
+const fnFeatureShow = bindMissionHierarchyShowTool({
+  name: "fn_feature_show",
+  paramKey: "id",
+  entityLabel: "feature",
+  getOp: (missionStore, id) => missionStore.getFeature(id),
+});
+
 export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnTaskCreate,
   fnTaskList,
@@ -866,6 +1155,14 @@ export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnWorkflowCreate,
   fnWorkflowUpdate,
   fnWorkflowSelect,
+  fnMissionList,
+  fnMissionShow,
+  fnMilestoneList,
+  fnMilestoneShow,
+  fnSliceList,
+  fnSliceShow,
+  fnFeatureList,
+  fnFeatureShow,
 ];
 
 // ── Destructive tools (opt-in via --allow-destructive) ─────────────────────

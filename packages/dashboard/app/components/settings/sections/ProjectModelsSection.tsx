@@ -10,7 +10,7 @@ import type { ModelLane, SectionBaseProps, SectionSaveHandler, SettingsFormState
 import { LoadingSpinner } from "../../LoadingSpinner";
 type LaneStatus = "inherited" | "overridden";
 type WorkflowModelPair = {
-    id: "planning" | "execution" | "validator" | "planning-fallback" | "validator-fallback" | "title-summarizer-fallback";
+    id: "planning" | "execution" | "validator" | "planning-fallback" | "validator-fallback";
     providerId: string;
     modelId: string;
     thinkingId?: string;
@@ -20,10 +20,10 @@ type WorkflowModelPair = {
 const DEFAULT_WORKFLOW_ID = "builtin:coding";
 /*
 FNXC:SettingsModels 2026-06-16-19:58:
-Fallback model lanes must be configurable in all Settings surfaces: General uses the global Fallback Model, Workflow Values uses declared workflow settings, and Project Models exposes only fallback pairs declared by the active default workflow so saves never PATCH undeclared keys.
+Fallback model lanes must be configurable in all Settings surfaces: General uses the global Fallback Model, Workflow Values uses declared workflow settings, and Project Models exposes workflow fallback pairs declared by the active default workflow plus project-scoped title-summarizer fallback keys so saves never PATCH undeclared keys.
 
-FNXC:Settings-ThinkingLevel 2026-07-10-00:00:
-Primary workflow model lanes may expose an inline thinking selector only when the active workflow declares the matching companion setting. Reset must clear both the model pair and the thinking companion; fallback/title-summarizer rows intentionally render no orphan thinking shell.
+FNXC:Settings-ThinkingLevel 2026-07-10-12:08:
+Workflow fallback lanes may expose an inline thinking selector only when the active workflow declares the matching companion setting, while the title-summarizer fallback uses project-scoped keys below. Reset must clear both the model pair and the thinking companion; undeclared rows intentionally render no orphan thinking shell.
 */
 const WORKFLOW_MODEL_PAIRS: WorkflowModelPair[] = [
     {
@@ -54,6 +54,7 @@ const WORKFLOW_MODEL_PAIRS: WorkflowModelPair[] = [
         id: "planning-fallback",
         providerId: "planningFallbackProvider",
         modelId: "planningFallbackModelId",
+        thinkingId: "planningFallbackThinkingLevel",
         label: "Planning Fallback Model",
         help: "Fallback provider and model used when the primary Plan/Triage model cannot be used.",
     },
@@ -61,15 +62,9 @@ const WORKFLOW_MODEL_PAIRS: WorkflowModelPair[] = [
         id: "validator-fallback",
         providerId: "validatorFallbackProvider",
         modelId: "validatorFallbackModelId",
+        thinkingId: "validatorFallbackThinkingLevel",
         label: "Reviewer Fallback Model",
         help: "Fallback provider and model used when the primary Reviewer model cannot be used.",
-    },
-    {
-        id: "title-summarizer-fallback",
-        providerId: "titleSummarizerFallbackProvider",
-        modelId: "titleSummarizerFallbackModelId",
-        label: "Title Summarizer Fallback Model",
-        help: "Fallback provider and model used when the primary Title Summarizer model cannot be used.",
     },
 ];
 function declaredWorkflowModelPairs(settings?: WorkflowSettingDefinition[]): WorkflowModelPair[] {
@@ -296,6 +291,31 @@ export function ProjectModelsSection({ scopeBanner, form, setForm, models, proje
         }
         return lane.helperText;
     };
+    const titleSummarizerFallbackValue = form.titleSummarizerFallbackProvider && form.titleSummarizerFallbackModelId
+        ? `${form.titleSummarizerFallbackProvider}/${form.titleSummarizerFallbackModelId}`
+        : "";
+    const titleSummarizerFallbackThinkingValue = typeof form.titleSummarizerFallbackThinkingLevel === "string"
+        ? form.titleSummarizerFallbackThinkingLevel
+        : "";
+    const titleSummarizerFallbackCustomized = Boolean(titleSummarizerFallbackValue || titleSummarizerFallbackThinkingValue);
+    const setTitleSummarizerFallbackValue = (value: string) => {
+        if (!value) {
+            setForm((f) => ({ ...f, titleSummarizerFallbackProvider: undefined, titleSummarizerFallbackModelId: undefined, titleSummarizerFallbackThinkingLevel: undefined } as SettingsFormState));
+            return;
+        }
+        const slashIdx = value.indexOf("/");
+        setForm((f) => ({
+            ...f,
+            titleSummarizerFallbackProvider: value.slice(0, slashIdx),
+            titleSummarizerFallbackModelId: value.slice(slashIdx + 1),
+        } as SettingsFormState));
+    };
+    const setTitleSummarizerFallbackThinkingValue = (value: string) => {
+        setForm((f) => ({ ...f, titleSummarizerFallbackThinkingLevel: value || undefined } as SettingsFormState));
+    };
+    const resetTitleSummarizerFallbackValue = () => {
+        setForm((f) => ({ ...f, titleSummarizerFallbackProvider: undefined, titleSummarizerFallbackModelId: undefined, titleSummarizerFallbackThinkingLevel: undefined } as SettingsFormState));
+    };
     return (<>
       {scopeBanner}
 
@@ -341,6 +361,22 @@ export function ProjectModelsSection({ scopeBanner, form, setForm, models, proje
                 </small>
               </div>);
             })}
+          {/* FNXC:Settings-ThinkingLevel 2026-07-10-12:08: Title-summarizer fallback provider/model/thinking settings are project-scoped, not workflow-declared. Render this fallback beside the project summarization lane so saves use project null-as-delete semantics instead of the workflow-values API. */}
+          <div className="form-group" data-testid="project-model-lane-title-summarizer-fallback">
+            <div className="settings-model-lane-label-row">
+              <label htmlFor="titleSummarizerFallbackModel">{t("settings.projectModels.titleSummarizerFallbackModel", "Title Summarizer Fallback Model")}</label>
+              <span className={`settings-lane-badge ${titleSummarizerFallbackCustomized ? "settings-lane-badge--override" : "settings-lane-badge--inherited"}`} title={titleSummarizerFallbackCustomized ? "Explicitly set for this project" : "Inherited from global settings"}>
+                {titleSummarizerFallbackCustomized ? "Override (Project)" : "Inherited (Global)"}
+              </span>
+            </div>
+            <div className="settings-model-lane-control-row">
+              <div className="settings-model-lane-control-main">
+                <CustomModelDropdown id="titleSummarizerFallbackModel" label="Title Summarizer Fallback Model" models={availableModels} value={titleSummarizerFallbackValue} onChange={setTitleSummarizerFallbackValue} placeholder={t("settings.projectModels.useGlobal", "Use global")} favoriteProviders={favoriteProviders} onToggleFavorite={onToggleFavorite} favoriteModels={favoriteModels} onToggleModelFavorite={onToggleModelFavorite} menuWidth="readable" showThinkingLevel={true} thinkingLevel={titleSummarizerFallbackThinkingValue} onThinkingLevelChange={setTitleSummarizerFallbackThinkingValue} defaultThinkingLevel={form.defaultThinkingLevel}/>
+              </div>
+              {titleSummarizerFallbackCustomized && (<button type="button" className="btn btn-ghost btn-sm" title={t("settings.projectModels.resetToInheritFromGlobal", "Reset to inherit from global")} onClick={resetTitleSummarizerFallbackValue} style={{ whiteSpace: "nowrap" }}>{t("settings.projectModels.reset", " Reset ")}</button>)}
+            </div>
+            <small>{t("settings.projectModels.titleSummarizerFallbackHelp", "Fallback provider and model used when the primary Title Summarizer model cannot be used. Falls back to the global summarization lane and then the default model chain.")}</small>
+          </div>
         </>)}
 
       {/* --- Default workflow model lanes --- */}

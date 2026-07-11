@@ -94,6 +94,8 @@ export function FileEditor({
   const previewRef = useRef<HTMLDivElement>(null);
   const editorViewRef = useRef<EditorView | null>(null);
   const syncingFromPropsRef = useRef(false);
+  const lastEmittedContentRef = useRef<string | null>(null);
+  const emittedContentEchoesRef = useRef<Set<string>>(new Set());
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
 
@@ -176,7 +178,14 @@ export function FileEditor({
         themeOverlay,
         EditorView.updateListener.of((update) => {
           if (!update.docChanged || syncingFromPropsRef.current) return;
-          onChangeRef.current(update.state.doc.toString());
+          const nextContent = update.state.doc.toString();
+          lastEmittedContentRef.current = nextContent;
+          emittedContentEchoesRef.current.add(nextContent);
+          if (emittedContentEchoesRef.current.size > 20) {
+            const [oldestEcho] = emittedContentEchoesRef.current;
+            emittedContentEchoesRef.current.delete(oldestEcho);
+          }
+          onChangeRef.current(nextContent);
         }),
       ],
     });
@@ -242,14 +251,33 @@ export function FileEditor({
     });
   }, [darkThemeActive]);
 
+  /*
+   * FNXC:FileViewer 2026-07-10-00:00:
+   * The controlled FileEditor parent loop is async, so an older content prop can re-render after the live CodeMirror document already advanced from fast local typing. Treat previously emitted values as stale self-echoes when the live document differs, preventing dropped newlines and caret jumps; only genuinely external content changes re-sync the document, with the prior selection clamped into the new content.
+   */
   useEffect(() => {
     const view = editorViewRef.current;
     if (!view) return;
     const currentContent = view.state.doc.toString();
     if (currentContent === content) return;
+    const isStaleSelfEcho = content === lastEmittedContentRef.current || emittedContentEchoesRef.current.has(content);
+    if (isStaleSelfEcho) return;
+
+    const previousSelection = view.state.selection.main;
+    const nextLength = content.length;
+    const clampPosition = (position: number) => Math.max(0, Math.min(position, nextLength));
     syncingFromPropsRef.current = true;
-    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: content } });
-    syncingFromPropsRef.current = false;
+    try {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: content },
+        selection: {
+          anchor: clampPosition(previousSelection.anchor),
+          head: clampPosition(previousSelection.head),
+        },
+      });
+    } finally {
+      syncingFromPropsRef.current = false;
+    }
   }, [content]);
 
   return (

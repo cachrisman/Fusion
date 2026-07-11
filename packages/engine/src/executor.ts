@@ -13,7 +13,7 @@ import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import type { TaskStore, Task, TaskDetail, TaskTokenUsage, StepStatus, Settings, WorkflowStep, MissionStore, Slice, AgentState, AgentCapability, RunMutationContext, AgentHeartbeatConfig, Agent, AgentMemoryInclusionMode, ProjectSettings, MergeResult, WorkflowIrNode, WorkflowIrNodeKind, WorkflowStepResult as CoreWorkflowStepResult, ThinkingLevel } from "@fusion/core";
 import { getUnmetSchedulingDependencies } from "./scheduler.js";
-import { RetryStormError, TaskDeletedError, serializeRetryStormError, isExperimentalFeatureEnabled, resolveWorkflowIrForTask, resolveColumnAgentBinding, resolveEffectiveAgent, instanceNodeId, getWorkflowExtensionRegistry, getBuiltinWorkflow, parseNoOpCompletionMarker, allowsAutoMergeProcessing, resolveEffectiveAutoMerge, isLiveSharedBranchGroupMemberIntegration, resolveMaxAutoMergeRetries, resolveOptionalStepRevisionBudget, resolveOptionalReviewRevisionBudget, COMPLETION_SUMMARY_NODE_ID, upsertWorkflowStepResult, AWAITING_APPROVAL_PAUSE_REASON, THINKING_LEVELS } from "@fusion/core";
+import { RetryStormError, TaskDeletedError, serializeRetryStormError, isExperimentalFeatureEnabled, resolveWorkflowIrForTask, resolveColumnAgentBinding, resolveEffectiveAgent, instanceNodeId, getWorkflowExtensionRegistry, getBuiltinWorkflow, parseNoOpCompletionMarker, allowsAutoMergeProcessing, resolveEffectiveAutoMerge, isLiveSharedBranchGroupMemberIntegration, resolveMaxAutoMergeRetries, resolveOptionalStepRevisionBudget, resolveOptionalReviewRevisionBudget, COMPLETION_SUMMARY_NODE_ID, upsertWorkflowStepResult, AWAITING_APPROVAL_PAUSE_REASON, THINKING_LEVELS, AgentStore } from "@fusion/core";
 import { finalizeProvenAutoMergeTask } from "./auto-merge-finalization.js";
 import { mergeEffectiveSettings } from "./effective-settings.js";
 import type { TaskStep, WorkflowIr, WorkflowFieldDefinition, WorkflowColumnAgent, EffectiveAgentInput, WorkflowWorkEngineDispatchResult } from "@fusion/core";
@@ -88,7 +88,9 @@ import {
   extractRuntimeHint,
   resolveExecutorSessionModel,
   resolveExecutorThinkingLevel,
+  resolveExecutorFallbackThinkingLevel,
   resolveValidatorThinkingLevel,
+  resolveValidatorFallbackThinkingLevel,
 } from "./agent-session-helpers.js";
 import { buildSessionSkillContext } from "./session-skill-context.js";
 import type { SkillSelectionContext } from "./skill-resolver.js";
@@ -105,7 +107,7 @@ import { PRIORITY_EXECUTE, type AgentSemaphore } from "./concurrency.js";
 // filter reuses the SAME always-allowed/scope-match surface as the non-workspace path (F5). One-way
 // executor→workspace-paths edge (workspace-paths imports nothing).
 import { deriveRepoScopeSubset, normalizeRepoRelPath } from "./workspace-paths.js";
-import { RemovalReason, classifyTaskWorktree, describeRegisteredWorktrees, detectNestedWorktreeRoot, getRegisteredWorktreePaths, isGitRepository, isInsideWorktreesDir, isRegisteredGitWorktree, removeWorktree, type WorktreePool } from "./worktree-pool.js";
+import { RemovalReason, classifyTaskWorktree, describeRegisteredWorktrees, detectGitRepository, detectNestedWorktreeRoot, getRegisteredWorktreePaths, isInsideWorktreesDir, isRegisteredGitWorktree, removeWorktree, type GitRepoDetection, type WorktreePool } from "./worktree-pool.js";
 import { attemptBranchAutocorrect } from "./branch-autocorrect.js";
 import { ActiveSessionWorktreeRemovalError } from "./worktree-backend.js";
 import {
@@ -946,6 +948,14 @@ function evaluatePromptDerivedNoCommitEligibility(task: Task, promptContent: str
 
 class NonRetryableWorktreeError extends Error {}
 
+function formatGitRepositoryDetectionError(rootDir: string, detection: Extract<GitRepoDetection, { status: "error" }>): string {
+  const stderr = detection.stderr.trim() || "git rev-parse --git-dir failed without stderr";
+  const remedy = detection.reason === "dubious-ownership"
+    ? ` Resolve Git safe-directory ownership with: git config --global --add safe.directory "${rootDir}"`
+    : "";
+  return `Git repository detection failed for project directory "${rootDir}". Fusion could not verify worktree support because git reported: ${stderr}.${remedy}`;
+}
+
 function buildSessionWorktreePathRegex(rootDir: string, settings: Partial<Settings>): RegExp {
   const configuredBase = resolveWorktreesDir(rootDir, settings).split(/[\\/]/).filter(Boolean).pop() ?? ".worktrees";
   const escapedBase = configuredBase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -1722,6 +1732,8 @@ export class TaskExecutor {
   private activeWorkflowStepSessionSeenSteeringIds = new Map<string, Set<string>>();
   /** Active configured-command abort controllers keyed by task. */
   private activeConfiguredCommandControllers = new Map<string, Set<AbortController>>();
+  /** Lazily-created root-project reader used only when an execution lookup is handed an agents-less worktree store. */
+  private authoritativeAssignedAgentStore: AgentStore | null = null;
   /** Active workflow-graph runner abort controllers keyed by task. */
   private activeWorkflowGraphAbortControllers = new Map<string, AbortController>();
   /**
@@ -4492,12 +4504,33 @@ export class TaskExecutor {
     return activeRun !== null;
   }
 
+  private async getAuthoritativeAssignedAgent(
+    assignedAgentId: string | null | undefined,
+  ): Promise<Agent | null> {
+    const normalizedId = assignedAgentId?.trim();
+    if (!normalizedId) return null;
+
+    const configuredAgent = await this.options.agentStore?.getAgent(normalizedId).catch(() => null) ?? null;
+    if (configuredAgent) return configuredAgent;
+
+    /*
+    FNXC:ModelResolution 2026-07-10-00:00:
+    Task execution sessions must honor the assigned permanent agent's runtimeConfig like chat sessions do. If the live executor was handed an agents-less worktree AgentStore, fall back to the authoritative project `.fusion` AgentStore instead of letting `resolveExecutorSessionModel` see an empty runtimeConfig and silently drift to the pi built-in model.
+    */
+    try {
+      this.authoritativeAssignedAgentStore ??= new AgentStore({ rootDir: join(this.rootDir, ".fusion"), taskStore: this.store });
+      await this.authoritativeAssignedAgentStore.init();
+      return await this.authoritativeAssignedAgentStore.getAgent(normalizedId).catch(() => null);
+    } catch (err: unknown) {
+      executorLog.warn(`Failed to read assigned agent ${normalizedId} from authoritative project AgentStore: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
   private async getAssignedAgentRuntimeConfig(
     assignedAgentId: string | null | undefined,
   ): Promise<Record<string, unknown> | undefined> {
-    const normalizedId = assignedAgentId?.trim();
-    if (!normalizedId || !this.options.agentStore) return undefined;
-    const agent = await this.options.agentStore.getAgent(normalizedId).catch(() => null);
+    const agent = await this.getAuthoritativeAssignedAgent(assignedAgentId);
     return (agent?.runtimeConfig ?? undefined) as Record<string, unknown> | undefined;
   }
 
@@ -6691,6 +6724,12 @@ export class TaskExecutor {
                * Step-review model sessions honor per-node `config.thinkingLevel` before task, validator workflow lane, global lane, and default thinking settings.
                */
               defaultThinkingLevel: resolveValidatorThinkingLevel(
+                typeof config.thinkingLevel === "string" && WORKFLOW_THINKING_LEVEL_SET.has(config.thinkingLevel)
+                  ? (config.thinkingLevel as ThinkingLevel)
+                  : detail.thinkingLevel,
+                settings,
+              ),
+              fallbackThinkingLevel: resolveValidatorFallbackThinkingLevel(
                 typeof config.thinkingLevel === "string" && WORKFLOW_THINKING_LEVEL_SET.has(config.thinkingLevel)
                   ? (config.thinkingLevel as ThinkingLevel)
                   : detail.thinkingLevel,
@@ -9495,14 +9534,26 @@ export class TaskExecutor {
       and enable a workspace with nothing to work on. Gate every workspace check on repos.length > 0.
       */
       const hasWorkspaceRepos = (this.workspaceConfig?.repos.length ?? 0) > 0;
-      if (!hasWorkspaceRepos && !await isGitRepository(this.rootDir)) {
-        await this.store.logEntry(
-          task.id,
-          "Cannot execute task: project directory is not a Git repository. Fusion requires a Git repository for worktree-based task execution.",
-        );
-        throw new Error(
-          "Project directory is not a Git repository. Fusion requires a Git repository for worktree creation. Initialize with 'git init' or run from a Git project directory.",
-        );
+      if (!hasWorkspaceRepos) {
+        const gitDetection = await detectGitRepository(this.rootDir);
+        if (gitDetection.status === "not-repo") {
+          await this.store.logEntry(
+            task.id,
+            "Cannot execute task: project directory is not a Git repository. Fusion requires a Git repository for worktree-based task execution.",
+          );
+          throw new Error(
+            "Project directory is not a Git repository. Fusion requires a Git repository for worktree creation. Initialize with 'git init' or run from a Git project directory.",
+          );
+        }
+        if (gitDetection.status === "error") {
+          /*
+          FNXC:Worktree 2026-07-10-00:00:
+          FN-7799 requires environmental Git probe failures in valid repos to surface the real cause instead of telling operators to run `git init`. Dubious ownership and similar persistent failures otherwise block every task across restarts with a false non-repo diagnosis.
+          */
+          const message = formatGitRepositoryDetectionError(this.rootDir, gitDetection);
+          await this.store.logEntry(task.id, message);
+          throw new Error(message);
+        }
       }
 
       const hadAssignedWorktree = Boolean(task.worktree);
@@ -9829,9 +9880,7 @@ export class TaskExecutor {
         // ── Step-Session Path ──────────────────────────────────────────
         executorLog.log(`${task.id}: using step-session mode (maxParallel=${settings.maxParallelSteps ?? 2}${forceStepSession ? ", graph-pinned" : ""})`);
 
-        const stepSessionAgent = detail.assignedAgentId && this.options.agentStore
-          ? await this.options.agentStore.getAgent(detail.assignedAgentId).catch(() => null)
-          : null;
+        const stepSessionAgent = await this.getAuthoritativeAssignedAgent(detail.assignedAgentId);
 
         // Column-agent SESSION IDENTITY (U4, R2/R3/R4/R8): when the governing
         // step-execute node's declared column binds an agent that supersedes the
@@ -10402,9 +10451,7 @@ export class TaskExecutor {
       const reflectionTools = this.options.reflectionService && settings.reflectionEnabled && assignedAgentId
         ? [createReflectOnPerformanceTool(this.options.reflectionService, assignedAgentId)]
         : [];
-      const assignedAgent = assignedAgentId && this.options.agentStore
-        ? await this.options.agentStore.getAgent(assignedAgentId).catch(() => null)
-        : null;
+      const assignedAgent = await this.getAuthoritativeAssignedAgent(assignedAgentId);
 
       // Column-agent SESSION IDENTITY (U4, R2/R3/R4/R8): when the governing execute
       // seam node's declared column binds an agent that supersedes the task's
@@ -10587,7 +10634,9 @@ export class TaskExecutor {
         );
         const executorFallbackProvider = settings.fallbackProvider;
         const executorFallbackModelId = settings.fallbackModelId;
-        const executorThinkingLevel = resolveExecutorThinkingLevel(this.graphSeamThinkingLevel.get(task.id) ?? detail.thinkingLevel, settings);
+        const executorSessionThinkingSource = this.graphSeamThinkingLevel.get(task.id) ?? detail.thinkingLevel;
+        const executorThinkingLevel = resolveExecutorThinkingLevel(executorSessionThinkingSource, settings);
+        const executorFallbackThinkingLevel = resolveExecutorFallbackThinkingLevel(executorSessionThinkingSource, settings);
 
         // U1 telemetry: now that the session model/provider/node are resolved,
         // give the agent logger the context it needs to emit usage_events tool
@@ -10639,7 +10688,7 @@ export class TaskExecutor {
           ?? (await this.resolveInstructionsForRole("executor", settings));
 
         // Build structured layers for cross-session prompt caching.
-        const executorPluginContributions = buildPluginPromptSection(
+        const executorPluginContributions = await buildPluginPromptSection(
           "executor-system",
           this.options.pluginRunner,
         );
@@ -10686,6 +10735,7 @@ export class TaskExecutor {
             defaultModelId: executorModelId,
             fallbackProvider: executorFallbackProvider,
             fallbackModelId: executorFallbackModelId,
+            fallbackThinkingLevel: executorFallbackThinkingLevel,
             defaultThinkingLevel: executorThinkingLevel,
             runAuditor: audit,
             settings,
@@ -10791,6 +10841,7 @@ export class TaskExecutor {
             ].join("\n"));
           } else {
             const customFieldDefs = await this.resolveTaskCustomFieldDefs(task.id);
+            const pluginTaskContributions = await buildPluginPromptSection("executor-task", this.options.pluginRunner);
             const agentPrompt = buildExecutionPrompt(
               detail,
               this.rootDir,
@@ -10799,7 +10850,10 @@ export class TaskExecutor {
               this.options.pluginRunner,
               customFieldDefs,
               this.workspaceConfig,
-              { workflowReviewGatesOwnedByGraph: this.graphCompletionInterceptors.has(task.id) },
+              {
+                workflowReviewGatesOwnedByGraph: this.graphCompletionInterceptors.has(task.id),
+                pluginTaskContributions,
+              },
             );
             await promptWithFallback(session, agentPrompt);
           }
@@ -11109,6 +11163,7 @@ export class TaskExecutor {
                   defaultModelId: executorModelId,
                   fallbackProvider: executorFallbackProvider,
                   fallbackModelId: executorFallbackModelId,
+                  fallbackThinkingLevel: executorFallbackThinkingLevel,
                   defaultThinkingLevel: executorThinkingLevel,
                   runAuditor: audit,
                   settings,
@@ -11151,6 +11206,7 @@ export class TaskExecutor {
                 stuckDetector?.trackTask(task.id, retrySession);
 
                 const retryCustomFieldDefs = await this.resolveTaskCustomFieldDefs(task.id);
+                const retryPluginTaskContributions = await buildPluginPromptSection("executor-task", this.options.pluginRunner);
                 let retryPrompt: string;
                 if (pseudoPause.kind !== "none") {
                   const shortMatch = (pseudoPause.matched ?? "").slice(0, 120);
@@ -11178,7 +11234,10 @@ export class TaskExecutor {
                       this.options.pluginRunner,
                       retryCustomFieldDefs,
                       this.workspaceConfig,
-                      { workflowReviewGatesOwnedByGraph: this.graphCompletionInterceptors.has(task.id) },
+                      {
+                        workflowReviewGatesOwnedByGraph: this.graphCompletionInterceptors.has(task.id),
+                        pluginTaskContributions: retryPluginTaskContributions,
+                      },
                     ),
                   ].join("\n");
                 } else {
@@ -11197,7 +11256,10 @@ export class TaskExecutor {
                       this.options.pluginRunner,
                       retryCustomFieldDefs,
                       this.workspaceConfig,
-                      { workflowReviewGatesOwnedByGraph: this.graphCompletionInterceptors.has(task.id) },
+                      {
+                        workflowReviewGatesOwnedByGraph: this.graphCompletionInterceptors.has(task.id),
+                        pluginTaskContributions: retryPluginTaskContributions,
+                      },
                     ),
                   ].join("\n");
                 }
@@ -13606,6 +13668,7 @@ export class TaskExecutor {
               defaultModelId: settings.defaultModelId,
               fallbackProvider: settings.fallbackProvider,
               fallbackModelId: settings.fallbackModelId,
+              fallbackThinkingLevel: resolveValidatorFallbackThinkingLevel(latestDetailForReview.thinkingLevel, settings),
               defaultThinkingLevel: resolveValidatorThinkingLevel(latestDetailForReview.thinkingLevel, settings),
               // Task-level validator override (from task)
               taskValidatorProvider: latestDetailForReview.validatorModelProvider,
@@ -14967,7 +15030,8 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
     const useOverride = !!(workflowStep.modelProvider && workflowStep.modelId);
 
     type ModelTuple = { provider?: string; modelId?: string };
-    const fallbackCandidates: Array<ModelTuple & { label: string }> = [
+    type WorkflowStepFallbackLabel = "validatorFallback" | "globalFallback";
+    const fallbackCandidates: Array<ModelTuple & { label: WorkflowStepFallbackLabel }> = [
       { provider: settings.validatorFallbackProvider, modelId: settings.validatorFallbackModelId, label: "validatorFallback" },
       { provider: settings.fallbackProvider, modelId: settings.fallbackModelId, label: "globalFallback" },
     ];
@@ -14995,9 +15059,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         pluginRunner: this.options.pluginRunner,
       });
 
-      const workflowAgent = task.assignedAgentId && this.options.agentStore
-        ? await this.options.agentStore.getAgent(task.assignedAgentId).catch(() => null)
-        : null;
+      const workflowAgent = await this.getAuthoritativeAssignedAgent(task.assignedAgentId);
       const workflowRuntimeHint = extractRuntimeHint(workflowAgent?.runtimeConfig);
       // Signal to skills running in this step (e.g. compound-engineering ce-plan /
       // ce-work) that they are inside a Fusion autonomous workflow step, NOT an
@@ -15116,8 +15178,17 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       /*
        * FNXC:Settings-ThinkingLevel 2026-07-10-00:00:
        * WorkflowStep sessions resolve reasoning effort as node/step `thinkingLevel` first, then task override, then settings defaults/lane fallbacks.
+       *
+       * FNXC:Settings-ThinkingLevel 2026-07-10-14:20:
+       * The step's own `fallback` attempt already swaps to a distinct model (validator fallback OR global fallback pair) — it must honor THAT model's fallback thinking level, not silently reuse the primary lane's thinking level. Route by which candidate `fallback.label` actually matched instead of only special-casing `validatorFallback`.
        */
-      const workflowStepThinkingLevel = resolveExecutorThinkingLevel(workflowStep.thinkingLevel ?? task.thinkingLevel, settings);
+      const workflowStepThinkingSource = workflowStep.thinkingLevel ?? task.thinkingLevel;
+      const workflowStepThinkingLevel = attemptLabel === "fallback"
+        ? (fallback?.label === "validatorFallback"
+          ? resolveValidatorFallbackThinkingLevel(workflowStepThinkingSource, settings)
+          : resolveExecutorFallbackThinkingLevel(workflowStepThinkingSource, settings))
+        : resolveExecutorThinkingLevel(workflowStepThinkingSource, settings);
+      const workflowStepFallbackThinkingLevel = resolveExecutorFallbackThinkingLevel(workflowStepThinkingSource, settings);
       const { session } = await createResolvedAgentSession({
         sessionPurpose: "executor",
         runtimeHint: workflowRuntimeHint,
@@ -15129,6 +15200,7 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         defaultModelId: modelId,
         fallbackProvider: settings.fallbackProvider,
         fallbackModelId: settings.fallbackModelId,
+        fallbackThinkingLevel: workflowStepFallbackThinkingLevel,
         defaultThinkingLevel: workflowStepThinkingLevel,
         runAuditor: createRunAuditor(this.store, this.getRunContextFor(task.id)),
         settings,
@@ -18005,6 +18077,7 @@ Child agent: ${agent.id} (${name})`;
             defaultModelId: childExecutorModelId,
             fallbackProvider: settings.fallbackProvider,
             fallbackModelId: settings.fallbackModelId,
+            fallbackThinkingLevel: resolveExecutorFallbackThinkingLevel(undefined, settings),
             runAuditor: createRunAuditor(this.store, this.getRunContextFor(taskId)),
             settings,
             taskEnv,
@@ -18119,7 +18192,7 @@ export function buildExecutionPrompt(
   pluginRunner?: PluginRunner,
   customFieldDefs?: WorkflowFieldDefinition[],
   workspaceConfig?: WorkspaceConfig | null,
-  options?: { workflowReviewGatesOwnedByGraph?: boolean },
+  options?: { workflowReviewGatesOwnedByGraph?: boolean; pluginTaskContributions?: string },
 ): string {
   const prompt = scopePromptToWorktree(task.prompt, rootDir, worktreePath, workspaceConfig);
   const reviewLevel = parseReviewLevelFromPrompt(prompt);
@@ -18253,11 +18326,10 @@ git log --oneline
     customFieldsSection = lines.join("\n") + "\n";
   }
 
-  const taskPromptContributions = pluginRunner?.getPromptContributionsForSurface("executor-task") ?? [];
-  if (taskPromptContributions.length > 0) {
-    executorLog.log(`${task.id}: applied ${taskPromptContributions.length} plugin prompt contributions for executor-task surface`);
+  const pluginTaskContributions = options?.pluginTaskContributions ?? "";
+  if (pluginTaskContributions) {
+    executorLog.log(`${task.id}: applied plugin prompt contributions for executor-task surface`);
   }
-  const pluginTaskContributions = buildPluginPromptSection("executor-task", pluginRunner);
 
   const executionPrompt = `Execute this task.
 

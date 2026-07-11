@@ -4,7 +4,7 @@ import path from "node:path";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { SettingsModal } from "../SettingsModal";
+import { SettingsModal, SettingsView } from "../SettingsModal";
 import type { Settings } from "@fusion/core";
 
 
@@ -150,7 +150,7 @@ vi.mock("../../hooks/useMemoryBackendStatus", () => ({
   })),
 }));
 
-import { fetchSettings, updateSettings } from "../../api";
+import { fetchDashboardHealth, fetchSettings, updateSettings } from "../../api";
 
 function mockSettingsViewport(matches: boolean): void {
   Object.defineProperty(window, "matchMedia", {
@@ -226,33 +226,71 @@ describe("SettingsModal mobile adaptations", () => {
     expect(updateSettings).not.toHaveBeenCalled();
   });
 
-  it("renders the app version label in mobile layout", async () => {
+  it("renders the compact app version label in mobile layout", async () => {
     mockSettingsViewport(true);
-    const { findByText, container } = render(<SettingsModal onClose={vi.fn()} addToast={vi.fn()} />);
+    const { findByText, queryByText, container } = render(<SettingsModal onClose={vi.fn()} addToast={vi.fn()} />);
     await waitFor(() => expect(fetchSettings).toHaveBeenCalled());
 
-    const version = await findByText("Version 1.2.3");
+    const version = await findByText("v1.2.3");
     const modalActions = container.querySelector(".modal-actions");
     const modalHeader = container.querySelector(".modal-header");
 
     expect(version).toBeTruthy();
+    expect(queryByText("Version 1.2.3")).toBeNull();
     expect(modalActions?.contains(version)).toBe(true);
     expect(modalHeader?.contains(version)).toBe(false);
   });
 
-  it("keeps update-check button clickable from the footer", async () => {
-    mockSettingsViewport(true);
-    const user = userEvent.setup();
-    const { container } = render(<SettingsModal onClose={vi.fn()} addToast={vi.fn()} />);
+  it("keeps the full app version label outside the mobile viewport", async () => {
+    mockSettingsViewport(false);
+    const { findByText, queryByText, container } = render(<SettingsModal onClose={vi.fn()} addToast={vi.fn()} />);
     await waitFor(() => expect(fetchSettings).toHaveBeenCalled());
 
-    const modalActions = container.querySelector(".modal-actions");
+    const version = await findByText("Version 1.2.3");
+    expect(version).toBeTruthy();
+    expect(queryByText("v1.2.3")).toBeNull();
+    expect(container.querySelector(".modal-actions")?.contains(version)).toBe(true);
+  });
+
+  it("keeps update-check button clickable from the standalone and embedded mobile footers", async () => {
+    mockSettingsViewport(true);
+    const user = userEvent.setup();
+    const standalone = render(<SettingsModal onClose={vi.fn()} addToast={vi.fn()} />);
+    await waitFor(() => expect(fetchSettings).toHaveBeenCalled());
+
+    const standaloneActions = standalone.container.querySelector(".settings-modal:not(.settings-modal--embedded) .modal-actions");
+    expect(standaloneActions).toBeTruthy();
+
+    const standaloneUpdateButton = within(standaloneActions as HTMLElement).getByRole("button", { name: "Check for updates" });
+    await user.click(standaloneUpdateButton);
+    expect(standaloneUpdateButton.closest(".settings-modal-footer-version")).toBeTruthy();
+
+    standalone.unmount();
+    vi.clearAllMocks();
+
+    const embedded = render(<SettingsView onClose={vi.fn()} addToast={vi.fn()} />);
+    await waitFor(() => expect(fetchSettings).toHaveBeenCalled());
+
+    const embeddedActions = embedded.container.querySelector(".settings-modal--embedded .modal-actions");
+    expect(embeddedActions).toBeTruthy();
+    const embeddedUpdateButton = within(embeddedActions as HTMLElement).getByRole("button", { name: "Check for updates" });
+    await user.click(embeddedUpdateButton);
+    expect(embeddedUpdateButton.closest(".settings-modal-footer-version")).toBeTruthy();
+  });
+
+  it("omits the version button when appVersion is unavailable without removing the footer rail", async () => {
+    vi.mocked(fetchDashboardHealth).mockResolvedValueOnce({ status: "ok", version: "", uptime: 120 });
+    mockSettingsViewport(true);
+    const { container, queryByRole } = render(<SettingsModal onClose={vi.fn()} addToast={vi.fn()} />);
+    await waitFor(() => expect(fetchSettings).toHaveBeenCalled());
+    await waitFor(() => expect(fetchDashboardHealth).toHaveBeenCalled());
+
+    const modalActions = container.querySelector(".settings-modal:not(.settings-modal--embedded) .modal-actions");
     expect(modalActions).toBeTruthy();
-
-    const updateButton = within(modalActions as HTMLElement).getByRole("button", { name: "Check for updates" });
-    await user.click(updateButton);
-
-    expect(updateButton).toBeTruthy();
+    expect(within(modalActions as HTMLElement).getByRole("link", { name: "Help and discussions" })).toBeTruthy();
+    expect(queryByRole("button", { name: "Check for updates" })).toBeNull();
+    expect(container.querySelector(".settings-modal-footer-version")).toBeTruthy();
+    expect(container.querySelector(".settings-update-check")).toBeTruthy();
   });
 
   it("keeps update-now button reachable from the mobile footer", async () => {
@@ -523,38 +561,69 @@ describe("SettingsModal mobile adaptations", () => {
     expectMobileRule(css, ".settings-mobile-section-picker select", "flex: 1 1 auto;");
     expectMobileRule(css, ".settings-mobile-section-picker .settings-search-empty-hint", "flex: 1 1 auto;");
     expectMobileRule(css, ".settings-navigation", "width: 100%;");
-    expectMobileRule(css, ".settings-search", "padding: var(--space-md) var(--space-lg) var(--space-sm);");
+    expectMobileRule(css, ".settings-search", "padding: var(--space-sm) var(--space-md) var(--space-sm);");
     expectMobileRule(css, ".settings-sidebar", "display: none;");
     expectMobileRule(css, ".settings-nav-item", "display: flex;");
     expectMobileRule(css, ".settings-nav-item", "align-items: center;");
     expectMobileRule(css, ".settings-nav-item", "justify-content: center;");
-    expectMobileRule(css, ".settings-nav-item", "gap: 4px;");
+    expectMobileRule(css, ".settings-nav-item", "gap: var(--space-xs);");
+    expectMobileRule(css, ".settings-content", "padding: var(--space-sm) var(--space-sm) var(--space-md);");
     expectMobileRule(css, ".settings-content textarea", "font-size: 16px;");
-    expectMobileRule(css, ".settings-section-heading", "padding: var(--space-lg) var(--space-md) var(--space-md);");
-    expectMobileRule(css, ".settings-section-heading", "margin: 0 0 var(--space-md);");
+    expectMobileRule(css, ".settings-section-heading", "padding: var(--space-md) var(--space-sm) var(--space-sm);");
+    expectMobileRule(css, ".settings-section-heading", "margin: 0 0 var(--space-sm);");
     expectMobileRule(css, ".settings-scope-icon", "margin-right: 0;");
-    expectMobileRule(css, ".settings-scope-banner", "padding: var(--space-sm) var(--space-md);");
-    expectMobileRule(css, ".settings-empty-state", "padding: 12px 14px;");
-    expectMobileRule(css, ".settings-description", "padding: 0 var(--space-md);");
-    expectMobileRule(css, ".theme-selector", "padding: 0 14px 14px;");
+    expectMobileRule(css, ".settings-scope-banner", "margin: 0 var(--space-sm) var(--space-xs);");
+    expectMobileRule(css, ".settings-scope-banner", "padding: var(--space-xs) var(--space-sm);");
+    expectMobileRule(css, ".settings-empty-state", "padding: var(--space-sm);");
+    expectMobileRule(css, ".settings-description", "padding: 0 var(--space-sm);");
+    expectMobileRule(css, ".theme-selector", "padding: 0 var(--space-sm) var(--space-sm);");
+    expectMobileRule(css, ".settings-plugins-subsection-toggle", "padding: 0 var(--space-sm);");
+    expectMobileRule(css, ".settings-plugins-subsection-panel", "padding-left: var(--space-sm);");
+    expectMobileRule(css, ".form-group", "padding: 0 var(--space-sm);");
     expectMobileRule(css, ".settings-preset-item", "flex-direction: column;");
     expectMobileRule(css, ".settings-preset-item-actions", "justify-content: flex-start;");
+    expectMobileRule(css, ".settings-preset-item", "padding: var(--space-sm);");
+    expectMobileRule(css, ".settings-preset-editor", "padding: var(--space-sm);");
     expectMobileRule(css, ".settings-preset-size-grid", "grid-template-columns: 1fr;");
+    expectMobileRule(css, ".settings-modal .modal-actions", "padding-block: var(--space-xs);");
     expectMobileRule(css, ".settings-modal .modal-actions", "flex-wrap: nowrap;");
+    expectMobileRule(css, ".settings-modal .modal-actions", "align-items: center;");
     expectMobileRule(css, ".settings-modal .modal-actions", "overflow-x: auto;");
-    expectMobileRule(css, ".settings-update-check", "flex-wrap: nowrap;");
-    expect(css).toContain(".settings-modal .modal-header,\n  .settings-modal .modal-actions");
-    expect(css).toContain("padding-block: var(--space-sm);");
+    expectMobileRule(css, ".settings-modal .modal-actions-left", "align-items: center;");
+    expectMobileRule(css, ".settings-modal .modal-actions-right", "align-items: center;");
+    expectMobileRule(css, ".settings-modal .settings-modal-footer-version", "align-self: center;");
+    expectMobileRule(css, ".settings-modal .settings-modal-footer-version", "flex: 0 0 auto;");
+    expectMobileRule(css, ".settings-modal .settings-modal-footer-version", "min-width: max-content;");
+    expectMobileRule(css, ".settings-modal .settings-update-check", "align-items: center;");
+    expectMobileRule(css, ".settings-modal .settings-update-check", "flex-wrap: nowrap;");
+    expectMobileRule(css, ".settings-modal .settings-version-check-btn", "line-height: 1;");
+    expectMobileRule(css, ".settings-modal .settings-version-check-btn", "white-space: nowrap;");
+    expectMobileRule(css, ".settings-modal .settings-modal-version", "display: inline-flex;");
+    expectMobileRule(css, ".settings-modal .settings-modal-version", "line-height: 1;");
+    expectMobileRule(css, ".settings-modal .settings-modal-version", "white-space: nowrap;");
+    expect(css).toContain(".settings-modal .modal-header {\n    padding-block: var(--space-sm);");
+    expectMobileRule(css, ".auth-provider-row", "padding: var(--space-sm);");
+    expectMobileRule(css, ".auth-section-hint", "margin: 0 var(--space-sm) var(--space-sm);");
+    expectMobileRule(css, ".auth-section-hint", "padding: var(--space-sm);");
+    expectMobileRule(css, ".auth-group-label", "padding: 0 var(--space-sm);");
+    expectMobileRule(css, ".auth-provider-card", "margin: 0 var(--space-sm) var(--space-sm);");
+    expectMobileRule(css, ".auth-provider-header", "padding: var(--space-sm);");
     expectMobileRule(css, ".auth-provider-header > div:not(.auth-provider-info):not(.auth-apikey-section)", "margin-left: auto;");
     expectMobileRule(css, ".auth-apikey-section", "align-items: flex-end;");
     expectMobileRule(css, ".auth-apikey-input-row", "justify-content: flex-end;");
     expectMobileRule(css, ".auth-apikey-input-row .btn", "margin-left: auto;");
+    expectMobileRule(css, ".auth-hint", "padding: var(--space-sm) var(--space-sm) 0;");
+    expectMobileRule(css, ".notification-provider-card", "margin: 0 var(--space-sm) var(--space-sm);");
     expectMobileRule(css, ".notification-provider-header", "padding: var(--space-sm) var(--space-md);");
     expectMobileRule(css, ".notification-provider-body", "padding: var(--space-md);");
+    expectMobileRule(css, ".memory-file-summary", "margin: 0 var(--space-sm) var(--space-sm);");
+    expectMobileRule(css, ".memory-file-summary", "padding: var(--space-sm);");
+    expectMobileRule(css, ".settings-model-lane-actions", "padding: var(--space-sm) var(--space-sm) var(--space-md);");
+    expectMobileRule(css, ".settings-node-routing-note", "padding: var(--space-sm);");
 
-    // Remote Access header elements must use the same mobile gutter as other remote blocks
-    expectMobileRule(css, ".remote-status-bar", "margin: 0 var(--space-lg) var(--space-md);");
-    expectMobileRule(css, ".remote-share-block", "margin: 0 var(--space-lg) var(--space-md);");
+    // Remote Access header elements must use the same tightened mobile gutter as other settings blocks
+    expectMobileRule(css, ".remote-status-bar", "margin: 0 var(--space-sm) var(--space-sm);");
+    expectMobileRule(css, ".remote-share-block", "margin: 0 var(--space-sm) var(--space-sm);");
     expectMobileRule(css, ".settings-research-provider-advanced-details", "padding-inline-start: 0;");
     expectMobileRule(css, ".settings-research-source-grid", "grid-template-columns: 1fr;");
     expectMobileRule(css, ".settings-research-limits-grid", "grid-template-columns: 1fr;");

@@ -813,6 +813,58 @@ describe("POST /tasks/:id/retry", () => {
     expect(store.moveTask).toHaveBeenCalledWith("KB-001", "todo");
   });
 
+  it("retries merge-active missing-worktree session failures by clearing phantom metadata", async () => {
+    const reviewTask = {
+      ...FAKE_TASK_DETAIL,
+      column: "in-review" as const,
+      status: "merging",
+      error: "Refusing to start coding agent in missing worktree: /tmp/fusion-missing-worktree",
+      worktree: "/tmp/fusion-missing-worktree",
+      branch: "fusion/KB-001",
+      sessionFile: "/tmp/fusion-session.json",
+      worktreeSessionRetryCount: 3,
+      mergeRetries: 3,
+      steps: [{ name: "Step 0", status: "done" }, { name: "Step 1", status: "pending" }],
+    };
+    const movedTask = { ...reviewTask, column: "todo" as const, status: undefined, worktree: undefined, branch: undefined, sessionFile: undefined };
+    (store.getTask as ReturnType<typeof vi.fn>).mockResolvedValueOnce(reviewTask);
+    (store.updateTask as ReturnType<typeof vi.fn>).mockResolvedValue(reviewTask);
+    (store.moveTask as ReturnType<typeof vi.fn>).mockResolvedValue(movedTask);
+
+    const res = await REQUEST(buildApp(), "POST", "/api/tasks/KB-001/retry", JSON.stringify({}), {
+      "Content-Type": "application/json",
+    });
+
+    expect(res.status).toBe(200);
+    expect(store.clearWorkflowRunStepInstances).toHaveBeenCalledWith("KB-001");
+    expect(store.updateTask).toHaveBeenCalledWith("KB-001", {
+      status: null,
+      error: null,
+      worktree: null,
+      branch: null,
+      sessionFile: null,
+      ...buildManualRetryResetPatch({ resetMergeRetries: true }),
+    });
+    expect(store.moveTask).toHaveBeenCalledWith("KB-001", "todo", { preserveProgress: true });
+    expect(store.logEntry).toHaveBeenCalledWith(
+      "KB-001",
+      "Retry requested from dashboard (unusable worktree session-start recovery → todo, preserving progress)",
+    );
+  });
+
+  it("keeps unrelated merge-active tasks non-retryable", async () => {
+    const activeTask = { ...FAKE_TASK_DETAIL, column: "in-review" as const, status: "merging", error: "ordinary merge still running" };
+    (store.getTask as ReturnType<typeof vi.fn>).mockResolvedValue(activeTask);
+
+    const res = await REQUEST(buildApp(), "POST", "/api/tasks/KB-001/retry", JSON.stringify({}), {
+      "Content-Type": "application/json",
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("not in a retryable state");
+    expect(engine.clearTaskPauseAbortState).not.toHaveBeenCalled();
+  });
+
   it("returns 400 when task is not in a retryable state", async () => {
     const activeTask = { ...FAKE_TASK_DETAIL, status: "executing" };
     (store.getTask as ReturnType<typeof vi.fn>).mockResolvedValue(activeTask);

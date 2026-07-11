@@ -43,6 +43,14 @@ const EXPECTED_TOOL_NAMES = [
   "fn_workflow_create",
   "fn_workflow_update",
   "fn_workflow_select",
+  "fn_mission_list",
+  "fn_mission_show",
+  "fn_milestone_list",
+  "fn_milestone_show",
+  "fn_slice_list",
+  "fn_slice_show",
+  "fn_feature_list",
+  "fn_feature_show",
 ];
 
 const EXPECTED_DESTRUCTIVE_TOOL_NAMES = [
@@ -691,6 +699,144 @@ describe("fn mcp serve — in-memory server smoke test", () => {
           await mcpServer.close();
         }
       });
+    });
+  });
+
+  describe("mission-hierarchy read tools (FUSI-017)", () => {
+    function seedMissionHierarchy() {
+      const missionStore = store.getMissionStore();
+      const mission = missionStore.createMission({ title: "Read Me Mission", autoMerge: true });
+      const milestone = missionStore.addMilestone(mission.id, { title: "MS" });
+      const slice = missionStore.addSlice(milestone.id, { title: "SL" });
+      const feature = missionStore.addFeature(slice.id, { title: "FT" });
+      return { missionStore, mission, milestone, slice, feature };
+    }
+
+    it("fn_mission_list returns the mission row in structuredContent (base tier — no --allow-destructive required)", async () => {
+      const { mission } = seedMissionHierarchy();
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_mission_list", arguments: {} });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { count: number; missions: Array<{ id: string; title: string; status: string }> };
+        expect(structured.missions.some((m) => m.id === mission.id && m.title === mission.title)).toBe(true);
+        const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+        expect(text).toContain(mission.id);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_mission_list returns the empty-state payload when there are no missions", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_mission_list", arguments: {} });
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent).toEqual({ count: 0, drafts: [] });
+        const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+        expect(text).toBe("No missions yet.");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_mission_show renders the full hierarchy and a not-found id returns isError", async () => {
+      const { mission, milestone, slice, feature } = seedMissionHierarchy();
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_mission_show", arguments: { id: mission.id } });
+        expect(result.isError).not.toBe(true);
+        const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+        expect(text).toContain(mission.id);
+        expect(text).toContain(milestone.id);
+        expect(text).toContain(slice.id);
+        expect(text).toContain(feature.id);
+
+        const notFound = await client.callTool({ name: "fn_mission_show", arguments: { id: "M-DOES-NOT-EXIST" } });
+        expect(notFound.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_milestone_list / fn_slice_list / fn_feature_list return child rows for a valid parent id and an empty payload for an unknown parent id", async () => {
+      const { mission, milestone, slice, feature } = seedMissionHierarchy();
+      const { client, mcpServer } = await connectClient();
+      try {
+        const milestones = await client.callTool({ name: "fn_milestone_list", arguments: { missionId: mission.id } });
+        expect(milestones.isError).not.toBe(true);
+        expect((milestones.structuredContent as { count: number }).count).toBe(1);
+        expect((milestones.content as Array<{ type: string; text?: string }>)[0]?.text ?? "").toContain(milestone.id);
+
+        const noMilestones = await client.callTool({ name: "fn_milestone_list", arguments: { missionId: "M-DOES-NOT-EXIST" } });
+        expect(noMilestones.isError).not.toBe(true);
+        expect((noMilestones.structuredContent as { count: number }).count).toBe(0);
+
+        const slices = await client.callTool({ name: "fn_slice_list", arguments: { milestoneId: milestone.id } });
+        expect(slices.isError).not.toBe(true);
+        expect((slices.structuredContent as { count: number }).count).toBe(1);
+        expect((slices.content as Array<{ type: string; text?: string }>)[0]?.text ?? "").toContain(slice.id);
+
+        const noSlices = await client.callTool({ name: "fn_slice_list", arguments: { milestoneId: "MS-DOES-NOT-EXIST" } });
+        expect(noSlices.isError).not.toBe(true);
+        expect((noSlices.structuredContent as { count: number }).count).toBe(0);
+
+        const features = await client.callTool({ name: "fn_feature_list", arguments: { sliceId: slice.id } });
+        expect(features.isError).not.toBe(true);
+        expect((features.structuredContent as { count: number }).count).toBe(1);
+        expect((features.content as Array<{ type: string; text?: string }>)[0]?.text ?? "").toContain(feature.id);
+
+        const noFeatures = await client.callTool({ name: "fn_feature_list", arguments: { sliceId: "SL-DOES-NOT-EXIST" } });
+        expect(noFeatures.isError).not.toBe(true);
+        expect((noFeatures.structuredContent as { count: number }).count).toBe(0);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_milestone_show / fn_slice_show / fn_feature_show return the entity for a valid id and isError for an unknown id", async () => {
+      const { milestone, slice, feature } = seedMissionHierarchy();
+      const { client, mcpServer } = await connectClient();
+      try {
+        const milestoneShow = await client.callTool({ name: "fn_milestone_show", arguments: { id: milestone.id } });
+        expect(milestoneShow.isError).not.toBe(true);
+        expect((milestoneShow.content as Array<{ type: string; text?: string }>)[0]?.text ?? "").toContain(milestone.id);
+        const milestoneNotFound = await client.callTool({ name: "fn_milestone_show", arguments: { id: "MS-DOES-NOT-EXIST" } });
+        expect(milestoneNotFound.isError).toBe(true);
+
+        const sliceShow = await client.callTool({ name: "fn_slice_show", arguments: { id: slice.id } });
+        expect(sliceShow.isError).not.toBe(true);
+        expect((sliceShow.content as Array<{ type: string; text?: string }>)[0]?.text ?? "").toContain(slice.id);
+        const sliceNotFound = await client.callTool({ name: "fn_slice_show", arguments: { id: "SL-DOES-NOT-EXIST" } });
+        expect(sliceNotFound.isError).toBe(true);
+
+        const featureShow = await client.callTool({ name: "fn_feature_show", arguments: { id: feature.id } });
+        expect(featureShow.isError).not.toBe(true);
+        expect((featureShow.content as Array<{ type: string; text?: string }>)[0]?.text ?? "").toContain(feature.id);
+        const featureNotFound = await client.callTool({ name: "fn_feature_show", arguments: { id: "F-DOES-NOT-EXIST" } });
+        expect(featureNotFound.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("mission read tools never appear only under --allow-destructive — they are present with allowDestructive omitted", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        const { tools } = await client.listTools();
+        const names = (tools ?? []).map((t) => t.name);
+        for (const name of ["fn_mission_list", "fn_mission_show", "fn_milestone_list", "fn_milestone_show", "fn_slice_list", "fn_slice_show", "fn_feature_list", "fn_feature_show"]) {
+          expect(names).toContain(name);
+        }
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
     });
   });
 });

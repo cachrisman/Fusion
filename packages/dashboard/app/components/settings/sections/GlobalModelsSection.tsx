@@ -63,9 +63,10 @@ export function GlobalModelsSection({ scopeBanner, form, setForm, availableModel
 
           <div className="form-group">
             <label htmlFor="fallbackModel">{t("settings.globalModels.fallbackModel", "Fallback Model")}</label>
+            {/* FNXC:Settings-ThinkingLevel 2026-07-10-12:00: Global fallback model selection owns its own thinking-level companion (`fallbackThinkingLevel`). Clearing the fallback picker must clear the companion value so null-as-delete reset parity matches the per-lane model pickers. */}
             <CustomModelDropdown id="fallbackModel" label="Fallback Model" models={availableModels} value={form.fallbackProvider && form.fallbackModelId ? `${form.fallbackProvider}/${form.fallbackModelId}` : ""} onChange={(val) => {
                 if (!val) {
-                    setForm((f) => ({ ...f, fallbackProvider: undefined, fallbackModelId: undefined }));
+                    setForm((f) => ({ ...f, fallbackProvider: undefined, fallbackModelId: undefined, fallbackThinkingLevel: undefined }));
                 }
                 else {
                     const slashIdx = val.indexOf("/");
@@ -75,7 +76,10 @@ export function GlobalModelsSection({ scopeBanner, form, setForm, availableModel
                         fallbackModelId: val.slice(slashIdx + 1),
                     }));
                 }
-            }} placeholder={t("settings.globalModels.noFallback", "No fallback")} favoriteProviders={favoriteProviders} onToggleFavorite={onToggleFavorite} favoriteModels={favoriteModels} onToggleModelFavorite={onToggleModelFavorite}/>
+            }} placeholder={t("settings.globalModels.noFallback", "No fallback")} favoriteProviders={favoriteProviders} onToggleFavorite={onToggleFavorite} favoriteModels={favoriteModels} onToggleModelFavorite={onToggleModelFavorite} showThinkingLevel={(() => {
+                const selectedModel = availableModels.find((m) => m.provider === form.fallbackProvider && m.id === form.fallbackModelId);
+                return selectedModel ? Boolean(selectedModel.reasoning) : true;
+            })()} thinkingLevel={form.fallbackThinkingLevel || ""} onThinkingLevelChange={(level) => setForm((f) => ({ ...f, fallbackThinkingLevel: (level as ThinkingLevel) || undefined }))} defaultThinkingLevel={form.defaultThinkingLevel}/>
             <small>{t("settings.globalModels.usedAutomaticallyIfThePrimaryDefaultModelHits", "Used automatically if the primary default model hits a retryable provider error like rate limiting or overload. No default \u2014 unset.")}</small>
           </div>
         </>)}

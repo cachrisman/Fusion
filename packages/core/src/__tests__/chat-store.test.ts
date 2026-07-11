@@ -74,6 +74,7 @@ describe("ChatStore", () => {
       projectId: string | null;
       modelProvider: string | null;
       modelId: string | null;
+      thinkingLevel: string | null;
     }>,
   ) {
     return store.createSession({
@@ -82,6 +83,7 @@ describe("ChatStore", () => {
       projectId: overrides?.projectId ?? null,
       modelProvider: overrides?.modelProvider ?? null,
       modelId: overrides?.modelId ?? null,
+      thinkingLevel: overrides?.thinkingLevel ?? null,
     });
   }
 
@@ -99,6 +101,7 @@ describe("ChatStore", () => {
         expect(session.projectId).toBeNull();
         expect(session.modelProvider).toBeNull();
         expect(session.modelId).toBeNull();
+        expect(session.thinkingLevel).toBeNull();
         expect(session.createdAt).toBeTruthy();
         expect(session.updatedAt).toBeTruthy();
         expect(session.inFlightGeneration).toBeNull();
@@ -111,6 +114,7 @@ describe("ChatStore", () => {
           projectId: "proj-123",
           modelProvider: "anthropic",
           modelId: "claude-3",
+          thinkingLevel: "high",
         });
 
         expect(session.agentId).toBe("agent-test");
@@ -118,6 +122,9 @@ describe("ChatStore", () => {
         expect(session.projectId).toBe("proj-123");
         expect(session.modelProvider).toBe("anthropic");
         expect(session.modelId).toBe("claude-3");
+        expect(session.thinkingLevel).toBe("high");
+        expect(store.getSession(session.id)?.thinkingLevel).toBe("high");
+        expect(store.listSessions().find((listed) => listed.id === session.id)?.thinkingLevel).toBe("high");
       });
 
       it("generates unique IDs", () => {
@@ -390,15 +397,18 @@ describe("ChatStore", () => {
         expect(updated!.status).toBe("archived");
       });
 
-      it("updates model fields", () => {
+      it("updates model and thinking-level fields", () => {
         const session = createTestSession(store);
         const updated = store.updateSession(session.id, {
           modelProvider: "openai",
           modelId: "gpt-4o",
+          thinkingLevel: "off",
         });
 
         expect(updated!.modelProvider).toBe("openai");
         expect(updated!.modelId).toBe("gpt-4o");
+        expect(updated!.thinkingLevel).toBe("off");
+        expect(store.getSession(session.id)?.thinkingLevel).toBe("off");
       });
 
       it("returns undefined for non-existent session", () => {
@@ -411,17 +421,20 @@ describe("ChatStore", () => {
           title: "Has title",
           modelProvider: "anthropic",
           modelId: "claude",
+          thinkingLevel: "high",
         });
 
         const updated = store.updateSession(session.id, {
           title: null,
           modelProvider: null,
           modelId: null,
+          thinkingLevel: null,
         });
 
         expect(updated!.title).toBeNull();
         expect(updated!.modelProvider).toBeNull();
         expect(updated!.modelId).toBeNull();
+        expect(updated!.thinkingLevel).toBeNull();
       });
     });
 

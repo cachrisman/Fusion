@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import type { Task } from "@fusion/core";
 import { request } from "../test-request.js";
 import { createServer } from "../server.js";
-import type { SkillsAdapter } from "../skills-adapter.js";
+import type { DiscoveredSkill, SkillsAdapter } from "../skills-adapter.js";
 import { computeSkillId, parseSkillId } from "../skills-adapter.js";
 
 class MockStore extends EventEmitter {
@@ -51,6 +51,60 @@ class MockStore extends EventEmitter {
 }
 
 // Mock skills adapter for testing
+function createExactLookupSkillsAdapter(skills: DiscoveredSkill[]): SkillsAdapter {
+  return createMockSkillsAdapter({
+    discoverSkills: vi.fn().mockResolvedValue(skills),
+    readSkillContent: vi.fn().mockImplementation(async (_rootDir: string, skillId: string) => {
+      if (!parseSkillId(skillId)) {
+        throw new Error(`Invalid skill ID format: ${skillId}`);
+      }
+      const skill = skills.find((entry) => entry.id === skillId);
+      if (!skill) {
+        throw new Error(`Skill not found: ${skillId}`);
+      }
+      return {
+        name: skill.name,
+        skillMd: `# ${skill.name}\n\nCanonical id: ${skill.id}`,
+        files: [{ name: "notes.txt", relativePath: "notes.txt", type: "file" as const }],
+      };
+    }),
+    readSkillFileContent: vi.fn().mockImplementation(async (_rootDir: string, skillId: string, relativePath: string) => {
+      if (!parseSkillId(skillId)) {
+        throw new Error(`Invalid skill ID format: ${skillId}`);
+      }
+      const skill = skills.find((entry) => entry.id === skillId);
+      if (!skill) {
+        throw new Error(`Skill not found: ${skillId}`);
+      }
+      if (relativePath !== "notes.txt") {
+        throw new Error(`Skill file not found: ${relativePath}`);
+      }
+      return {
+        name: "notes.txt",
+        relativePath,
+        content: `Supplement for ${skill.id}`,
+        isText: true,
+      };
+    }),
+  });
+}
+
+function createDiscoveredSkill(source: string, relativePath: string): DiscoveredSkill {
+  return {
+    id: computeSkillId(source, relativePath),
+    name: relativePath.replace(/^skills\//, ""),
+    path: `/tmp/fn-skills/${relativePath}`,
+    relativePath,
+    enabled: true,
+    metadata: {
+      source,
+      scope: "project",
+      origin: source === "*" ? "top-level" : "package",
+      baseDir: "/tmp/fn-skills",
+    },
+  };
+}
+
 function createMockSkillsAdapter(overrides?: Partial<SkillsAdapter>): SkillsAdapter {
   return {
     discoverSkills: vi.fn().mockResolvedValue([
@@ -246,8 +300,30 @@ describe("Skills routes", () => {
       });
       expect(mockAdapter.readSkillContent).toHaveBeenCalledWith(
         "/tmp/fn-skills",
-        "npm:@example/skill::skills/example/SKILL.md",
+        "npm%3A%40example%2Fskill::skills/example/SKILL.md",
       );
+    });
+
+    it.each([
+      ["disk source", createDiscoveredSkill("*", "skills/local/SKILL.md")],
+      ["plugin source", createDiscoveredSkill("plugin:foo", "skills/bar/SKILL.md")],
+      ["npm scoped source", createDiscoveredSkill("npm:@example/skill", "skills/example/SKILL.md")],
+    ])("preserves the canonical ID for %s content lookup", async (_label, skill) => {
+      const mockAdapter = createExactLookupSkillsAdapter([skill]);
+      const store = new MockStore();
+      const app = createServer(store as any, { skillsAdapter: mockAdapter as SkillsAdapter });
+
+      const res = await request(app, "GET", `/api/skills/${encodeURIComponent(skill.id)}/content`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        content: {
+          name: skill.name,
+          skillMd: `# ${skill.name}\n\nCanonical id: ${skill.id}`,
+          files: [{ name: "notes.txt", relativePath: "notes.txt", type: "file" }],
+        },
+      });
+      expect(mockAdapter.readSkillContent).toHaveBeenCalledWith("/tmp/fn-skills", skill.id);
     });
 
     it("returns 404 when skills adapter is not configured", async () => {
@@ -293,6 +369,70 @@ describe("Skills routes", () => {
         error: "Invalid skill ID format: invalid",
         code: "invalid_skill_id",
       });
+    });
+  });
+
+  describe("GET /api/skills/:id/file", () => {
+    it.each([
+      ["disk source", createDiscoveredSkill("*", "skills/local/SKILL.md")],
+      ["plugin source", createDiscoveredSkill("plugin:foo", "skills/bar/SKILL.md")],
+      ["npm scoped source", createDiscoveredSkill("npm:@example/skill", "skills/example/SKILL.md")],
+    ])("preserves the canonical ID for %s file lookup", async (_label, skill) => {
+      const mockAdapter = createExactLookupSkillsAdapter([skill]);
+      const store = new MockStore();
+      const app = createServer(store as any, { skillsAdapter: mockAdapter as SkillsAdapter });
+
+      const res = await request(app, "GET", `/api/skills/${encodeURIComponent(skill.id)}/file?path=${encodeURIComponent("notes.txt")}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        file: {
+          name: "notes.txt",
+          relativePath: "notes.txt",
+          content: `Supplement for ${skill.id}`,
+          isText: true,
+        },
+      });
+      expect(mockAdapter.readSkillFileContent).toHaveBeenCalledWith("/tmp/fn-skills", skill.id, "notes.txt");
+    });
+
+    it("returns 400 when path is missing", async () => {
+      const skill = createDiscoveredSkill("plugin:foo", "skills/bar/SKILL.md");
+      const mockAdapter = createExactLookupSkillsAdapter([skill]);
+      const store = new MockStore();
+      const app = createServer(store as any, { skillsAdapter: mockAdapter as SkillsAdapter });
+
+      const res = await request(app, "GET", `/api/skills/${encodeURIComponent(skill.id)}/file`);
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: "path is required", code: "invalid_path" });
+      expect(mockAdapter.readSkillFileContent).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 for invalid skill IDs", async () => {
+      const mockAdapter = createExactLookupSkillsAdapter([]);
+      const store = new MockStore();
+      const app = createServer(store as any, { skillsAdapter: mockAdapter as SkillsAdapter });
+
+      const res = await request(app, "GET", `/api/skills/${encodeURIComponent("invalid")}/file?path=notes.txt`);
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: "Invalid skill ID format: invalid",
+        code: "invalid_path",
+      });
+    });
+
+    it("returns 404 for non-existent skill files", async () => {
+      const skill = createDiscoveredSkill("plugin:foo", "skills/bar/SKILL.md");
+      const mockAdapter = createExactLookupSkillsAdapter([skill]);
+      const store = new MockStore();
+      const app = createServer(store as any, { skillsAdapter: mockAdapter as SkillsAdapter });
+
+      const res = await request(app, "GET", `/api/skills/${encodeURIComponent(skill.id)}/file?path=${encodeURIComponent("missing.txt")}`);
+
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: "Skill file not found", code: "skill_file_not_found" });
     });
   });
 

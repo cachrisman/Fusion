@@ -772,11 +772,12 @@ async function fetchClaudeUsageViaCli(): Promise<ProviderUsage> {
     const lines = cleanOutput.split("\n").map((l) => l.trim()).filter(Boolean);
 
     // Find sections by looking for known headers (use LAST occurrence since PTY output has redraws)
-    const sections: { label: string; windowMs: number }[] = [
+    const sections: { label: string; windowMs: number; displayLabel?: string }[] = [
       { label: "Current session", windowMs: 5 * 60 * 60 * 1000 },
       { label: "Current week (all models)", windowMs: 7 * 24 * 60 * 60 * 1000 },
       { label: "Current week (Sonnet", windowMs: 7 * 24 * 60 * 60 * 1000 },
       { label: "Current week (Opus", windowMs: 7 * 24 * 60 * 60 * 1000 },
+      { label: "Current week (Fable", windowMs: 7 * 24 * 60 * 60 * 1000, displayLabel: "Weekly (Fable)" },
     ];
 
     usage.status = "ok";
@@ -806,7 +807,7 @@ async function fetchClaudeUsageViaCli(): Promise<ProviderUsage> {
 
       if (percentUsed !== null) {
         const window: UsageWindow = {
-          label: section.label,
+          label: section.displayLabel ?? section.label,
           percentUsed: Math.min(100, Math.max(0, percentUsed)),
           percentLeft: Math.min(100, Math.max(0, 100 - percentUsed)),
           resetText,
@@ -1117,11 +1118,21 @@ async function fetchClaudeUsage(authStorage?: AuthStorageLike): Promise<Provider
     const sevenDay = parseWindow("seven_day", "Weekly", SEVEN_DAYS_MS);
     const sonnet = parseWindow("seven_day_sonnet", "Weekly (Sonnet)", SEVEN_DAYS_MS);
     const opus = parseWindow("seven_day_opus", "Weekly (Opus)", SEVEN_DAYS_MS);
+    /*
+    FNXC:UsageIndicator 2026-07-10-00:00:
+    Claude Fable 5 is a first-class Anthropic model, so the Usage dropdown must mirror the Sonnet/Opus per-model weekly windows when Anthropic returns a Fable usage bucket. `seven_day_fable` follows the existing API naming convention but remains an assumed primary key until a live OAuth usage payload confirms it; tolerant fallbacks keep the operator-visible window working if Anthropic ships a nearby field name.
+    */
+    const fable = parseWindow("seven_day_fable", "Weekly (Fable)", SEVEN_DAYS_MS, [
+      "seven_day_claude_fable",
+      "fable",
+      "seven_day_fable_5",
+    ]);
 
     if (fiveHour) usage.windows.push(fiveHour);
     if (sevenDay) usage.windows.push(sevenDay);
     if (sonnet) usage.windows.push(sonnet);
     if (opus) usage.windows.push(opus);
+    if (fable) usage.windows.push(fable);
   } catch (e: unknown) {
     usage.status = "error";
     usage.error = e instanceof Error ? e.message : "Failed to fetch Claude usage";
@@ -1330,7 +1341,14 @@ async function fetchGeminiUsage(): Promise<ProviderUsage> {
     const settings = JSON.parse(await readFile(settingsPath, "utf-8"));
     const authType = settings?.security?.auth?.selectedType;
     if (authType === "api-key" || authType === "vertex-ai") {
-      usage.status = "error";
+      /*
+      FNXC:UsageProviders 2026-07-10-12:00:
+      Gemini appears in usage only when configured for the meterable OAuth path and its token authenticates. Unsupported auth types mean Gemini is not configured for metering, so demote to `no-auth` for the single aggregate filter instead of showing a noisy error card.
+
+      FNXC:UsageProviders 2026-07-10-12:00:
+      Gemini deliberately differs from the general FN-7798 keep-auth-expired-visible rule: stale Gemini CLI logins should not clutter the usage list, while transient failures of a configured OAuth token still stay `error` and visible.
+      */
+      usage.status = "no-auth";
       usage.error = `Unsupported auth type: ${authType} (need oauth-personal)`;
       return usage;
     }
@@ -1352,7 +1370,11 @@ async function fetchGeminiUsage(): Promise<ProviderUsage> {
     );
 
     if (res.status === 401 || res.status === 403) {
-      usage.status = "error";
+      /*
+      FNXC:UsageProviders 2026-07-10-12:00:
+      Gemini auth failures mean the meter cannot authenticate the stored OAuth token, so classify 401/403 as `no-auth` and let `fetchAllProviderUsage` omit Gemini. Keep the diagnostic message for logs; HTTP 5xx, network, timeout, and parse failures remain actionable `error` states for configured Gemini.
+      */
+      usage.status = "no-auth";
       usage.error = "Auth expired — run 'gemini' to re-login";
       return usage;
     }
@@ -1797,12 +1819,18 @@ async function fetchGitHubCopilotUsage(): Promise<ProviderUsage> {
         return usage;
       }
 
-      usage.status = "error";
       if (res.status === 404) {
+        /*
+        FNXC:UsageProviders 2026-07-10-00:00:
+        Usage surfaces must only show providers the user configured with meterable data. A GitHub credential without Copilot entitlement is a no-entitlement path, so demote it to `no-auth` for the aggregate filter while keeping diagnostics on the provider result.
+        */
+        usage.status = "no-auth";
         usage.error = "No Copilot subscription found";
       } else if (res.status === 401 || res.status === 403) {
+        usage.status = "error";
         usage.error = "Auth expired — re-login from Fusion Settings → Authentication";
       } else {
+        usage.status = "error";
         usage.error = `HTTP ${res.status}: ${res.body.slice(0, 200)}`;
       }
       return usage;
@@ -1830,7 +1858,11 @@ async function fetchGitHubCopilotUsage(): Promise<ProviderUsage> {
   } catch (e: unknown) {
     const errMsg = e instanceof Error ? e.message : "Failed to fetch";
     if (errMsg.includes("404") || errMsg.includes("Not Found")) {
-      usage.status = "error";
+      /*
+      FNXC:UsageProviders 2026-07-10-00:00:
+      An authenticated `gh` CLI can exist for ordinary git without Fusion Copilot setup or a Copilot subscription. Treat the 404 no-subscription response as not configured/no meterable entitlement so it is omitted, while 401/403 and transient failures remain visible errors.
+      */
+      usage.status = "no-auth";
       usage.error = "No Copilot subscription found";
     } else if (errMsg.includes("401") || errMsg.includes("403")) {
       usage.status = "error";
@@ -1925,7 +1957,10 @@ export async function fetchAllProviderUsage(authStorage?: AuthStorageLike): Prom
     }
   }
 
-  // Only return providers that have valid auth configured.
+  /*
+  FNXC:UsageProviders 2026-07-10-00:00:
+  This is the single enforcement point for the usage-list invariant: show only providers that are both configured and expose meterable data. Fetchers demote missing credentials and no-entitlement/nothing-to-meter outcomes to `no-auth`; configured providers with actionable failures stay `error` and remain visible.
+  */
   const authenticatedProviders = providers.filter((provider) => provider.status !== "no-auth");
 
   // Update cache

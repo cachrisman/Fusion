@@ -22,6 +22,8 @@ interface TaskSeed {
   tokenUsageLastUsedAt?: string | null;
   modelProvider?: string | null;
   modelId?: string | null;
+  tokenUsageModelProvider?: string | null;
+  tokenUsageModelId?: string | null;
 }
 
 function insertAgent(db: Database, id: string, name: string, role = "executor", state = "idle"): void {
@@ -44,8 +46,9 @@ function insertTask(db: Database, task: TaskSeed): void {
     `INSERT INTO tasks
        (id, description, "column", createdAt, updatedAt, columnMovedAt, assignedAgentId,
         modifiedFiles, tokenUsageInputTokens, tokenUsageOutputTokens, tokenUsageCachedTokens,
-        tokenUsageCacheWriteTokens, tokenUsageTotalTokens, tokenUsageLastUsedAt, modelProvider, modelId)
-     VALUES (?, 'desc', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        tokenUsageCacheWriteTokens, tokenUsageTotalTokens, tokenUsageLastUsedAt, modelProvider, modelId,
+        tokenUsageModelProvider, tokenUsageModelId)
+     VALUES (?, 'desc', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     task.id,
     task.column ?? "todo",
@@ -62,6 +65,8 @@ function insertTask(db: Database, task: TaskSeed): void {
     task.tokenUsageLastUsedAt ?? null,
     task.modelProvider ?? null,
     task.modelId ?? null,
+    task.tokenUsageModelProvider ?? null,
+    task.tokenUsageModelId ?? null,
   );
 }
 
@@ -158,6 +163,31 @@ describe("team-analytics", () => {
     expect(result.totals.tasksCompleted).toBe(1);
     expect(result.totals.tasksInProgress).toBe(1);
     expect(result.totals.tasksInReview).toBe(1);
+  });
+
+
+  it("prices token usage from the actually-used model snapshot when task model columns are empty", () => {
+    insertAgent(db, "agent-a", "Alpha");
+    insertTask(db, {
+      id: "snapshot-priced",
+      agentId: "agent-a",
+      inputTokens: 1_000_000,
+      outputTokens: 200_000,
+      cachedTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 1_200_000,
+      tokenUsageLastUsedAt: "2026-07-10T15:22:50.837Z",
+      modelProvider: null,
+      modelId: null,
+      tokenUsageModelProvider: "anthropic",
+      tokenUsageModelId: "claude-sonnet-5",
+    });
+
+    const result = aggregateTeamAnalytics(db, {});
+
+    expect(result.agents[0].cost).toMatchObject({ unavailable: false, stale: false });
+    expect(result.agents[0].cost.usd).toBeCloseTo(4, 2);
+    expect(result.totals.cost.usd).toBeCloseTo(4, 2);
   });
 
   it("returns zeroed totals and an empty agent array for an empty database", () => {

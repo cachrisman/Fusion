@@ -104,6 +104,8 @@ describe("settings key parity", () => {
   it("keeps model-lane thinking overrides in their owning settings scopes", () => {
     expect(DEFAULT_PROJECT_SETTINGS.defaultThinkingLevelOverride).toBeUndefined();
     expect(DEFAULT_PROJECT_SETTINGS.titleSummarizerThinkingLevel).toBeUndefined();
+    expect(DEFAULT_PROJECT_SETTINGS.titleSummarizerFallbackThinkingLevel).toBeUndefined();
+    expect(DEFAULT_GLOBAL_SETTINGS.fallbackThinkingLevel).toBeUndefined();
     expect(DEFAULT_GLOBAL_SETTINGS.executionGlobalThinkingLevel).toBeUndefined();
     expect(DEFAULT_GLOBAL_SETTINGS.planningGlobalThinkingLevel).toBeUndefined();
     expect(DEFAULT_GLOBAL_SETTINGS.validatorGlobalThinkingLevel).toBeUndefined();
@@ -111,6 +113,12 @@ describe("settings key parity", () => {
 
     expect(isProjectSettingsKey("defaultThinkingLevelOverride")).toBe(true);
     expect(isProjectSettingsKey("titleSummarizerThinkingLevel")).toBe(true);
+    expect(isProjectSettingsKey("titleSummarizerFallbackThinkingLevel")).toBe(true);
+    expect(isGlobalSettingsKey("fallbackThinkingLevel")).toBe(true);
+    expect(isProjectSettingsKey("planningFallbackThinkingLevel")).toBe(false);
+    expect(isGlobalSettingsKey("planningFallbackThinkingLevel")).toBe(false);
+    expect(isProjectSettingsKey("validatorFallbackThinkingLevel")).toBe(false);
+    expect(isGlobalSettingsKey("validatorFallbackThinkingLevel")).toBe(false);
     expect(isGlobalSettingsKey("executionGlobalThinkingLevel")).toBe(true);
     expect(isGlobalSettingsKey("planningGlobalThinkingLevel")).toBe(true);
     expect(isGlobalSettingsKey("validatorGlobalThinkingLevel")).toBe(true);
@@ -287,10 +295,12 @@ describe("settings key parity", () => {
       "planningModelId",
       "planningFallbackProvider",
       "planningFallbackModelId",
+      "planningFallbackThinkingLevel",
       "validatorProvider",
       "validatorModelId",
       "validatorFallbackProvider",
       "validatorFallbackModelId",
+      "validatorFallbackThinkingLevel",
     ];
     for (const key of movedKeys) {
       expect(isProjectSettingsKey(key)).toBe(false);

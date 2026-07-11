@@ -51,12 +51,40 @@ import {
   StandardStreamingMessage,
   formatModelTag,
 } from "./StandardChatSurface";
+import { CHAT_COMMANDS, matchChatCommand, filterChatCommands, getSlashTriggerMatch, type ChatCommand } from "./chat-commands";
+
+/**
+ * Optional task-bound context that enables the "/" command registry (e.g.
+ * `/steer`) in a ChatView instance. When omitted (the default for the
+ * general, non-task-bound Chat surface), the command registry contributes
+ * nothing to the "/" menu and dispatch-on-submit is a no-op — skills
+ * autocomplete behaves exactly as before.
+ */
+export interface ChatCommandContext {
+  taskId: string;
+  projectId?: string;
+  /** Whether the bound task currently has a running/active agent. `/steer` is only dispatchable when true. */
+  agentRunning: boolean;
+}
+
+/**
+ * A single entry in the generalized "/" menu — either a registered command
+ * (e.g. `/steer`) or a discovered skill. Both kinds share one highlighted
+ * index / keyboard-nav path; only their selection behavior differs (a
+ * command is inserted as trigger text or dispatched later on submit, a
+ * skill is always inserted as a `/skill:<name>` text token).
+ */
+export type SkillMenuEntry =
+  | { kind: "command"; command: ChatCommand; disabled: boolean }
+  | { kind: "skill"; skill: DiscoveredSkill };
 
 export interface ChatViewProps {
   projectId?: string;
   addToast: (msg: string, type?: "success" | "error" | "warning") => void;
   experimentalFeatures?: Record<string, boolean>;
   floating?: boolean;
+  /** Enables the "/" command registry (e.g. `/steer`) for this composer instance. See {@link ChatCommandContext}. */
+  chatCommandContext?: ChatCommandContext;
   /*
   FNXC:RightDockChat 2026-06-27-23:12:
   The right dock can host ChatView in a 360px sidebar while the browser viewport remains desktop-sized. Let dock callers force the same narrow list/detail layout used by mobile/resized floating chat without passing floating chrome callbacks.
@@ -162,21 +190,13 @@ const ALLOWED_ATTACHMENT_TYPES = [
   "text/x-log",
 ];
 
-function getSkillTriggerMatch(value: string): { filter: string; start: number; end: number } | null {
-  const triggerMatch = /(^|[\s])\/([^\s]*)$/.exec(value);
-  if (!triggerMatch) {
-    return null;
-  }
-
-  const prefix = triggerMatch[1] ?? "";
-  const filter = triggerMatch[2] ?? "";
-  const start = triggerMatch.index + prefix.length;
-  return {
-    filter,
-    start,
-    end: value.length,
-  };
-}
+/**
+ * ChatView's local name for the shared slash-trigger matcher used by both
+ * skill autocomplete and the command registry (see chat-commands.ts's
+ * `getSlashTriggerMatch` doc comment: this alias exists so there is exactly
+ * one implementation of the trigger regex in the dashboard package).
+ */
+const getSkillTriggerMatch = getSlashTriggerMatch;
 
 function getMentionTriggerMatch(
   value: string,
@@ -259,7 +279,7 @@ interface NewChatDialogProps {
   projectId?: string;
   defaultModel: DefaultModelSelection;
   onClose: () => void;
-  onCreate: (input: { agentId: string; modelProvider?: string; modelId?: string }) => void;
+  onCreate: (input: { agentId: string; modelProvider?: string; modelId?: string; thinkingLevel?: string }) => void;
 }
 
 function NewChatDialog({ projectId, defaultModel, onClose, onCreate }: NewChatDialogProps) {
@@ -272,6 +292,11 @@ function NewChatDialog({ projectId, defaultModel, onClose, onCreate }: NewChatDi
     ? `${defaultModel.provider}/${defaultModel.modelId}`
     : "";
   const [selectedModel, setSelectedModel] = useState<string>(defaultModelValue);
+  /*
+   * FNXC:Chat-ThinkingLevel 2026-07-10-00:00:
+   * New model-mode chats expose the shared inline thinking selector; an empty value means Default and is omitted from the create-session payload so the backend resolves project/global reasoning effort.
+   */
+  const [thinkingLevel, setThinkingLevel] = useState<string>("");
   const [favoriteProviders, setFavoriteProviders] = useState<string[]>(cachedFavoriteProviders);
   const [favoriteModels, setFavoriteModels] = useState<string[]>(cachedFavoriteModels);
 
@@ -341,7 +366,7 @@ function NewChatDialog({ projectId, defaultModel, onClose, onCreate }: NewChatDi
     if (slashIdx <= 0) return;
     const modelProvider = resolvedModel.slice(0, slashIdx);
     const modelId = resolvedModel.slice(slashIdx + 1);
-    onCreate({ agentId: FN_AGENT_ID, modelProvider, modelId });
+    onCreate({ agentId: FN_AGENT_ID, modelProvider, modelId, thinkingLevel: thinkingLevel || undefined });
   };
 
   const isSubmitDisabled =
@@ -417,6 +442,10 @@ function NewChatDialog({ projectId, defaultModel, onClose, onCreate }: NewChatDi
                   onToggleFavorite={handleToggleFavorite}
                   favoriteModels={favoriteModels}
                   onToggleModelFavorite={handleToggleModelFavorite}
+                  showThinkingLevel
+                  thinkingLevel={thinkingLevel}
+                  onThinkingLevelChange={setThinkingLevel}
+                  defaultThinkingLevel="off"
                 />
               )}
             </div>
@@ -449,7 +478,7 @@ interface RoomContext {
   memberIds: ReadonlySet<string>;
 }
 
-export function ChatView({ projectId, addToast, floating = false, compactLayout = false, onPopOut, onMaximize, onMinimize, onClose }: ChatViewProps) {
+export function ChatView({ projectId, addToast, floating = false, compactLayout = false, onPopOut, onMaximize, onMinimize, onClose, chatCommandContext }: ChatViewProps) {
   const { t } = useTranslation("app");
   useEffect(() => {
     recordResumeEvent({
@@ -767,6 +796,24 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       : discoveredSkills;
     return matchingSkills.slice(0, 10);
   }, [discoveredSkills, skillFilter]);
+
+  // Commands only contribute to the "/" menu when this ChatView instance is
+  // bound to a task (chatCommandContext provided) — the general, non-task-bound
+  // Chat surface never shows/dispatches them, so its skill-only behavior is unchanged.
+  const filteredCommands = useMemo(() => {
+    if (!chatCommandContext) return [] as ChatCommand[];
+    return filterChatCommands(skillFilter, CHAT_COMMANDS);
+  }, [chatCommandContext, skillFilter]);
+
+  const skillMenuEntries = useMemo<SkillMenuEntry[]>(() => {
+    const commandEntries: SkillMenuEntry[] = filteredCommands.map((command) => ({
+      kind: "command",
+      command,
+      disabled: !chatCommandContext?.agentRunning,
+    }));
+    const skillEntries: SkillMenuEntry[] = filteredSkills.map((skill) => ({ kind: "skill", skill }));
+    return [...commandEntries, ...skillEntries];
+  }, [filteredCommands, filteredSkills, chatCommandContext]);
 
   const mentionAgents = useMemo(() => Array.from(agentsMap.values()), [agentsMap]);
 
@@ -1400,7 +1447,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
   // Handle create session
   const handleCreateSession = useCallback(
-    async (input: { agentId: string; modelProvider?: string; modelId?: string }) => {
+    async (input: { agentId: string; modelProvider?: string; modelId?: string; thinkingLevel?: string }) => {
       try {
         await createSession(input);
         setShowNewDialog(false);
@@ -1469,6 +1516,52 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     const files = pendingAttachments.map((attachment) => attachment.file);
     if ((!trimmed && files.length === 0) || !activeSession) return;
 
+    if (chatCommandContext) {
+      const commandMatch = matchChatCommand(trimmed, CHAT_COMMANDS);
+      if (commandMatch) {
+        if (!chatCommandContext.agentRunning) {
+          // Do not silently fall back to a normal chat message: /steer with no
+          // running agent is a no-op with feedback, not a plain send.
+          addToast(t("chat.commandNoRunningAgent", "No running agent to steer"), "warning");
+          return;
+        }
+
+        /*
+        FNXC:ChatSlashCommands 2026-07-10-11:40:
+        Slash commands carry no attachments. Block dispatch (rather than silently dropping) when files are staged, since clearing the composer below revokes their object URLs before they could ever be sent.
+        */
+        if (files.length > 0) {
+          addToast(
+            t("chat.commandNoAttachments", "Attachments aren't supported with commands — remove them before sending"),
+            "warning",
+          );
+          return;
+        }
+
+        /*
+        FNXC:ChatSlashCommands 2026-07-10-11:40:
+        Clear the composer immediately on submit — BEFORE the network round-trip — not inside the success callback. Clearing late wipes any text the user typed while the command was in flight (composer-wipe race, FUX-015).
+        */
+        clearComposerState();
+        void commandMatch.command
+          .run({
+            taskId: chatCommandContext.taskId,
+            projectId: chatCommandContext.projectId,
+            remainder: commandMatch.remainder,
+          })
+          .then(() => {
+            addToast(t("chat.commandSteerSuccess", "Sent to the running agent"), "success");
+          })
+          .catch((error: unknown) => {
+            const message = error instanceof Error && error.message.trim()
+              ? error.message
+              : t("chat.commandSteerFailed", "Failed to send to the running agent");
+            addToast(message, "error");
+          });
+        return;
+      }
+    }
+
     if (trimmed === "/clear" || trimmed === "/new") {
       clearComposerState();
       clearPendingMessage();
@@ -1477,6 +1570,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
         agentId: activeSession.agentId,
         modelProvider: activeSession.modelProvider ?? undefined,
         modelId: activeSession.modelId ?? undefined,
+        thinkingLevel: activeSession.thinkingLevel ?? undefined,
       }).catch(() => {
         addToast(t("chat.failedToClearConversation", "Failed to clear conversation"), "error");
       });
@@ -1495,6 +1589,8 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     createSession,
     addToast,
     sendMessage,
+    chatCommandContext,
+    t,
   ]);
 
 
@@ -1609,6 +1705,39 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
     [resizeComposer],
   );
 
+  const handleCommandSelect = useCallback(
+    (command: ChatCommand, disabled: boolean) => {
+      if (disabled) {
+        addToast(t("chat.commandNoRunningAgent", "No running agent to steer"), "warning");
+        return;
+      }
+
+      setMessageInput((currentInput) => {
+        const triggerMatch = getSkillTriggerMatch(currentInput);
+        if (!triggerMatch) {
+          return currentInput;
+        }
+
+        const replacement = `${command.trigger} `;
+        const nextInput =
+          currentInput.slice(0, triggerMatch.start) + replacement + currentInput.slice(triggerMatch.end);
+
+        window.requestAnimationFrame(() => {
+          if (!inputRef.current) return;
+          resizeComposer(inputRef.current);
+          inputRef.current.focus();
+        });
+
+        return nextInput;
+      });
+
+      setShowSkillMenu(false);
+      setSkillFilter("");
+      setHighlightedSkillIndex(0);
+    },
+    [resizeComposer, addToast, t],
+  );
+
   const handleMentionSelect = useCallback(
     (agent: Agent) => {
       const textarea = inputRef.current;
@@ -1720,27 +1849,29 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
 
       if (showSkillMenu && e.key === "ArrowDown") {
         e.preventDefault();
-        if (filteredSkills.length > 0) {
-          setHighlightedSkillIndex((prev) => (prev + 1) % filteredSkills.length);
+        if (skillMenuEntries.length > 0) {
+          setHighlightedSkillIndex((prev) => (prev + 1) % skillMenuEntries.length);
         }
         return;
       }
 
       if (showSkillMenu && e.key === "ArrowUp") {
         e.preventDefault();
-        if (filteredSkills.length > 0) {
+        if (skillMenuEntries.length > 0) {
           setHighlightedSkillIndex((prev) =>
-            prev === 0 ? filteredSkills.length - 1 : prev - 1,
+            prev === 0 ? skillMenuEntries.length - 1 : prev - 1,
           );
         }
         return;
       }
 
-      if (showSkillMenu && (e.key === "Enter" || e.key === "Tab") && filteredSkills.length > 0) {
+      if (showSkillMenu && (e.key === "Enter" || e.key === "Tab") && skillMenuEntries.length > 0) {
         e.preventDefault();
-        const skillToSelect = filteredSkills[highlightedSkillIndex] ?? filteredSkills[0];
-        if (skillToSelect) {
-          handleSkillSelect(skillToSelect);
+        const entryToSelect = skillMenuEntries[highlightedSkillIndex] ?? skillMenuEntries[0];
+        if (entryToSelect?.kind === "skill") {
+          handleSkillSelect(entryToSelect.skill);
+        } else if (entryToSelect?.kind === "command") {
+          handleCommandSelect(entryToSelect.command, entryToSelect.disabled);
         }
         return;
       }
@@ -1762,9 +1893,10 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       mentionHighlightIndex,
       handleMentionSelect,
       showSkillMenu,
-      filteredSkills,
+      skillMenuEntries,
       highlightedSkillIndex,
       handleSkillSelect,
+      handleCommandSelect,
       handleSendDispatch,
       fileMention,
       insertHashMention,
@@ -2120,7 +2252,14 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
   const activeModelTag = formatModelTag(activeResolvedModel?.provider, activeResolvedModel?.modelId);
   const activeModelProvider = activeResolvedModel?.provider ?? null;
   const hasThreadInView = Boolean(activeSession || isStreaming || messages.length > 0);
-  const hasMobileDetailSelection = chatScope === "rooms" ? roomThreadActive : Boolean(activeSession);
+  /*
+  FNXC:ChatHeader 2026-07-10-00:00:
+  After Chat remounts, useChat/useChatRooms can restore persisted activeSession/activeRoom while sidebarVisible resets to true. On mobile, header controls, the direct-thread shell class, and swipe-back history must follow the pane the body is actually showing, so detail-open requires the sidebar/list to be hidden instead of relying on restored thread presence alone.
+  */
+  const mobileThreadPaneOpen = isChatMobile && !sidebarVisible && (chatScope === "rooms" ? roomThreadActive : hasThreadInView);
+  const hasMobileDetailSelection = isChatMobile
+    ? mobileThreadPaneOpen
+    : chatScope === "rooms" ? roomThreadActive : Boolean(activeSession);
   const previousHasMobileDetailSelectionRef = useRef(hasMobileDetailSelection);
 
   useEffect(() => {
@@ -2158,8 +2297,9 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       total: threadHeaderContextTotal,
     })
     : null;
-  const showMobileSessionSwitcher = isChatMobile && chatScope === "direct" && !!activeSession;
-  const showMobileDirectThreadHeaderControls = isChatMobile && chatScope === "direct" && hasThreadInView;
+  const showMobileSessionSwitcher = mobileThreadPaneOpen && chatScope === "direct" && !!activeSession;
+  const showMobileDirectThreadHeaderControls = mobileThreadPaneOpen && chatScope === "direct";
+  const showMobileRoomThreadHeaderControls = mobileThreadPaneOpen && chatScope === "rooms";
 
   const agentName =
     agentsMap.get(activeSession?.agentId ?? "")?.name ||
@@ -2410,6 +2550,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       <input
         ref={fileInputRef}
         type="file"
+        data-testid="chat-file-input"
         accept="image/*,.txt,.json,.yaml,.yml,.log,.csv,.xml,.md"
         multiple
         style={{ display: "none" }}
@@ -2420,30 +2561,51 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
       />
       {showSkillMenu && (
         <div className="chat-skill-menu" data-testid="chat-skill-menu" role="listbox" aria-label={t("chat.skillSuggestions", "Skill suggestions")}>
-          {skillsLoading ? (
+          {skillsLoading && filteredCommands.length === 0 ? (
             <div className="chat-skill-menu-empty">{t("chat.loadingSkills", "Loading skills…")}</div>
-          ) : filteredSkills.length === 0 ? (
+          ) : skillMenuEntries.length === 0 ? (
             <div className="chat-skill-menu-empty">
               {skillFilter ? t("chat.noSkillsFound", "No skills found") : t("chat.noSkillsAvailable", "No skills available")}
             </div>
           ) : (
-            filteredSkills.map((skill, index) => (
-              <button
-                key={skill.id}
-                type="button"
-                role="option"
-                aria-selected={index === highlightedSkillIndex}
-                className={`chat-skill-menu-item${index === highlightedSkillIndex ? " chat-skill-menu-item--highlighted" : ""}`}
-                onMouseDown={(e) => e.preventDefault()}
-                onMouseEnter={() => setHighlightedSkillIndex(index)}
-                onClick={() => handleSkillSelect(skill)}
-              >
-                <span className="chat-skill-menu-item-name">{skill.name}</span>
-                <span className="chat-skill-menu-item-description" title={skill.relativePath}>
-                  {skill.relativePath}
-                </span>
-              </button>
-            ))
+            skillMenuEntries.map((entry, index) =>
+              entry.kind === "command" ? (
+                <button
+                  key={`command-${entry.command.trigger}`}
+                  type="button"
+                  role="option"
+                  aria-selected={index === highlightedSkillIndex}
+                  aria-disabled={entry.disabled}
+                  className={`chat-skill-menu-item chat-command-menu-item${index === highlightedSkillIndex ? " chat-skill-menu-item--highlighted" : ""}${entry.disabled ? " chat-command-menu-item--disabled" : ""}`}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onMouseEnter={() => setHighlightedSkillIndex(index)}
+                  onClick={() => handleCommandSelect(entry.command, entry.disabled)}
+                >
+                  <span className="chat-skill-menu-item-name">{entry.command.trigger}</span>
+                  <span className="chat-skill-menu-item-description">
+                    {entry.disabled
+                      ? t("chat.commandNoRunningAgentHint", "No running agent to steer")
+                      : entry.command.description}
+                  </span>
+                </button>
+              ) : (
+                <button
+                  key={entry.skill.id}
+                  type="button"
+                  role="option"
+                  aria-selected={index === highlightedSkillIndex}
+                  className={`chat-skill-menu-item${index === highlightedSkillIndex ? " chat-skill-menu-item--highlighted" : ""}`}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onMouseEnter={() => setHighlightedSkillIndex(index)}
+                  onClick={() => handleSkillSelect(entry.skill)}
+                >
+                  <span className="chat-skill-menu-item-name">{entry.skill.name}</span>
+                  <span className="chat-skill-menu-item-description" title={entry.skill.relativePath}>
+                    {entry.skill.relativePath}
+                  </span>
+                </button>
+              ),
+            )
           )}
         </div>
       )}
@@ -3171,8 +3333,9 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
         <div ref={chatThreadRef} className="chat-thread">
           {rooms.activeRoom ? (
             <>
+              {(!isChatMobile || showMobileRoomThreadHeaderControls) && (
               <div className="chat-room-thread-header">
-                {isChatMobile && (
+                {showMobileRoomThreadHeaderControls && (
                   <button className="btn-icon" onClick={handleRoomBack} data-testid="chat-back-btn">
                     <ChevronLeft size={16} />
                   </button>
@@ -3228,6 +3391,7 @@ export function ChatView({ projectId, addToast, floating = false, compactLayout 
                   ))}
                 </div>
               </div>
+              )}
               <div className="chat-messages" ref={messagesContainerRef} onScroll={updateScrollState}>
                 {rooms.messagesLoading ? (
                   <div className="chat-empty-state">{t("chat.loadingMessages", "Loading messages...")}</div>

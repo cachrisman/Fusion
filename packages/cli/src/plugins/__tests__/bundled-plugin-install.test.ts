@@ -210,6 +210,44 @@ describe("CLI candidate bundle-directory resolution", () => {
     expect(result).toBe("installed");
   });
 
+  /*
+  FNXC:PluginLoader 2026-07-10-00:00:
+  Durability regression for "grok chat returns empty replies". In a source
+  checkout BOTH the staged tsup bundle (<cli>/dist/plugins/<id>/bundled.js) and
+  the live workspace source (<repo>/plugins/<id>) exist. resolvePluginEntryPath
+  prefers bundled.js with no freshness check, so the stale staged bundle used to
+  win and shadow source-only plugin fixes. The workspace source dir must now be
+  probed first so dev loads the freshness-checked live plugin, not the stale bundle.
+  */
+  it("prefers the live workspace source over the staged tsup bundle in a source checkout", async () => {
+    const ID = "fusion-plugin-grok-runtime";
+    mockExistsSync.mockImplementation((p: string) => {
+      if (typeof p !== "string") return false;
+      // Staged tsup bundle (would win under the old order).
+      if (p.endsWith(`/dist/plugins/${ID}/manifest.json`)) return true;
+      if (p.endsWith(`/dist/plugins/${ID}/bundled.js`)) return true;
+      // Live workspace source dir: <repo>/plugins/<id> (NOT under /dist/plugins/).
+      if (p.includes("/dist/plugins/")) return false;
+      if (p.endsWith(`/plugins/${ID}/manifest.json`)) return true;
+      if (p.endsWith(`/plugins/${ID}/dist/index.js`)) return true;
+      return false;
+    });
+    mockReadFile.mockResolvedValue(JSON.stringify(makeManifest({ id: ID, name: "Grok Runtime" })));
+    mockValidatePluginManifest.mockReturnValue({ valid: true, errors: [] });
+
+    const store = makePluginStore();
+    const loader = makePluginLoader();
+
+    const result = await ensureBundledPluginInstalled(store as never, loader as never, ID);
+
+    expect(result).toBe("installed");
+    const registerCall = store.registerPlugin.mock.calls[0]?.[0] as { path: string };
+    // Must resolve the live workspace entry, never the stale staged bundle.
+    expect(registerCall.path.endsWith(`/plugins/${ID}/dist/index.js`)).toBe(true);
+    expect(registerCall.path).not.toContain("/dist/plugins/");
+    expect(registerCall.path.endsWith("bundled.js")).toBe(false);
+  });
+
   it("returns missing-bundle when no CLI candidate dir has a manifest", async () => {
     mockExistsSync.mockReturnValue(false);
     const store = makePluginStore();

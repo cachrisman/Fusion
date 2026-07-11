@@ -52,6 +52,8 @@ interface TaskTokenRow {
   totalTokens: number | null;
   modelProvider: string | null;
   modelId: string | null;
+  tokenUsageModelProvider: string | null;
+  tokenUsageModelId: string | null;
 }
 
 interface CountByAgentRow {
@@ -121,7 +123,14 @@ function addRowCost(
       cachedTokens: row.cachedTokens ?? 0,
       cacheWriteTokens: row.cacheWriteTokens ?? 0,
     },
-    { provider: row.modelProvider, model: row.modelId },
+    {
+      /*
+       * FNXC:CommandCenter 2026-07-10-08:25:
+       * Current runtime usage rows persist the actually-used model in tokenUsageModelProvider/tokenUsageModelId while task-level modelProvider/modelId can stay empty. Team cost analytics must price the usage snapshot first so estimated cost survives model-resolution hierarchy and catalog drift instead of reverting to the unavailable sentinel.
+       */
+      provider: row.tokenUsageModelProvider ?? row.modelProvider,
+      model: row.tokenUsageModelId ?? row.modelId,
+    },
     now,
     pricingOverrides,
   );
@@ -228,7 +237,9 @@ export function aggregateTeamAnalytics(
          tokenUsageCacheWriteTokens AS cacheWriteTokens,
          tokenUsageTotalTokens AS totalTokens,
          modelProvider,
-         modelId
+         modelId,
+         tokenUsageModelProvider,
+         tokenUsageModelId
        FROM tasks
        WHERE ${tokenClauses.join(" AND ")}`,
     )

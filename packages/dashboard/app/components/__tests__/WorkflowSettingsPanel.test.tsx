@@ -593,6 +593,10 @@ describe("WorkflowSettingsPanel — Values tab", () => {
     { id: "validatorThinkingLevel", name: "Validator thinking level", type: "enum", options: [{ value: "minimal", label: "Minimal" }] },
     { id: "planningFallbackProvider", name: "Planning fallback provider", type: "string" },
     { id: "planningFallbackModelId", name: "Planning fallback model", type: "string" },
+    { id: "planningFallbackThinkingLevel", name: "Planning fallback thinking level", type: "enum", options: [{ value: "high", label: "High" }] },
+    { id: "validatorFallbackProvider", name: "Validator fallback provider", type: "string" },
+    { id: "validatorFallbackModelId", name: "Validator fallback model", type: "string" },
+    { id: "validatorFallbackThinkingLevel", name: "Validator fallback thinking level", type: "enum", options: [{ value: "low", label: "Low" }] },
     { id: "customModelProvider", name: "Custom model provider", type: "string" },
   ];
 
@@ -682,6 +686,40 @@ describe("WorkflowSettingsPanel — Values tab", () => {
 
     await waitFor(() => expect(mockUpdateValues).toHaveBeenCalledTimes(1));
     expect(mockUpdateValues).toHaveBeenCalledWith("wf-1", { planningThinkingLevel: null }, "proj-1");
+  });
+
+  it("edits workflow fallback lane thinking inline and reset clears the companion setting", async () => {
+    mockFetchValues.mockResolvedValue(
+      payload({
+        stored: { validatorFallbackThinkingLevel: "low", validatorFallbackProvider: "anthropic", validatorFallbackModelId: "claude-sonnet" },
+        effective: { validatorFallbackThinkingLevel: "low", validatorFallbackProvider: "anthropic", validatorFallbackModelId: "claude-sonnet" },
+      }),
+    );
+    mockUpdateValues.mockResolvedValueOnce(payload({
+      stored: { validatorFallbackThinkingLevel: "low", validatorFallbackProvider: "anthropic", validatorFallbackModelId: "claude-sonnet" },
+      effective: { validatorFallbackThinkingLevel: "low", validatorFallbackProvider: "anthropic", validatorFallbackModelId: "claude-sonnet" },
+    }));
+    render(<Host initial={modelDecls} readOnly />);
+    await waitFor(() => expect(mockFetchModels).toHaveBeenCalled());
+
+    fireEvent.click(await screen.findByLabelText("Planning Fallback Model"));
+    fireEvent.change(screen.getByTestId("custom-model-dropdown-thinking"), { target: { value: "high" } });
+    fireEvent.click(screen.getByTestId("wf-settings-save-values"));
+
+    await waitFor(() => expect(mockUpdateValues).toHaveBeenCalledTimes(1));
+    expect(mockUpdateValues).toHaveBeenCalledWith("wf-1", { planningFallbackThinkingLevel: "high" }, "proj-1");
+
+    mockUpdateValues.mockClear();
+    const fallbackRow = screen.getByTestId("wf-settings-value-validator-fallback");
+    fireEvent.click(within(fallbackRow).getByRole("button", { name: "Reset to default" }));
+    fireEvent.click(screen.getByTestId("wf-settings-save-values"));
+
+    await waitFor(() => expect(mockUpdateValues).toHaveBeenCalledTimes(1));
+    expect(mockUpdateValues).toHaveBeenCalledWith("wf-1", {
+      validatorFallbackProvider: null,
+      validatorFallbackModelId: null,
+      validatorFallbackThinkingLevel: null,
+    }, "proj-1");
   });
 
   it("does not render a thinking control when a lane lacks its companion declaration", async () => {

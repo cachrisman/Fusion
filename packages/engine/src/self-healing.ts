@@ -39,8 +39,10 @@ import {
   classifyMissingWorktreeSessionStartFailure,
   extractMissingWorktreePathFromSessionStartFailure,
   isMissingWorktreeSessionStartFailure,
+  isMergeActiveMissingWorktreeSessionStartFailure,
   isRecoverableMissingWorktreeReviewFailureNoProgress,
   isRecoverableMissingWorktreeReviewFailureWithProgress,
+  MERGE_ACTIVE_MISSING_WORKTREE_STATUSES,
 } from "./restart-recovery-coordinator.js";
 import { classifyError, extractMissingModulePath, isNonContinuableSessionError, isOperatorActionableAgentError, isStaleWorktreeModuleResolutionError } from "./transient-error-detector.js";
 import { classifyForeignOnlyContamination, deriveTaskIdFromFusionBranch, inspectBranchConflict, listUniqueBranchCommits } from "./branch-conflicts.js";
@@ -470,6 +472,7 @@ const ORPHANED_WITH_WORKTREE_GRACE_MS = 300_000;
  */
 const MAX_TASK_DONE_RETRIES = 3;
 export const MAX_WORKTREE_SESSION_RETRIES = 3;
+const RECONCILE_SCOPE_OVERRIDE_MERGE_ACTIVE_STATUS_SET = new Set<string>(MERGE_ACTIVE_MISSING_WORKTREE_STATUSES);
 /**
  * FNXC:WorkflowLifecycle 2026-06-20-00:00: single source of truth for the
  * pause-abort park error message markers. The executor's handleGraphFailure
@@ -528,13 +531,46 @@ export async function autoRecoverWorktreeSessionStartFailure(
   task: Task,
   opts: {
     failure: unknown;
-    source: "executor-session-start" | "in-review-sweep" | "resume-guard";
+    source: "executor-session-start" | "in-review-sweep" | "merge-active-sweep" | "resume-guard";
     auditor: RunAuditor | null;
+    forceClearWorktreeMetadata?: boolean;
+    resetRetryBudgetOnStaleMetadataClear?: boolean;
+    staleMetadataClearRecoveryRetryCount?: number;
   },
 ): Promise<{ outcome: "requeue-todo" | "escalate-exhausted"; retries: number; classification: "missing" | "incomplete" | "unregistered" | "unknown" }> {
   const classification = classifyMissingWorktreeSessionStartFailure(opts.failure);
-  const nextCount = (task.worktreeSessionRetryCount ?? 0) + 1;
-  if (nextCount > MAX_WORKTREE_SESSION_RETRIES) {
+  /*
+  FNXC:MissingWorktreeRecovery 2026-07-10-18:15:
+  Upstream #1992 showed merge-active review-fix sessions can exhaust the unusable-worktree retry budget while every retry reuses the same phantom worktree metadata. When a guarded recovery clears that stale worktree/branch/session reference, the next dispatch must get a fresh session-start retry budget instead of inheriting the exhausted context that caused the strand.
+
+  FNXC:MissingWorktreeRecovery 2026-07-10-21:36:
+  The merge-active sweep still needs a bounded human-escalation circuit breaker after clearing stale metadata, so it tracks those guarded clears through recoveryRetryCount instead of repeatedly resetting worktreeSessionRetryCount to zero on every recurrence.
+  */
+  const resetRetryBudget = opts.resetRetryBudgetOnStaleMetadataClear === true;
+  const staleMetadataClearRecoveryRetryCount = opts.staleMetadataClearRecoveryRetryCount;
+  const currentStaleMetadataClearRecoveryCount = staleMetadataClearRecoveryRetryCount ?? 0;
+  const nextStaleMetadataClearRecoveryCount = staleMetadataClearRecoveryRetryCount === undefined
+    ? undefined
+    : currentStaleMetadataClearRecoveryCount + 1;
+  if (nextStaleMetadataClearRecoveryCount !== undefined && nextStaleMetadataClearRecoveryCount > MAX_WORKTREE_SESSION_RETRIES) {
+    await store.logEntry(
+      task.id,
+      `Auto-recovery exhausted (${MAX_WORKTREE_SESSION_RETRIES}/${MAX_WORKTREE_SESSION_RETRIES}) for merge-active unusable-worktree stale-metadata clears — leaving in-review for human inspection`,
+    );
+    await opts.auditor?.database({
+      type: "task:auto-recover-worktree-session-exhausted",
+      target: task.id,
+      metadata: {
+        retries: currentStaleMetadataClearRecoveryCount,
+        maxRetries: MAX_WORKTREE_SESSION_RETRIES,
+        source: opts.source,
+        counter: "recoveryRetryCount",
+      },
+    });
+    return { outcome: "escalate-exhausted", retries: currentStaleMetadataClearRecoveryCount, classification };
+  }
+  const nextCount = resetRetryBudget ? 0 : (task.worktreeSessionRetryCount ?? 0) + 1;
+  if (!resetRetryBudget && nextCount > MAX_WORKTREE_SESSION_RETRIES) {
     await store.logEntry(
       task.id,
       `Auto-recovery exhausted (${MAX_WORKTREE_SESSION_RETRIES}/${MAX_WORKTREE_SESSION_RETRIES}) for unusable-worktree session-start failure — leaving in-review for human inspection`,
@@ -558,13 +594,15 @@ export async function autoRecoverWorktreeSessionStartFailure(
     && typeof missingWorktreePath === "string" && missingWorktreePath.length > 0
     && resolve(staleWorktree) !== resolve(missingWorktreePath);
   const noProgress = !hasStepProgress(task);
+  const forceClearWorktreeMetadata = opts.forceClearWorktreeMetadata === true;
 
   await store.updateTask(task.id, {
     status: null,
     error: null,
     worktreeSessionRetryCount: nextCount,
-    worktree: noProgress ? null : (hasMismatchedLiveWorktree ? staleWorktree : null),
-    branch: noProgress ? null : (hasMismatchedLiveWorktree ? task.branch ?? null : null),
+    ...(nextStaleMetadataClearRecoveryCount === undefined ? {} : { recoveryRetryCount: nextStaleMetadataClearRecoveryCount }),
+    worktree: (noProgress || forceClearWorktreeMetadata) ? null : (hasMismatchedLiveWorktree ? staleWorktree : null),
+    branch: (noProgress || forceClearWorktreeMetadata) ? null : (hasMismatchedLiveWorktree ? task.branch ?? null : null),
     sessionFile: null,
   });
 
@@ -576,13 +614,16 @@ export async function autoRecoverWorktreeSessionStartFailure(
   const failureExcerpt = isMissingWorktreeSessionStartFailure(rawFailureExcerpt)
     ? "session-start unusable-worktree assertion"
     : rawFailureExcerpt;
+  const attemptLabel = resetRetryBudget
+    ? `retry budget reset from ${task.worktreeSessionRetryCount ?? 0}/${MAX_WORKTREE_SESSION_RETRIES}`
+    : `attempt ${nextCount}/${MAX_WORKTREE_SESSION_RETRIES}`;
   await store.logEntry(
     task.id,
     noProgress
-      ? `Auto-recovered (no-progress): session-start refused unusable worktree${staleWorktree ? ` (${staleWorktree})` : ""} — cleared stale session metadata and requeued to todo (attempt ${nextCount}/${MAX_WORKTREE_SESSION_RETRIES}, failure: ${failureExcerpt})`
-      : hasMismatchedLiveWorktree
-        ? `Auto-recovered: stale resume referenced unusable worktree (${missingWorktreePath}) while live task worktree is ${staleWorktree} — cleared stale session metadata and requeued to todo (attempt ${nextCount}/${MAX_WORKTREE_SESSION_RETRIES}, failure: ${failureExcerpt})`
-        : `Auto-recovered: retry/verification session targeted unusable worktree${staleWorktree ? ` (${staleWorktree})` : ""} — cleared stale session metadata and requeued to todo (attempt ${nextCount}/${MAX_WORKTREE_SESSION_RETRIES}, failure: ${failureExcerpt})`,
+      ? `Auto-recovered (no-progress): session-start refused unusable worktree${staleWorktree ? ` (${staleWorktree})` : ""} — cleared stale session metadata and requeued to todo (${attemptLabel}, failure: ${failureExcerpt})`
+      : hasMismatchedLiveWorktree && !forceClearWorktreeMetadata
+        ? `Auto-recovered: stale resume referenced unusable worktree (${missingWorktreePath}) while live task worktree is ${staleWorktree} — cleared stale session metadata and requeued to todo (${attemptLabel}, failure: ${failureExcerpt})`
+        : `Auto-recovered: retry/verification session targeted unusable worktree${staleWorktree ? ` (${staleWorktree})` : ""} — cleared stale session metadata and requeued to todo (${attemptLabel}, failure: ${failureExcerpt})`,
   );
   if (noProgress) {
     // #1411: backward recovery move — recoveryRehome skips order-derived adjacency.
@@ -1316,6 +1357,7 @@ export class SelfHealingManager {
       { name: "recover-stranded-completed-todo", fn: () => this.recoverStrandedCompletedTodoTasks().then(() => undefined) },
       { name: "stale-incomplete-review", fn: () => this.recoverStaleIncompleteReviewTasks().then(() => undefined) },
       { name: "failed-pre-merge-steps", fn: () => this.recoverReviewTasksWithFailedPreMergeSteps().then(() => undefined) },
+      { name: "missing-worktree-review-failures", fn: () => this.recoverMissingWorktreeReviewFailures().then(() => undefined) },
       { name: "interrupted-merging", fn: () => this.recoverInterruptedMergingTasks().then(() => undefined) },
       { name: "transient-merge-failures", fn: () => this.recoverTransientMergeFailures().then(() => undefined) },
       { name: "done-merge-metadata", fn: () => this.recoverDoneTaskMergeMetadata().then(() => undefined) },
@@ -1331,7 +1373,6 @@ export class SelfHealingManager {
       { name: "recover-orphan-only-scope-violations", fn: () => this.recoverOrphanOnlyScopeViolations().then(() => undefined) },
       { name: "recover-stuck-merge-deadlocks", fn: () => this.recoverStuckMergeDeadlocks().then(() => undefined) },
       { name: "misclassified-failures", fn: () => this.recoverMisclassifiedFailures().then(() => undefined) },
-      { name: "missing-worktree-review-failures", fn: () => this.recoverMissingWorktreeReviewFailures().then(() => undefined) },
       { name: "partial-progress-no-task-done", fn: () => this.recoverPartialProgressNoTaskDoneFailures().then(() => undefined) },
       { name: "orphaned-executions", fn: () => this.recoverOrphanedExecutions().then(() => undefined) },
       { name: "approved-triage", fn: () => this.recoverApprovedTriageTasks().then(() => undefined) },
@@ -2521,6 +2562,7 @@ export class SelfHealingManager {
           { name: "recover-stranded-completed-todo", fn: () => this.recoverStrandedCompletedTodoTasks() },
           { name: "recover-stale-incomplete-review", fn: () => this.recoverStaleIncompleteReviewTasks() },
           { name: "recover-failed-pre-merge-steps", fn: () => this.recoverReviewTasksWithFailedPreMergeSteps() },
+          { name: "recover-missing-worktree-review-failures", fn: () => this.recoverMissingWorktreeReviewFailures() },
           { name: "recover-interrupted-merging", fn: () => this.recoverInterruptedMergingTasks() },
           { name: "recover-transient-merge-failures", fn: () => this.recoverTransientMergeFailures() },
           { name: "recover-done-merge-metadata", fn: () => this.recoverDoneTaskMergeMetadata() },
@@ -2542,7 +2584,6 @@ export class SelfHealingManager {
           { name: "recover-orphan-only-scope-violations", fn: () => this.recoverOrphanOnlyScopeViolations() },
           { name: "recover-stuck-merge-deadlocks", fn: () => this.recoverStuckMergeDeadlocks() },
           { name: "recover-misclassified-failures", fn: () => this.recoverMisclassifiedFailures() },
-          { name: "recover-missing-worktree-review-failures", fn: () => this.recoverMissingWorktreeReviewFailures() },
           { name: "recover-no-progress-no-task-done", fn: () => this.recoverNoProgressNoTaskDoneFailures() },
           { name: "recover-paused-abort-failures", fn: () => this.recoverPausedAbortFailures() },
           { name: "recover-partial-progress-no-task-done", fn: () => this.recoverPartialProgressNoTaskDoneFailures() },
@@ -4511,6 +4552,33 @@ export class SelfHealingManager {
           });
           worktreeMetadataReconcileLog.log(
             `rebound ${task.id}: ${previousWorktree} -> ${liveWorktree} (${previousBranch ?? "<none>"} -> ${normalizedBranch})`,
+          );
+          repaired++;
+          continue;
+        }
+
+        const scopeOverrideMergeActiveSafe =
+          task.scopeOverride === true
+          && task.column !== "in-progress"
+          && (task.column !== "in-review" || (typeof task.status === "string" && RECONCILE_SCOPE_OVERRIDE_MERGE_ACTIVE_STATUS_SET.has(task.status)));
+        if (scopeOverrideMergeActiveSafe) {
+          /*
+          FNXC:MissingWorktreeRecovery 2026-07-10-18:23:
+          Upstream #1992 reproduced with scopeOverride=1: a main-checkout-only task retained a stale sub-repo worktree pointer, so every session start refused the missing path before scope override could help. When no live fusion/<id> worktree exists, clear only the phantom metadata; scopeOverride remains a file-scope no-op.
+
+          FNXC:MissingWorktreeRecovery 2026-07-10 (code review): the FN-5256 guard immediately below exists precisely because column==="in-progress"/"in-review" tasks can be live even when this heuristic's existsSync/registered-path check calls them stale (that's the guard's own stated rationale). Restrict this scopeOverride bypass to the narrow #1992 bug shape reproduced in the task report — in-review AND a merge-active sub-status (merging/merging-pr/merging-fix) — so a scopeOverride task that is genuinely in-progress, or in-review mid-step (status: null) with a live but momentarily undetected session, still falls through to the FN-5256 protection instead of having its worktree/branch/sessionFile yanked out from under it.
+          */
+          await this.store.updateTask(task.id, { worktree: null, branch: null, sessionFile: null });
+          await this.emitWorktreeMetadataAuditEvent({
+            taskId: task.id,
+            mutationType: "task:auto-recover-worktree-metadata-cleared",
+            previousWorktree,
+            newWorktree: null,
+            previousBranch,
+            newBranch: null,
+          });
+          worktreeMetadataReconcileLog.log(
+            `cleared scopeOverride ${task.id}: ${previousWorktree} (${previousBranch ?? "<none>"})`,
           );
           repaired++;
           continue;
@@ -10528,9 +10596,9 @@ export class SelfHealingManager {
       if (settings.globalPause || settings.enginePaused) return 0;
       const tasks = await this.store.listTasks({ column: "in-review", slim: true });
       const candidates = tasks.filter((task) =>
-        allowsAutoMergeProcessing(task, settings)
-        && (isRecoverableMissingWorktreeReviewFailureWithProgress(task)
-          || isRecoverableMissingWorktreeReviewFailureNoProgress(task)),
+        isRecoverableMissingWorktreeReviewFailureWithProgress(task)
+        || isRecoverableMissingWorktreeReviewFailureNoProgress(task)
+        || isMergeActiveMissingWorktreeSessionStartFailure(task),
       );
 
       if (candidates.length === 0) return 0;
@@ -10540,17 +10608,10 @@ export class SelfHealingManager {
       let recovered = 0;
       for (const task of candidates) {
         try {
-          const proof = await this.evaluateBackwardMoveTripleProof(task, {
-            stage: "missing-worktree-review",
-            graceMs: settings.taskStuckTimeoutMs ?? STALE_ACTIVE_BRANCH_EXECUTION_GRACE_MS,
-            stalenessAnchor: task.columnMovedAt ?? task.updatedAt,
-            reason: "missing-worktree-review-candidate",
-          });
-          if (!proof.ok) {
-            await this.emitBackwardMoveNoAction(task, "missing-worktree-review", "task:missing-worktree-review-no-action", proof);
-            continue;
-          }
-
+          const mergeActiveCandidate = isMergeActiveMissingWorktreeSessionStartFailure(task);
+          const stage = mergeActiveCandidate ? "missing-worktree-merge-active" : "missing-worktree-review";
+          const noActionEvent = mergeActiveCandidate ? "task:reconcile-missing-worktree-merge-active-no-action" : "task:missing-worktree-review-no-action";
+          const recoveryEvent = mergeActiveCandidate ? "task:reconcile-missing-worktree-merge-active" : "task:missing-worktree-review";
           const auditor = createRunAuditor(this.store, {
             runId: generateSyntheticRunId("self-heal", task.id),
             agentId: "self-healing",
@@ -10558,12 +10619,56 @@ export class SelfHealingManager {
             taskLineageId: task.lineageId,
             phase: "maintenance",
           });
+          if (!allowsAutoMergeProcessing(task, settings)) {
+            await auditor.database({
+              type: noActionEvent as DatabaseMutationType,
+              target: task.id,
+              metadata: { reason: "auto-merge-off", priorStatus: task.status ?? null, priorWorktree: task.worktree ?? null },
+            });
+            continue;
+          }
+          if (isWorkspaceTask(task)) {
+            await auditor.database({
+              type: noActionEvent as DatabaseMutationType,
+              target: task.id,
+              metadata: { reason: "workspace-task", priorStatus: task.status ?? null, priorWorktree: task.worktree ?? null },
+            });
+            continue;
+          }
+          const proof = await this.evaluateBackwardMoveTripleProof(task, {
+            stage,
+            graceMs: settings.taskStuckTimeoutMs ?? STALE_ACTIVE_BRANCH_EXECUTION_GRACE_MS,
+            stalenessAnchor: task.columnMovedAt ?? task.updatedAt,
+            reason: mergeActiveCandidate ? "missing-worktree-merge-active-candidate" : "missing-worktree-review-candidate",
+            extra: { priorStatus: task.status ?? null },
+          });
+          if (!proof.ok) {
+            await this.emitBackwardMoveNoAction(task, stage, noActionEvent, proof);
+            continue;
+          }
+
           const result = await autoRecoverWorktreeSessionStartFailure(this.store, task, {
             failure: task.error,
-            source: "in-review-sweep",
+            source: mergeActiveCandidate ? "merge-active-sweep" : "in-review-sweep",
             auditor,
+            forceClearWorktreeMetadata: mergeActiveCandidate,
+            resetRetryBudgetOnStaleMetadataClear: mergeActiveCandidate,
+            staleMetadataClearRecoveryRetryCount: mergeActiveCandidate ? task.recoveryRetryCount ?? 0 : undefined,
           });
-          if (result.outcome === "requeue-todo") recovered++;
+          if (result.outcome === "requeue-todo") {
+            await auditor.database({
+              type: recoveryEvent as DatabaseMutationType,
+              target: task.id,
+              metadata: {
+                priorStatus: task.status ?? null,
+                priorWorktree: task.worktree ?? null,
+                priorBranch: task.branch ?? null,
+                classification: result.classification,
+                retries: result.retries,
+              },
+            });
+            recovered++;
+          }
         } catch (err: unknown) {
           const errorMessage = err instanceof Error ? err.message : String(err);
           log.error(`Failed to recover unusable-worktree review failure ${task.id}: ${errorMessage}`);

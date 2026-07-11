@@ -1,44 +1,19 @@
-import type { GrokNdjsonEvent } from "./types.js";
+import type { GrokCliJsonResponse, GrokNdjsonEvent } from "./types.js";
 
 /*
-FNXC:GrokCli 2026-07-09-00:00:
-FN-7722: `grok --prompt <text> --format json` emits newline-delimited JSON
-(one JSON object per line) per the verified upstream contract captured in
-docs/grok-cli-contract.md (source: src/headless/output.ts's
-`createHeadlessJsonlEmitter` / `HeadlessJsonEvent`). This parser mirrors the
-Droid plugin's `stream-parser.ts` shape and resilience contract: it never
-throws. Debug noise, empty lines, and malformed/unrecognized JSON all return
-null so the streaming pipeline can safely skip them and continue.
+FNXC:GrokCli 2026-07-10-12:50:
+FN-7796: xAI Grok Build TUI's `--output-format streaming-json` intermittently ends with `stopReason:"Cancelled"` and zero `text` events. The headless path now uses the reliable single-object `--output-format json` response, so parser callers should parse the complete stdout buffer into `{text,stopReason,sessionId,requestId,thought}` and treat invalid/partial buffers as absent output rather than throwing.
 */
-
-/*
-FNXC:GrokCli 2026-07-09-00:10:
-FN-7724: confirmed at execution time — FN-7722 already typed `tool_use` /
-`step_finish` / `error` into the `GrokNdjsonEvent` union (types.ts) and this
-parser already accepts them via KNOWN_EVENT_TYPES below, so no parser change
-was needed to "surface" them; only runtime-adapter.ts's bridge (previously
-intentionally dropping tool_use/step_finish/error, see FN-7722 comment
-above) needed extending. See docs/grok-cli-contract.md for the verified
-schema this parser accepts unmodified.
-*/
-const KNOWN_EVENT_TYPES = new Set(["step_start", "text", "tool_use", "step_finish", "error"]);
 
 /**
- * Parse a single NDJSON line from `grok --prompt --format json` stdout into a
- * typed event, or null when the line should be skipped (empty, non-JSON
- * debug noise, malformed JSON, or a JSON object whose `type` isn't one of
- * the five verified event types).
+ * Parse the complete stdout buffer from
+ * `grok -p <prompt> --output-format json` into the real xAI Grok Build TUI
+ * response object, or null when the output is empty, non-JSON, a JSON array,
+ * or an unrelated object with none of the expected response fields.
  */
-export function parseLine(line: string): GrokNdjsonEvent | null {
-  const trimmed = line.trim();
-
-  // Skip empty lines
-  if (!trimmed) {
-    return null;
-  }
-
-  // Skip non-JSON lines (e.g. any stray debug/log output not part of the JSONL stream)
-  if (!trimmed.startsWith("{")) {
+export function parseJsonOutput(output: string): GrokCliJsonResponse | null {
+  const trimmed = output.trim();
+  if (!trimmed || !trimmed.startsWith("{")) {
     return null;
   }
 
@@ -46,17 +21,56 @@ export function parseLine(line: string): GrokNdjsonEvent | null {
   try {
     parsed = JSON.parse(trimmed);
   } catch {
-    console.error("Failed to parse Grok CLI NDJSON line:", trimmed);
     return null;
   }
 
-  // Validate that the parsed result is a non-null object (not array, not primitive)
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+
+  const candidate = parsed as Record<string, unknown>;
+  const hasKnownField = ["text", "stopReason", "sessionId", "requestId", "thought"].some((key) => key in candidate);
+  if (!hasKnownField) {
+    return null;
+  }
+
+  return {
+    text: typeof candidate.text === "string" ? candidate.text : undefined,
+    stopReason: typeof candidate.stopReason === "string" ? candidate.stopReason : undefined,
+    sessionId: typeof candidate.sessionId === "string" ? candidate.sessionId : undefined,
+    requestId: typeof candidate.requestId === "string" ? candidate.requestId : undefined,
+    thought: typeof candidate.thought === "string" ? candidate.thought : undefined,
+  };
+}
+
+const STREAMING_EVENT_TYPES = new Set(["thought", "text", "end"]);
+
+/**
+ * Parse a single NDJSON line from the legacy/flaky
+ * `--output-format streaming-json` contract. The runtime no longer relies on
+ * this as its primary path, but retaining this parser lets deterministic
+ * regressions model the live-captured cancelled-no-text stream shape and
+ * produce a concrete diagnostic instead of treating it as arbitrary garbage.
+ */
+export function parseLine(line: string): GrokNdjsonEvent | null {
+  const trimmed = line.trim();
+  if (!trimmed || !trimmed.startsWith("{")) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return null;
   }
 
   const candidate = parsed as { type?: unknown };
-  if (typeof candidate.type !== "string" || !KNOWN_EVENT_TYPES.has(candidate.type)) {
+  if (typeof candidate.type !== "string" || !STREAMING_EVENT_TYPES.has(candidate.type)) {
     return null;
   }
 

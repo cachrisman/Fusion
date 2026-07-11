@@ -10200,7 +10200,7 @@ export async function fetchResumeChatSession(
 
 /** Create a new chat session */
 export function createChatSession(
-  input: { agentId: string; title?: string; modelProvider?: string; modelId?: string },
+  input: { agentId: string; title?: string; modelProvider?: string; modelId?: string; thinkingLevel?: string },
   projectId?: string,
 ): Promise<ChatSessionResponse> {
   return api<ChatSessionResponse>(withProjectId("/chat/sessions", projectId), {

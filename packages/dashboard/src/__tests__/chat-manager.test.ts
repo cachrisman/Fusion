@@ -113,6 +113,10 @@ function createChatManagerWithSettings(settings: {
   fallbackModelId?: string;
   defaultProvider?: string;
   defaultModelId?: string;
+  defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  defaultThinkingLevelOverride?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  executionThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  executionGlobalThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 }): ChatManager {
   return new ChatManager(
     mockChatStore as any,
@@ -240,6 +244,92 @@ describe("ChatManager.sendMessage", () => {
       defaultProvider: "grok-cli",
       defaultModelId: "grok-cli/grok-4.5",
     });
+  });
+
+  it("passes the chat session thinking level to model-loop session options", async () => {
+    let createOptions: any;
+    __setCreateResolvedAgentSession(async (options: any) => {
+      createOptions = options;
+      return {
+        session: {
+          prompt: vi.fn().mockResolvedValue(undefined),
+          dispose: vi.fn(),
+          model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+          state: { messages: [{ role: "assistant", content: "Thoughtful response" }] },
+        },
+        runtimeId: "anthropic",
+        wasConfigured: true,
+      } as any;
+    });
+    mockChatStore.getSession.mockReturnValue({
+      id: "chat-001",
+      agentId: "agent-001",
+      status: "active",
+      projectId: "project-a",
+      modelProvider: "anthropic",
+      modelId: "claude-sonnet-4-5",
+      thinkingLevel: "high",
+    });
+
+    const chatManager = createChatManagerWithSettings({ defaultThinkingLevel: "low" });
+    await chatManager.sendMessage("chat-001", "Hello");
+
+    expect(createOptions.defaultThinkingLevel).toBe("high");
+  });
+
+  it("falls back to settings when chat session thinking level is empty", async () => {
+    let createOptions: any;
+    __setCreateResolvedAgentSession(async (options: any) => {
+      createOptions = options;
+      return {
+        session: {
+          prompt: vi.fn().mockResolvedValue(undefined),
+          dispose: vi.fn(),
+          model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+          state: { messages: [{ role: "assistant", content: "Default-thinking response" }] },
+        },
+        runtimeId: "anthropic",
+        wasConfigured: true,
+      } as any;
+    });
+    mockChatStore.getSession.mockReturnValue({
+      id: "chat-001",
+      agentId: "agent-001",
+      status: "active",
+      projectId: "project-a",
+      thinkingLevel: null,
+    });
+
+    const chatManager = createChatManagerWithSettings({ executionThinkingLevel: "medium", defaultThinkingLevel: "low" });
+    await chatManager.sendMessage("chat-001", "Hello");
+
+    expect(createOptions.defaultThinkingLevel).toBe("medium");
+  });
+
+  it("does not thread thinking level into CLI-agent-backed chat", async () => {
+    const createResolvedSpy = vi.fn();
+    __setCreateResolvedAgentSession(createResolvedSpy as any);
+    mockChatStore.getSession.mockReturnValue({
+      id: "chat-001",
+      agentId: "agent-001",
+      status: "active",
+      projectId: "project-a",
+      cliExecutorAdapterId: "adapter-1",
+      thinkingLevel: "high",
+    });
+    const runner = {
+      ensureSession: vi.fn().mockResolvedValue("cli-session-1"),
+      send: vi.fn().mockResolvedValue("sent"),
+      getTokenUsageSnapshot: vi.fn().mockResolvedValue(undefined),
+      getSessionStats: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const chatManager = createChatManagerWithSettings({ defaultThinkingLevel: "low" });
+    chatManager.setCliChatRunner(runner as any, "project-a");
+    await chatManager.sendMessage("chat-001", "Hello CLI");
+
+    expect(runner.send).toHaveBeenCalledWith("chat-001", "Hello CLI");
+    expect(createResolvedSpy).not.toHaveBeenCalled();
   });
 
   it("records successful chat session token usage from provider stats", async () => {

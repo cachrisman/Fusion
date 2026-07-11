@@ -36,6 +36,16 @@ describe("model-pricing", () => {
     expect(result.usd).toBeCloseTo(10.0, 2);
   });
 
+  it("prices the current runtime Anthropic Claude Sonnet 5 identity captured from token usage", () => {
+    const result = costFor(
+      { ...ZERO, inputTokens: 1_000_000, outputTokens: 200_000 },
+      { provider: "anthropic", model: "claude-sonnet-5" },
+    );
+
+    expect(result).toMatchObject({ unavailable: false, stale: false });
+    expect(result.usd).toBeCloseTo(4, 2);
+  });
+
   it("prices direct Anthropic Claude Sonnet 5 from the restored static catalog row", () => {
     const usage = {
       inputTokens: 1_000_000,

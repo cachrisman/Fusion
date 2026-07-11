@@ -513,8 +513,8 @@ export interface WorkflowModelLanePair {
 FNXC:WorkflowSettings 2026-06-17-09:13:
 Title summarization is owned by project/global Settings → Project Models, not workflow Values. Keep this workflow-editor catalog limited to workflow-executed model lanes so custom declarations cannot create misleading title-summarizer dropdowns whose values are orphaned for built-in workflows.
 
-FNXC:Settings-ThinkingLevel 2026-07-10-00:00:
-Workflow Values renders thinking controls inline with declared primary model lanes only. The companion setting ids are excluded from generic enum rendering so operators get one inherit/override/reset affordance and undeclared lanes leave no empty control shell.
+FNXC:Settings-ThinkingLevel 2026-07-10-12:03:
+Workflow Values renders thinking controls inline with declared primary and fallback model lanes. The companion setting ids are excluded from generic enum rendering so operators get one inherit/override/reset affordance and undeclared lanes leave no empty control shell.
 */
 export const WORKFLOW_MODEL_LANE_CATALOG: WorkflowModelLanePair[] = [
   {
@@ -545,6 +545,7 @@ export const WORKFLOW_MODEL_LANE_CATALOG: WorkflowModelLanePair[] = [
     id: "planning-fallback",
     providerId: "planningFallbackProvider",
     modelId: "planningFallbackModelId",
+    thinkingId: "planningFallbackThinkingLevel",
     label: "Planning Fallback Model",
     help: "Fallback provider and model used when the primary Plan/Triage model cannot be used.",
   },
@@ -552,6 +553,7 @@ export const WORKFLOW_MODEL_LANE_CATALOG: WorkflowModelLanePair[] = [
     id: "validator-fallback",
     providerId: "validatorFallbackProvider",
     modelId: "validatorFallbackModelId",
+    thinkingId: "validatorFallbackThinkingLevel",
     label: "Reviewer Fallback Model",
     help: "Fallback provider and model used when the primary Reviewer model cannot be used.",
   },

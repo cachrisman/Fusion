@@ -175,6 +175,46 @@ describe("artifacts route integration", () => {
     expect(mediaRes.body).toEqual(PNG_IMAGE_BYTES);
   });
 
+  /*
+   * FNXC:ArtifactRegistry 2026-07-10-00:00:
+   * FN-7791 pins the missing attachment-to-artifact bridge at the route/media boundary: a real PNG stored by TaskStore.addAttachment must list through GET /api/artifacts with task metadata and stream the original attachment bytes via /media.
+   */
+  it("an attachment-sourced image artifact lists and streams through the default server scope", async () => {
+    const task = await store.createTask({
+      title: "Task agent attachment",
+      description: "A task agent attached a screenshot",
+    });
+    const attachment = await store.addAttachment(task.id, "agent-shot.png", PNG_IMAGE_BYTES, "image/png");
+    await store.addAttachment(task.id, "agent-notes.txt", Buffer.from("not surfaced as an image artifact"), "text/plain");
+
+    const listRes = await REQUEST(app, "GET", "/api/artifacts");
+
+    expect(listRes.status).toBe(200);
+    const body = listRes.body as ArtifactWithTask[];
+    expect(body).toHaveLength(1);
+    expect(body[0]).toMatchObject({
+      type: "image",
+      title: "agent-shot.png",
+      mimeType: "image/png",
+      sizeBytes: PNG_IMAGE_BYTES.length,
+      uri: `attachments/${attachment.filename}`,
+      authorId: "attachment",
+      authorType: "system",
+      taskId: task.id,
+      taskTitle: "Task agent attachment",
+    });
+
+    const taskScopedRes = await REQUEST(app, "GET", `/api/artifacts?taskId=${encodeURIComponent(task.id)}&type=image`);
+    expect(taskScopedRes.status).toBe(200);
+    expect(taskScopedRes.body).toHaveLength(1);
+    expect((taskScopedRes.body as ArtifactWithTask[])[0].id).toBe(body[0].id);
+
+    const mediaRes = await requestRawBuffer(app, `/api/artifacts/${body[0].id}/media`);
+    expect(mediaRes.status).toBe(200);
+    expect(mediaRes.headers["content-type"]).toBe("image/png");
+    expect(mediaRes.body).toEqual(PNG_IMAGE_BYTES);
+  });
+
   it("a global image artifact still streams from the managed global artifacts directory", async () => {
     const imageBytes = PNG_IMAGE_BYTES;
     const artifact = await store.registerArtifact({

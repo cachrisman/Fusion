@@ -1386,7 +1386,8 @@
     "untitledSession": "Sin título",
     "workingStatus": "Trabajando…",
     "you": "Tú",
-    "contextWindowAria": "Estimated {{used}} of {{total}} context tokens"
+    "contextWindowAria": "Estimated {{used}} of {{total}} context tokens",
+    "noMessage": ""
   },
   "chatRooms": {
     "error": {
@@ -2281,7 +2282,9 @@
     "closeLightbox": "Close artifact preview",
     "expandArtifact": "Expand {{title}}",
     "expandArtifactHint": "Click to expand",
-    "lightboxLabel": "Artifact media preview"
+    "lightboxLabel": "Artifact media preview",
+    "readOnly": "",
+    "readOnlyHint": ""
   },
   "droidCli": {
     "active": "Activo",
@@ -3422,6 +3425,7 @@
     "dreamProcessingFailed": "Error al ejecutar el procesamiento de sueños",
     "dreamsEnabledHint": "Convierte las notas diarias en DREAMS.md y promueve las lecciones reutilizables en MEMORY.md.",
     "dreamsEnabledLabel": "Procesar sueños desde la memoria diaria",
+    "dreamsEnabledTooltip": "Las notas diarias se destilan en DREAMS.md y las lecciones reutilizables se promueven a MEMORY.md.",
     "dreamsScheduleHint": "Expresión cron para el procesamiento de sueños.",
     "dreamsScheduleLabel": "Programación de sueños",
     "editorDefaultDescription": "Edita el archivo de memoria seleccionado.",
@@ -6837,6 +6841,7 @@
     "githubCliAuthBody": "GitHub CLI is installed but not authenticated on the Fusion host. Run this command in the environment where Fusion is running, then return here and continue.",
     "githubCliAuthTitle": "Authenticate GitHub CLI",
     "githubCliInstallBody": "Fusion could not find `gh` on the host running Fusion. Install GitHub CLI there to import issues and track pull requests with CLI authentication.",
+    "githubCliInstallShowInstructions": "Mostrar instrucciones de instalación",
     "githubCliInstallLink": "Open GitHub CLI releases",
     "githubCliInstallLinux": "Linux: install `gh` with your distribution package manager or the packages from cli.github.com.",
     "githubCliInstallMac": "macOS: `brew install gh` or download the installer from GitHub CLI releases.",
@@ -6916,12 +6921,14 @@
     "projectRegisteredSuccess": "Su proyecto se ha registrado exitosamente.",
     "projectRequired": "Se requiere un proyecto antes de que las acciones de primera tarea estén disponibles.",
     "projectSelected": "Proyecto seleccionado — la creación de tareas y las importaciones están disponibles.",
+    "projectStepContext": "Paso 3 de 5 — Proyecto · Configuración de Fusion",
     "projectSetupDescription": "Elige tu primer proyecto antes de crear o importar tareas. Puedes registrar un directorio local existente o clonar una URL de repositorio de GitHub a través del asistente de configuración.",
     "providersConnectedSummary": "✓ {{connected}} de {{total}} proveedor(es) conectado(s)",
     "providersSkippedSummary_one_one": "",
     "providersSkippedSummary_one_other": "",
     "providersSkippedSummary_other_one": "",
     "providersSkippedSummary_other_other": "",
+    "quickStartAllConnected": "Todos los proveedores de inicio rápido ya están conectados.",
     "quickStartProviders": "Proveedores de inicio rápido",
     "readinessAiProviderConnected": "{{name}} conectado — los agentes de IA pueden trabajar en las tareas",
     "readinessAiProviderLabel": "Proveedor de IA",
@@ -6953,6 +6960,7 @@
     "retry": "Reintentar",
     "reviewStep": "Revisar {{label}}",
     "runtimeNode": "Nodo en tiempo de ejecución",
+    "runtimeNodeHint": "Un nodo de ejecución es la máquina donde se ejecutan las tareas de este proyecto. \"Nodo local\" es este equipo; elige un nodo remoto para ejecutar tareas en otro lugar.",
     "savedProfileButFailedToActivate": "Se guardó el perfil pero no se pudo activar",
     "saveKey": "Guardar",
     "saveRemoteServer": "Guardar servidor remoto",

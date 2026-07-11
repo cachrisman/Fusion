@@ -2436,7 +2436,15 @@ export class TaskStore extends EventEmitter<TaskStoreEvents> {
     if (!existsSync(promptPath)) {
       return undefined;
     }
-    return readFile(promptPath, "utf-8");
+    // FNXC:TaskDetailPromptResilience 2026-07-10-15:00: best-effort — an
+    // unreadable PROMPT.md must not fail archiving (a reported failing per-task
+    // op); the archive entry simply omits the prompt text.
+    try {
+      return await readFile(promptPath, "utf-8");
+    } catch (err) {
+      storeLog.warn(`[task-detail] failed to read PROMPT.md for archive of ${taskId}: ${getErrorMessage(err)}`);
+      return undefined;
+    }
   }
 
   private async buildArchivedAgentLogFields(
@@ -5533,15 +5541,34 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
       // Derived at read time only; retrySummary is never persisted to SQLite.
       task.retrySummary = computeRetrySummary(task);
 
-      // Sync steps from PROMPT.md if task.steps is empty
+      /*
+      FNXC:TaskDetailPromptResilience 2026-07-10-15:00:
+      PROMPT.md is enrichment for the task detail (the `prompt` text and, when steps
+      are unpersisted, step-syncing) — NOT essential row data. getTask is the shared
+      load for the entire per-task API (GET/DELETE/PATCH/retry/reset/archive), so an
+      unguarded read/parse throw here turned every per-task operation into a 500 while
+      the PROMPT.md-free board list kept working — the reported "task write API returns
+      500 for every task". A read can fail for reasons unrelated to the row: a
+      root-owned PROMPT.md left by a prior `sudo` run (EACCES), PROMPT.md being a
+      directory (EISDIR), a symlink loop, or a transient FS error. Degrade to empty
+      prompt / unsynced steps and log, rather than bricking task management.
+      */
       if (task.steps.length === 0) {
-        task.steps = await this.parseStepsFromPrompt(id);
+        try {
+          task.steps = await this.parseStepsFromPrompt(id);
+        } catch (err) {
+          storeLog.warn(`[task-detail] failed to sync steps from PROMPT.md for ${id}: ${getErrorMessage(err)}`);
+        }
       }
 
       let prompt = "";
-      const promptPath = join(this.taskDir(id), "PROMPT.md");
-      if (existsSync(promptPath)) {
-        prompt = await readFile(promptPath, "utf-8");
+      try {
+        const promptPath = join(this.taskDir(id), "PROMPT.md");
+        if (existsSync(promptPath)) {
+          prompt = await readFile(promptPath, "utf-8");
+        }
+      } catch (err) {
+        storeLog.warn(`[task-detail] failed to read PROMPT.md for ${id}: ${getErrorMessage(err)}`);
       }
 
       return { ...task, prompt };
@@ -6149,8 +6176,16 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
         return task;
       }
 
-      const steps = await this.parseStepsFromPrompt(task.id);
-      return steps.length > 0 ? { ...task, steps } : task;
+      // FNXC:TaskDetailPromptResilience 2026-07-10-16:00: an unreadable PROMPT.md
+      // must not reject this Promise.all and 500 the entire board list — degrade
+      // to the persisted (empty) steps and log, matching getTask.
+      try {
+        const steps = await this.parseStepsFromPrompt(task.id);
+        return steps.length > 0 ? { ...task, steps } : task;
+      } catch (err) {
+        storeLog.warn(`[task-detail] failed to sync steps from PROMPT.md for ${task.id} during listTasks: ${getErrorMessage(err)}`);
+        return task;
+      }
     }));
     const archivedTasks = includeArchived && (!columnFilter || columnFilter === "archived") ? this.archiveDb.list().map((entry) => this.archiveEntryToTask(entry, slim)) : [];
     // FNXC:BoardConsistency 2026-06-21-08:34: FN-6851's cache-sync fix is primary; listTasks still collapses duplicate storage sources so one task ID cannot render in two columns. Active SQLite rows are authoritative over archive snapshots.
@@ -6879,8 +6914,16 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
         return task;
       }
 
-      const steps = await this.parseStepsFromPrompt(task.id);
-      return steps.length > 0 ? { ...task, steps } : task;
+      // FNXC:TaskDetailPromptResilience 2026-07-10-16:00: an unreadable PROMPT.md
+      // must not reject this Promise.all and 500 the entire search — degrade to
+      // the persisted (empty) steps and log, matching getTask/listTasks.
+      try {
+        const steps = await this.parseStepsFromPrompt(task.id);
+        return steps.length > 0 ? { ...task, steps } : task;
+      } catch (err) {
+        storeLog.warn(`[task-detail] failed to sync steps from PROMPT.md for ${task.id} during searchTasks: ${getErrorMessage(err)}`);
+        return task;
+      }
     }));
     const archiveMatches = includeArchived
       ? this.archiveDb.search(trimmedQuery, limit >= 0 ? limit : 100).map((entry) => this.archiveEntryToTask(entry, slim))
@@ -8340,11 +8383,18 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
       return;
     }
 
-    const content = await readFile(promptPath, "utf-8");
-    const resetContent = content.replace(/^- \[x\]/gm, "- [ ]");
+    // FNXC:TaskDetailPromptResilience 2026-07-10-15:00: cosmetic checkbox reset —
+    // an unreadable/unwritable PROMPT.md must not fail the task reset itself (a
+    // reported failing per-task op); the DB reset already proceeded.
+    try {
+      const content = await readFile(promptPath, "utf-8");
+      const resetContent = content.replace(/^- \[x\]/gm, "- [ ]");
 
-    if (resetContent !== content) {
-      await writeFile(promptPath, resetContent, "utf-8");
+      if (resetContent !== content) {
+        await writeFile(promptPath, resetContent, "utf-8");
+      }
+    } catch (err) {
+      storeLog.warn(`[task-detail] failed to reset PROMPT.md checkboxes in ${dir}: ${getErrorMessage(err)}`);
     }
   }
 
@@ -9597,6 +9647,23 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
       }
       task.updatedAt = new Date().toISOString();
 
+      // FNXC:TaskDetailPromptResilience 2026-07-10-17:00:
+      // Perform the explicit PROMPT.md write (and its File Scope validation) BEFORE
+      // committing the task row, so a failed write (EACCES/EISDIR/disk-full) or an
+      // invalid File Scope aborts the whole update atomically. Previously this ran
+      // AFTER the row/task.json commit, so a failed prompt write returned an error
+      // while the field changes stayed committed and PROMPT.md went stale — a
+      // partial commit. (This is the write counterpart to the read-resilience
+      // guards elsewhere in getTask/updateStep.)
+      if (updates.prompt !== undefined) {
+        const validation = validateFileScopeInPromptContent(updates.prompt);
+        if (validation.invalid.length > 0) {
+          throw new InvalidFileScopeError(id, validation.invalid);
+        }
+        await mkdir(dir, { recursive: true });
+        await writeFile(join(dir, "PROMPT.md"), updates.prompt);
+      }
+
       // When runContext is provided, record audit event atomically with task mutation
       if (runContext) {
         await this.atomicWriteTaskJsonWithAudit(dir, task, {
@@ -9617,15 +9684,6 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
 
       // Update cache if watcher is active
       if (this.isWatching) this.taskCache.set(id, { ...task });
-
-      if (updates.prompt !== undefined) {
-        const validation = validateFileScopeInPromptContent(updates.prompt);
-        if (validation.invalid.length > 0) {
-          throw new InvalidFileScopeError(id, validation.invalid);
-        }
-        await mkdir(dir, { recursive: true });
-        await writeFile(join(dir, "PROMPT.md"), updates.prompt);
-      }
 
       // Sync PROMPT.md when title or description changes (but not when explicit
       // prompt update — that already wrote the new content above).
@@ -9650,34 +9708,46 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
       // task.json remains the canonical source for title/description fields.
       // PROMPT.md is only ever fully rewritten via explicit `updates.prompt`.
       if (updates.prompt === undefined && (updates.title !== undefined || updates.description !== undefined)) {
+        // FNXC:TaskDetailPromptResilience 2026-07-10-15:00:
+        // Keeping the human-visible PROMPT.md heading/mission in sync with
+        // task.json is cosmetic — the DB row (persisted above) is canonical. An
+        // unreadable/unwritable PROMPT.md (root-owned from a prior `sudo` run →
+        // EACCES, PROMPT.md being a directory → EISDIR, transient FS error) must
+        // NOT fail the update itself, or every title/description edit 500s
+        // exactly like the reported task-write-API failure. Best-effort: log and
+        // skip the sync on failure.
         const promptPath = join(dir, "PROMPT.md");
-        if (existsSync(promptPath)) {
-          const existingPrompt = await readFile(promptPath, "utf-8");
+        try {
+          if (existsSync(promptPath)) {
+            const existingPrompt = await readFile(promptPath, "utf-8");
 
-          if (isBootstrapPromptStub(existingPrompt, task.id, preUpdateTitle, preUpdateDescription)) {
-            const newPrompt = buildBootstrapPrompt(task.id, task.title, task.description);
-            await writeFile(promptPath, newPrompt);
-          } else {
-            // Real spec — surgical edits only. Each section we propagate to is
-            // edited in place; everything else (Review Level, Frontend UX
-            // Criteria, custom sections from triage) is preserved verbatim.
-            let next = existingPrompt;
-            if (updates.title !== undefined) {
-              // Match the existing heading style: triage emits
-              // `# Task: {id} - {title}`; createTask uses `# {id}: {title}`.
-              const triageStyle = /^#\s+Task:\s+[A-Z]+-\d+\s+-\s+/m.test(existingPrompt);
-              const heading = triageStyle
-                ? (task.title ? `Task: ${task.id} - ${task.title}` : `Task: ${task.id}`)
-                : (task.title ? `${task.id}: ${task.title}` : task.id);
-              next = rewriteHeadingLine(next, heading);
-            }
-            if (updates.description !== undefined) {
-              next = rewriteMissionSection(next, task.description);
-            }
-            if (next !== existingPrompt) {
-              await writeFile(promptPath, next);
+            if (isBootstrapPromptStub(existingPrompt, task.id, preUpdateTitle, preUpdateDescription)) {
+              const newPrompt = buildBootstrapPrompt(task.id, task.title, task.description);
+              await writeFile(promptPath, newPrompt);
+            } else {
+              // Real spec — surgical edits only. Each section we propagate to is
+              // edited in place; everything else (Review Level, Frontend UX
+              // Criteria, custom sections from triage) is preserved verbatim.
+              let next = existingPrompt;
+              if (updates.title !== undefined) {
+                // Match the existing heading style: triage emits
+                // `# Task: {id} - {title}`; createTask uses `# {id}: {title}`.
+                const triageStyle = /^#\s+Task:\s+[A-Z]+-\d+\s+-\s+/m.test(existingPrompt);
+                const heading = triageStyle
+                  ? (task.title ? `Task: ${task.id} - ${task.title}` : `Task: ${task.id}`)
+                  : (task.title ? `${task.id}: ${task.title}` : task.id);
+                next = rewriteHeadingLine(next, heading);
+              }
+              if (updates.description !== undefined) {
+                next = rewriteMissionSection(next, task.description);
+              }
+              if (next !== existingPrompt) {
+                await writeFile(promptPath, next);
+              }
             }
           }
+        } catch (err) {
+          storeLog.warn(`[task-detail] failed to sync PROMPT.md heading for ${task.id}: ${getErrorMessage(err)}`);
         }
       }
 
@@ -9900,8 +9970,21 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
 
       // Auto-initialize steps from PROMPT.md if empty. Bypassed for graph-source
       // writes (U6/KTD-3): the graph owns explicit indices pinned at expansion.
+      // FNXC:TaskDetailPromptResilience 2026-07-10-15:00: step auto-init is
+      // best-effort — an unreadable PROMPT.md must not fail updateStep (on the
+      // reported reset path); proceed with the persisted (empty) steps.
+      let promptStepsUnavailable: string | undefined;
       if (task.steps.length === 0 && !graphSource) {
-        task.steps = await this.parseStepsFromPrompt(id);
+        try {
+          task.steps = await this.parseStepsFromPrompt(id);
+        } catch (err) {
+          // Remember WHY steps couldn't be resolved so the range check below
+          // attributes the failure to the unreadable PROMPT.md rather than a
+          // misleading "0 steps". A step defined only in an unreadable PROMPT.md
+          // genuinely cannot be updated — but the error should say so.
+          promptStepsUnavailable = getErrorMessage(err);
+          storeLog.warn(`[task-detail] failed to auto-init steps from PROMPT.md for ${id}: ${promptStepsUnavailable}`);
+        }
       }
 
       // Initialize log array if missing (for legacy tasks)
@@ -9910,6 +9993,14 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
       }
 
       if (stepIndex < 0 || stepIndex >= task.steps.length) {
+        // FNXC:TaskDetailPromptResilience 2026-07-10-16:30: when the range failure
+        // is caused by an unreadable PROMPT.md (not a genuinely stepless task),
+        // surface the real cause instead of a confusing "task has 0 steps".
+        if (promptStepsUnavailable !== undefined && task.steps.length === 0) {
+          throw new Error(
+            `Cannot update step ${stepIndex} for ${id}: its steps are defined in PROMPT.md, which could not be read (${promptStepsUnavailable}).`,
+          );
+        }
         throw new Error(
           `Step ${stepIndex} out of range (task has ${task.steps.length} steps)`,
         );
@@ -13094,7 +13185,7 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
       );
     }
 
-    return this.withTaskLock(id, async () => {
+    const attachment = await this.withTaskLock(id, async () => {
       const dir = this.taskDir(id);
       const attachDir = join(dir, "attachments");
       await mkdir(attachDir, { recursive: true });
@@ -13123,6 +13214,60 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
 
       return attachment;
     });
+
+    if (mimeType.startsWith("image/")) {
+      /*
+       * FNXC:ArtifactRegistry 2026-07-10-00:00:
+       * FN-7791 requires image task attachments created by agents, dashboard uploads, and route callers to surface as normal image artifacts. Register a URI-only artifact that points at the already-written attachment file so the proven artifact listing/SSE/media pipeline is reused without duplicating bytes or re-entering addAttachment.
+       *
+       * FNXC:ArtifactRegistry 2026-07-10-00:00:
+       * registerArtifact() enforces the artifact-registry active/non-archived task rule (see registerArtifact's ACTIVE_TASKS_WHERE check), but addAttachment has never enforced that rule for attachments themselves — attachments may be added to archived or soft-deleted tasks. Without this guard, attaching an image to an archived/soft-deleted task would throw here AFTER the attachment file and task.json were already written, so the caller would see addAttachment fail even though the attachment actually succeeded. Bridging into the artifact registry is best-effort: swallow the expected archived/not-found rejection so addAttachment keeps its existing always-succeeds-for-a-valid-image contract, and only the artifact-gallery bridge is skipped.
+       */
+      try {
+        await this.registerArtifact({
+          type: "image",
+          title: attachment.originalName,
+          description: "Image task attachment",
+          mimeType,
+          sizeBytes: attachment.size,
+          uri: `attachments/${attachment.filename}`,
+          authorId: "attachment",
+          authorType: "system",
+          taskId: id,
+          metadata: {
+            source: "attachment",
+            attachmentFilename: attachment.filename,
+            originalName: attachment.originalName,
+          },
+        });
+      } catch (err) {
+        console.warn(
+          `[fusion:store] Skipping artifact bridge for attachment ${attachment.filename} on task ${id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    return attachment;
+  }
+
+  private async deleteAttachmentArtifactRows(taskId: string, filename: string): Promise<void> {
+    const rows = this.db
+      .prepare("SELECT * FROM artifacts WHERE taskId = ?")
+      .all(taskId) as unknown as ArtifactRow[];
+    const linkedArtifactIds = rows
+      .map((row) => this.rowToArtifact(row))
+      .filter((artifact) => artifact.metadata?.source === "attachment" && artifact.metadata.attachmentFilename === filename)
+      .map((artifact) => artifact.id);
+
+    if (linkedArtifactIds.length === 0) {
+      return;
+    }
+
+    const deleteArtifact = this.db.prepare("DELETE FROM artifacts WHERE id = ?");
+    for (const artifactId of linkedArtifactIds) {
+      deleteArtifact.run(artifactId);
+    }
+    this.db.bumpLastModified();
   }
 
   async getAttachment(
@@ -13157,6 +13302,8 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
         err.code = "ENOENT";
         throw err;
       }
+
+      await this.deleteAttachmentArtifactRows(id, filename);
 
       // Remove file from disk
       const filePath = join(dir, "attachments", filename);

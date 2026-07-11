@@ -136,6 +136,55 @@ describe("FileEditor", () => {
     });
   });
 
+  it.each([
+    ["markdown", "notes.md"],
+    ["non-markdown", "a.ts"],
+  ])("keeps newline and caret through stale self-echo renders for %s files", async (_label, filePath) => {
+    document.documentElement.dataset.theme = "dark";
+    const onChange = vi.fn();
+    const { rerender } = render(<FileEditor content="alpha" onChange={onChange} filePath={filePath} />);
+
+    act(() => {
+      getEditorView().dispatch({ changes: { from: 5, insert: " beta" }, selection: { anchor: 10 } });
+    });
+    expect(onChange).toHaveBeenLastCalledWith("alpha beta");
+    rerender(<FileEditor content="alpha beta" onChange={onChange} filePath={filePath} />);
+
+    act(() => {
+      getEditorView().dispatch({ changes: { from: 10, insert: "\nnext" }, selection: { anchor: 15 } });
+    });
+    expect(onChange).toHaveBeenLastCalledWith("alpha beta\nnext");
+
+    rerender(<FileEditor content="alpha beta" onChange={onChange} filePath={filePath} />);
+
+    await waitFor(() => {
+      const liveView = getEditorView();
+      expect(liveView.state.doc.toString()).toBe("alpha beta\nnext");
+      expect(liveView.state.selection.main.head).toBe(15);
+      expect(liveView.state.selection.main.anchor).toBe(15);
+    });
+  });
+
+  it("applies external content changes while preserving the clamped caret", async () => {
+    document.documentElement.dataset.theme = "dark";
+    const onChange = vi.fn();
+    const { rerender } = render(<FileEditor content="abcdef" onChange={onChange} filePath="a.ts" />);
+
+    act(() => {
+      getEditorView().dispatch({ selection: { anchor: 4 } });
+    });
+
+    rerender(<FileEditor content="xy" onChange={onChange} filePath="a.ts" />);
+
+    await waitFor(() => {
+      const liveView = getEditorView();
+      expect(liveView.state.doc.toString()).toBe("xy");
+      expect(liveView.state.selection.main.head).toBe(2);
+      expect(liveView.state.selection.main.anchor).toBe(2);
+    });
+    expect(onChange).not.toHaveBeenCalledWith("xy");
+  });
+
   it("respects readOnly prop", () => {
     document.documentElement.dataset.theme = "dark";
     render(<FileEditor content="readonly" onChange={vi.fn()} readOnly filePath="a.ts" />);

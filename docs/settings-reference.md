@@ -64,6 +64,10 @@ Defaults from `DEFAULT_GLOBAL_SETTINGS`; key scope from `GLOBAL_SETTINGS_KEYS`.
 | `modelPricingSource` | `string` | `undefined` | Source label/URL for the current pricing override set, currently the LiteLLM model pricing JSON when fetched through the dashboard. |
 | `fallbackProvider` | `string` | `undefined` | Fallback provider when the selected/default model hits transient provider failures or model-compatibility/auth-tier rejections. Dashboard chat also offers this fallback for explicit user-selected models, but the engine only swaps for retryable provider/model-selection failures. |
 | `fallbackModelId` | `string` | `undefined` | Fallback model ID (must pair with `fallbackProvider`). |
+| `fallbackThinkingLevel` | `ThinkingLevel` | `undefined` | Optional global fallback-lane thinking override for the `fallbackProvider`/`fallbackModelId` pair. Inherits `defaultThinkingLevel` when unset. |
+
+Fallback thinking-level values are applied at runtime when Fusion swaps from the primary model to the configured fallback model; if unset, the active lane/default thinking level continues to apply.
+
 | `defaultThinkingLevel` | `"off" \| "minimal" \| "low" \| "medium" \| "high" \| "xhigh"` | `undefined` | Default reasoning effort for AI sessions. `xhigh` requests maximum reasoning effort; Claude CLI adapters map it to `high` for non-Opus models and `max` for Opus models. If a provider/runtime rejects simultaneous `thinking` and `reasoning_effort` parameters, Fusion retries without the explicit thinking override instead of failing the run. |
 | `ntfyEnabled` | `boolean` | `false` | Enable ntfy push notifications. |
 | `failureNotificationMode` | `"sticky-only" \| "terminal-only" \| "all"` | `"sticky-only"` | Failure notification behavior. `sticky-only` defers failed-task notifications by `failureNotificationDelayMs` and suppresses transient self-recoveries. `terminal-only` suppresses while auto-retry is still active and only dispatches when `paused === true` or `column === "in-review"` with `status === "failed"`. `all` restores legacy immediate failure notifications. |
@@ -259,13 +263,13 @@ govern that execution belong to the workflow.
 **Where to set them.** The common model lanes for a project's default workflow are
 available directly in **Settings → Project Models → Default workflow model lanes**:
 Plan/Triage, Executor, Reviewer, and the Planning/Reviewer fallback lanes declared
-by the default workflow. Primary Plan/Triage, Executor, and Reviewer rows also show an inline Thinking Level control when the workflow declares `planningThinkingLevel`, `executionThinkingLevel`, or `validatorThinkingLevel`; unset means inherit. Those dropdown controls use the shared model picker and are persisted by the Settings modal's primary **Save** action, which writes
+by the default workflow. Primary Plan/Triage, Executor, Reviewer, and declared fallback rows show an inline Thinking Level control when the workflow declares the companion `*ThinkingLevel` setting; unset means inherit. Those dropdown controls use the shared model picker and are persisted by the Settings modal's primary **Save** action, which writes
 workflow setting values for the active project's default workflow; they do not
 restore the old project settings keys. The global **Fallback Model** remains in
-Settings → General Models, and workflow-specific fallbacks are also editable from
+Settings → General Models and includes its own inline Thinking Level selector for `fallbackThinkingLevel`; workflow-specific fallbacks are also editable from
 the workflow editor Values tab. Title summarization is separate: set it in
 **Settings → Project Models → Title and Git Commit Message Summarization Model**,
-with its global baseline in Settings → General/Global Models.
+with its project fallback selector and global baseline in Settings → General/Global Models.
 
 <!--
 FNXC:WorkflowSettings 2026-06-17-09:13:
@@ -284,7 +288,7 @@ Actions. It has two tabs:
   editable for any workflow, including built-ins. Common provider/model lane pairs
   (Plan/Triage, Executor, Reviewer, and fallbacks declared by the workflow) use the
   same model dropdown picker as Project Models so clearing or selecting a model
-  updates both keys together. Declared primary-lane thinking companions render inline
+  updates both keys together. Declared primary and fallback lane thinking companions render inline
   and clear with the lane reset instead of as separate enum fields. Advanced/custom non-model settings still use typed
   controls. Built-in Plan Review/spec and Code Review revision caps also live here:
   leave `planReviewMaxRevisions` or `codeReviewMaxRevisions` empty for unbounded
@@ -529,6 +533,7 @@ Default notes:
 | `planningModelId` | `string` | `undefined` | Model ID for planning agents. |
 | `planningFallbackProvider` | `string` | `undefined` | Fallback provider for planning. |
 | `planningFallbackModelId` | `string` | `undefined` | Fallback model ID for planning. |
+| `planningFallbackThinkingLevel` | `ThinkingLevel` | `undefined` | Optional workflow planning-fallback thinking override. Inherits the planning/default thinking level when unset. |
 | `defaultProviderOverride` | `string` | `undefined` | Project-level override for global default provider baseline. |
 | `defaultModelIdOverride` | `string` | `undefined` | Project-level override for global default model baseline. |
 | `defaultThinkingLevelOverride` | `ThinkingLevel` | `undefined` | Optional project default-lane thinking override used when a task does not set `thinkingLevel`; inherits `defaultThinkingLevel` when unset. |
@@ -538,6 +543,7 @@ Default notes:
 | `validatorModelId` | `string` | `undefined` | Model ID for plan/code reviewers. |
 | `validatorFallbackProvider` | `string` | `undefined` | Fallback provider for reviewers; also used by reviewer UNAVAILABLE/error recovery retry before returning terminal UNAVAILABLE. |
 | `validatorFallbackModelId` | `string` | `undefined` | Fallback model ID for reviewers; paired with `validatorFallbackProvider` for reviewer recovery retry. |
+| `validatorFallbackThinkingLevel` | `ThinkingLevel` | `undefined` | Optional workflow reviewer-fallback thinking override. Inherits the validator/default thinking level when unset. |
 | `workflowStepTimeoutMs` | `number` | `900000` | Maximum time in milliseconds a single workflow step may run before it is timed out. |
 | `modelPresets` | `ModelPreset[]` | `[]` | Reusable executor/reviewer model presets. |
 | `autoSelectModelPreset` | `boolean` | `false` | Auto-select presets by task size. |
@@ -651,6 +657,7 @@ GitLab configuration examples: leave both URL fields blank for GitLab.com (`http
 | `titleSummarizerThinkingLevel` | `ThinkingLevel` | `undefined` | Optional project summarization-lane thinking override. Inherits `titleSummarizerGlobalThinkingLevel` or `defaultThinkingLevel` when unset. |
 | `titleSummarizerFallbackProvider` | `string` | `undefined` | Fallback provider for title summarization. |
 | `titleSummarizerFallbackModelId` | `string` | `undefined` | Fallback model ID for title summarization. |
+| `titleSummarizerFallbackThinkingLevel` | `ThinkingLevel` | `undefined` | Optional project title-summarizer fallback thinking override. Inherits the title-summarizer/global/default thinking level when unset. |
 | `prTitlePromptInstructions` | `string` | `undefined` | Optional project guidance appended to the Create PR dialog's AI metadata system prompt for the generated PR title. Blank or whitespace-only values are treated as unset and keep the default prompt behavior. |
 | `prDescriptionPromptInstructions` | `string` | `undefined` | Optional project guidance appended to the Create PR dialog's AI metadata system prompt for generated PR body fields (`summary`, `changes`, `testing`). Blank or whitespace-only values are treated as unset and keep the default prompt behavior. |
 | `scripts` | `Record<string, string>` | `undefined` | Named script map used by script-mode workflow steps and setup hooks. |
@@ -971,7 +978,7 @@ Short-lived token bounds are enforced server-side:
 
 Fusion resolves task models through workflow-backed lane values first, then global lane defaults, then the project/global default model fallback. The common workflow lanes are stored as setting values on the project's default workflow and can be edited with dropdown controls from Settings -> Project Models -> Default workflow model lanes (persisted by the Settings modal's primary Save) or from workflow editor -> Settings -> Values for declared workflow lanes and fallbacks. General-scope fallback selection remains the global Fallback Model picker in Settings -> General Models.
 
-Settings model lanes can also carry optional thinking/reasoning effort overrides in the same model dropdown. Primary workflow lanes declare `executionThinkingLevel`, `planningThinkingLevel`, or `validatorThinkingLevel` per `(workflow, project)`; empty thinking values inherit through the lane/global/default chain and explicit values are cleared by the lane reset action. Runtime thinking precedence is node/step `config.thinkingLevel` > task `thinkingLevel` > workflow lane thinking override > global lane thinking override > project default thinking override > global `defaultThinkingLevel`, and the value still flows through pi.ts' existing thinking/reasoning-conflict fallback (Fusion retries without the explicit level when a provider rejects conflicting thinking parameters).
+Settings model lanes can also carry optional thinking/reasoning effort overrides in the same model dropdown. Primary workflow lanes declare `executionThinkingLevel`, `planningThinkingLevel`, or `validatorThinkingLevel` per `(workflow, project)`; planning/reviewer fallback lanes declare `planningFallbackThinkingLevel` and `validatorFallbackThinkingLevel`; global fallback uses `fallbackThinkingLevel`; and project title summarization fallback uses `titleSummarizerFallbackThinkingLevel`. Empty thinking values inherit through the lane/global/default chain and explicit values are cleared by the lane reset action. Runtime thinking precedence for task/workflow execution is node/step `config.thinkingLevel` > task `thinkingLevel` > workflow lane thinking override > global lane thinking override > project default thinking override > global `defaultThinkingLevel`. Model-mode Chat sessions use the same executor-lane resolver with session `thinkingLevel` in the task slot, so an empty chat-session value inherits project/global defaults while a concrete New Chat selection wins for that session. The resolved value still flows through pi.ts' existing thinking/reasoning-conflict fallback (Fusion retries without the explicit level when a provider rejects conflicting thinking parameters).
 
 When the planning lane has neither `planningFallback*` nor a global `fallback*` pair configured, triage now derives an **implicit fallback** from the resolved project/global default (execution) model (FN-7719). This lets a retryable primary planner-model failure (e.g. a provider 404/429) recover via one distinct swap instead of permanently failing triage with "no fallback configured" — the operator's chosen primary planner lane is unchanged, and the implicit fallback is skipped when it would equal the primary model or when test mode is active.
 
@@ -1006,7 +1013,7 @@ The three GPT-5.6 codenamed OpenAI Codex variants (`gpt-5.6-luna`, `gpt-5.6-sol`
 6. Assigned durable agent runtime model (`runtimeConfig.model` or `runtimeConfig.modelProvider` + `runtimeConfig.modelId`) when both provider and model ID are set and no task/lane/default pair is configured
 7. Automatic provider/model resolution
 
-Workflow prompt steps and scheduled/manual AI-prompt automation steps use the same executor lane before falling back to project/global defaults; explicit step-level `modelProvider` + `modelId` values still take precedence for that individual step.
+Workflow prompt steps and scheduled/manual AI-prompt automation steps use the same executor lane before falling back to project/global defaults; explicit step-level `modelProvider` + `modelId` values still take precedence for that individual step. If a non-mock, non-test-mode session still reaches runtime creation without a complete provider/model pair, Fusion logs a warning and records `noModelResolved` plus `runtimeBuiltInFallbackModel` on `session:runtime-resolved` so the runtime's built-in fallback model is observable.
 
 ### Heartbeat model (durable agents)
 

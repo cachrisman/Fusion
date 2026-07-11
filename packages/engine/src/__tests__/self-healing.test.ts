@@ -2757,6 +2757,216 @@ describe("SelfHealingManager", () => {
       managerWithRecovery.stop();
     });
 
+    it("recovers merge-active unusable-worktree failures before merge re-drive can reuse phantom metadata", async () => {
+      const enqueueMerge = vi.fn();
+      const managerWithRecovery = new SelfHealingManager(store, {
+        rootDir: "/tmp/test-project",
+        enqueueMerge,
+      });
+      const strandedTasks = (["merging", "merging-pr", "merging-fix"] as const).map((status) => ({
+        id: `FN-7802-${status}`,
+        column: "in-review",
+        paused: false,
+        status,
+        scopeOverride: true,
+        scopeOverrideReason: "operator requested main-checkout retry",
+        worktree: `/tmp/project/.worktrees/${status}-phantom`,
+        branch: `fusion/fn-7802-${status}`,
+        sessionFile: `/tmp/project/.fusion/sessions/${status}.json`,
+        error: `Refusing to start coding agent in missing worktree: /tmp/project/.worktrees/${status}-phantom`,
+        worktreeSessionRetryCount: 3,
+        steps: [{ status: "done" }, { status: "pending" }],
+        log: [],
+      }));
+      (store.listTasks as ReturnType<typeof vi.fn>).mockResolvedValue(strandedTasks);
+
+      const result = await managerWithRecovery.recoverMissingWorktreeReviewFailures();
+
+      expect(result).toBe(3);
+      for (const task of strandedTasks) {
+        expect(store.updateTask).toHaveBeenCalledWith(task.id, expect.objectContaining({
+          status: null,
+          error: null,
+          worktree: null,
+          branch: null,
+          sessionFile: null,
+          worktreeSessionRetryCount: 0,
+          recoveryRetryCount: 1,
+        }));
+        expect(store.moveTask).toHaveBeenCalledWith(task.id, "todo", { preserveProgress: true, moveSource: "engine", recoveryRehome: true });
+      }
+      expect(store.recordRunAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ mutationType: "task:reconcile-missing-worktree-merge-active" }));
+      expect(enqueueMerge).not.toHaveBeenCalled();
+
+      managerWithRecovery.stop();
+    });
+
+    it("bounds repeated merge-active stale-metadata clears with recoveryRetryCount", async () => {
+      const managerWithRecovery = new SelfHealingManager(store, { rootDir: "/tmp/test-project" });
+      (store.listTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "FN-7802-MERGE-ACTIVE-CAP",
+          column: "in-review",
+          paused: false,
+          status: "merging",
+          scopeOverride: true,
+          worktree: "/tmp/project/.worktrees/fn-7802-cap",
+          branch: "fusion/FN-7802-MERGE-ACTIVE-CAP",
+          sessionFile: "/tmp/project/.fusion/sessions/fn-7802-cap.json",
+          error: "Refusing to start coding agent in missing worktree: /tmp/project/.worktrees/fn-7802-cap",
+          worktreeSessionRetryCount: 3,
+          recoveryRetryCount: 3,
+          steps: [{ status: "done" }, { status: "pending" }],
+          log: [],
+        },
+      ]);
+
+      const result = await managerWithRecovery.recoverMissingWorktreeReviewFailures();
+
+      expect(result).toBe(0);
+      expect(store.updateTask).not.toHaveBeenCalled();
+      expect(store.moveTask).not.toHaveBeenCalled();
+      expect(store.logEntry).toHaveBeenCalledWith(
+        "FN-7802-MERGE-ACTIVE-CAP",
+        "Auto-recovery exhausted (3/3) for merge-active unusable-worktree stale-metadata clears — leaving in-review for human inspection",
+      );
+      expect(store.recordRunAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+        mutationType: "task:auto-recover-worktree-session-exhausted",
+        metadata: expect.objectContaining({ counter: "recoveryRetryCount", source: "merge-active-sweep" }),
+      }));
+
+      managerWithRecovery.stop();
+    });
+
+    it("recovers merge-active unusable-worktree failures even when task.worktree is already null", async () => {
+      const managerWithRecovery = new SelfHealingManager(store, { rootDir: "/tmp/test-project" });
+      (store.listTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "FN-7802-NULL-WORKTREE",
+          column: "in-review",
+          paused: false,
+          status: "merging-fix",
+          worktree: null,
+          branch: "fusion/FN-7802-NULL-WORKTREE",
+          sessionFile: "/tmp/project/.fusion/sessions/fn-7802-null.json",
+          error: "Refusing to start coding agent in unregistered git worktree: /tmp/project/.worktrees/fn-7802-null",
+          worktreeSessionRetryCount: 3,
+          steps: [{ status: "done" }],
+          log: [],
+        },
+      ]);
+
+      const result = await managerWithRecovery.recoverMissingWorktreeReviewFailures();
+
+      expect(result).toBe(1);
+      expect(store.updateTask).toHaveBeenCalledWith("FN-7802-NULL-WORKTREE", expect.objectContaining({
+        worktree: null,
+        branch: null,
+        sessionFile: null,
+        worktreeSessionRetryCount: 0,
+        recoveryRetryCount: 1,
+      }));
+      expect(store.moveTask).toHaveBeenCalledWith("FN-7802-NULL-WORKTREE", "todo", { preserveProgress: true, moveSource: "engine", recoveryRehome: true });
+      managerWithRecovery.stop();
+    });
+
+    it("does not automate merge-active unusable-worktree recovery when auto-merge is off", async () => {
+      (store.getSettings as ReturnType<typeof vi.fn>).mockResolvedValue({ autoMerge: false, globalPause: false, enginePaused: false });
+      const managerWithRecovery = new SelfHealingManager(store, { rootDir: "/tmp/test-project" });
+      (store.listTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "FN-7802-AUTOMERGE-OFF",
+          column: "in-review",
+          paused: false,
+          status: "merging",
+          worktree: "/tmp/project/.worktrees/fn-7802-auto-off",
+          branch: "fusion/FN-7802-AUTOMERGE-OFF",
+          error: "Refusing to start coding agent in missing worktree: /tmp/project/.worktrees/fn-7802-auto-off",
+          steps: [{ status: "done" }],
+          log: [],
+        },
+      ]);
+
+      const result = await managerWithRecovery.recoverMissingWorktreeReviewFailures();
+
+      expect(result).toBe(0);
+      expect(store.updateTask).not.toHaveBeenCalled();
+      expect(store.moveTask).not.toHaveBeenCalled();
+      expect(store.recordRunAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+        mutationType: "task:reconcile-missing-worktree-merge-active-no-action",
+        metadata: expect.objectContaining({ reason: "auto-merge-off" }),
+      }));
+      managerWithRecovery.stop();
+    });
+
+    it("emits no-action for workspace tasks instead of single-repo missing-worktree recovery", async () => {
+      const managerWithRecovery = new SelfHealingManager(store, { rootDir: "/tmp/test-project" });
+      (store.listTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "FN-7802-WORKSPACE",
+          column: "in-review",
+          paused: false,
+          status: "merging",
+          worktree: null,
+          workspaceWorktrees: { app: { worktree: "/tmp/ws/app", branch: "fusion/FN-7802-WORKSPACE" } },
+          error: "Refusing to start coding agent in missing worktree: /tmp/ws/app",
+          steps: [{ status: "done" }],
+          log: [],
+        },
+      ]);
+
+      const result = await managerWithRecovery.recoverMissingWorktreeReviewFailures();
+
+      expect(result).toBe(0);
+      expect(store.updateTask).not.toHaveBeenCalled();
+      expect(store.moveTask).not.toHaveBeenCalled();
+      expect(store.recordRunAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+        mutationType: "task:reconcile-missing-worktree-merge-active-no-action",
+        metadata: expect.objectContaining({ reason: "workspace-task" }),
+      }));
+      managerWithRecovery.stop();
+    });
+
+    it("leaves live worktrees and status-none review rows out of merge-active recovery", async () => {
+      const managerWithRecovery = new SelfHealingManager(store, { rootDir: "/tmp/test-project" });
+      mockedClassifyTaskWorktree.mockResolvedValueOnce({ ok: true });
+      (store.listTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "FN-7802-LIVE",
+          column: "in-review",
+          paused: false,
+          status: "merging",
+          worktree: "/tmp/project/.worktrees/fn-7802-live",
+          branch: "fusion/FN-7802-LIVE",
+          error: "Refusing to start coding agent in missing worktree: /tmp/project/.worktrees/fn-7802-live",
+          steps: [{ status: "done" }],
+          log: [],
+        },
+        {
+          id: "FN-7802-NONE",
+          column: "in-review",
+          paused: false,
+          status: null,
+          worktree: "/tmp/project/.worktrees/fn-7802-none",
+          branch: "fusion/FN-7802-NONE",
+          error: "Refusing to start coding agent in missing worktree: /tmp/project/.worktrees/fn-7802-none",
+          steps: [{ status: "done" }],
+          log: [],
+        },
+      ]);
+
+      const result = await managerWithRecovery.recoverMissingWorktreeReviewFailures();
+
+      expect(result).toBe(0);
+      expect(store.updateTask).not.toHaveBeenCalled();
+      expect(store.moveTask).not.toHaveBeenCalled();
+      expect(store.recordRunAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+        mutationType: "task:reconcile-missing-worktree-merge-active-no-action",
+        target: "FN-7802-LIVE",
+      }));
+      managerWithRecovery.stop();
+    });
+
     it("does not requeue non-matching in-review failures", async () => {
       const managerWithRecovery = new SelfHealingManager(store, {
         rootDir: "/tmp/test-project",
@@ -2798,6 +3008,93 @@ describe("SelfHealingManager", () => {
       expect(store.updateTask).not.toHaveBeenCalled();
       expect(store.moveTask).not.toHaveBeenCalled();
 
+      managerWithRecovery.stop();
+    });
+  });
+
+  describe("reconcileTaskWorktreeMetadata", () => {
+    beforeEach(() => {
+      (store.getSettings as ReturnType<typeof vi.fn>).mockResolvedValue({ autoMerge: true, globalPause: false, enginePaused: false });
+    });
+
+    it("clears phantom active worktree metadata for scopeOverride main-checkout tasks", async () => {
+      const managerWithRecovery = new SelfHealingManager(store, { rootDir: "/tmp/test-project" });
+      mockedExistsSync.mockReturnValue(false);
+      mockedGetRegisteredWorktreeBranchMap.mockResolvedValue(new Map<string, string>());
+      (store.listTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "FN-7802-SCOPE",
+          column: "in-review",
+          paused: false,
+          status: "merging-fix",
+          scopeOverride: true,
+          worktree: "/tmp/project/.worktrees/fn-7802-phantom",
+          branch: "fusion/FN-7802-SCOPE",
+          sessionFile: "/tmp/project/.fusion/sessions/fn-7802-scope.json",
+          steps: [{ status: "done" }],
+          log: [],
+        },
+      ]);
+
+      const result = await managerWithRecovery.reconcileTaskWorktreeMetadata();
+
+      expect(result).toBe(1);
+      expect(store.updateTask).toHaveBeenCalledWith("FN-7802-SCOPE", { worktree: null, branch: null, sessionFile: null });
+      expect(store.recordRunAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ mutationType: "task:auto-recover-worktree-metadata-cleared" }));
+      managerWithRecovery.stop();
+    });
+
+    it("does NOT clear worktree metadata for a scopeOverride task that is genuinely in-progress (FN-5256 guard)", async () => {
+      const managerWithRecovery = new SelfHealingManager(store, { rootDir: "/tmp/test-project" });
+      mockedExistsSync.mockReturnValue(false);
+      mockedGetRegisteredWorktreeBranchMap.mockResolvedValue(new Map<string, string>());
+      (store.listTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "FN-7802-SCOPE-INPROGRESS",
+          column: "in-progress",
+          paused: false,
+          status: null,
+          scopeOverride: true,
+          worktree: "/tmp/project/.worktrees/fn-7802-live",
+          branch: "fusion/FN-7802-SCOPE-INPROGRESS",
+          sessionFile: "/tmp/project/.fusion/sessions/fn-7802-live.json",
+          steps: [{ status: "in-progress" }],
+          log: [],
+        },
+      ]);
+
+      const result = await managerWithRecovery.reconcileTaskWorktreeMetadata();
+
+      expect(result).toBe(0);
+      expect(store.updateTask).not.toHaveBeenCalled();
+      expect(store.recordRunAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ mutationType: "task:auto-recover-worktree-metadata-skipped-active" }));
+      managerWithRecovery.stop();
+    });
+
+    it("does NOT clear worktree metadata for a scopeOverride in-review task mid-step (status: null)", async () => {
+      const managerWithRecovery = new SelfHealingManager(store, { rootDir: "/tmp/test-project" });
+      mockedExistsSync.mockReturnValue(false);
+      mockedGetRegisteredWorktreeBranchMap.mockResolvedValue(new Map<string, string>());
+      (store.listTasks as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "FN-7802-SCOPE-REVIEW-STEP",
+          column: "in-review",
+          paused: false,
+          status: null,
+          scopeOverride: true,
+          worktree: "/tmp/project/.worktrees/fn-7802-review-live",
+          branch: "fusion/FN-7802-SCOPE-REVIEW-STEP",
+          sessionFile: "/tmp/project/.fusion/sessions/fn-7802-review-live.json",
+          steps: [{ status: "in-progress" }],
+          log: [],
+        },
+      ]);
+
+      const result = await managerWithRecovery.reconcileTaskWorktreeMetadata();
+
+      expect(result).toBe(0);
+      expect(store.updateTask).not.toHaveBeenCalled();
+      expect(store.recordRunAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ mutationType: "task:auto-recover-worktree-metadata-skipped-active" }));
       managerWithRecovery.stop();
     });
   });

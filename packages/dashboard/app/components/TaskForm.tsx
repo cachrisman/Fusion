@@ -8,8 +8,9 @@ import { applyPresetToSelection, getRecommendedPresetForSize } from "../utils/mo
 import { CustomModelDropdown } from "./CustomModelDropdown";
 import { NodeHealthDot } from "./NodeHealthDot";
 import { LoadingSpinner } from "./LoadingSpinner";
-import { Sparkles, ChevronUp, ChevronDown, Maximize2, Minimize2, Paperclip, Flag, Zap, Brain, Server } from "lucide-react";
+import { Sparkles, ChevronUp, ChevronDown, Maximize2, Minimize2, Paperclip, Zap, Brain, Server } from "lucide-react";
 import { REPO_OVERRIDE_RE, resolveEffectiveGithubRepoDefault } from "./githubTracking";
+import { getPriorityIcon, getPriorityLabel } from "../utils/priorityIndicator";
 import { ProviderIcon } from "./ProviderIcon";
 import { WorkflowIcon } from "./WorkflowIcon";
 
@@ -113,13 +114,17 @@ export interface TaskFormProps {
   //  - `undefined` → inherit the project default (preselected + "(default)" badge).
   //  - `null`      → "No workflow" (listed first).
   //  - `string`    → a specific workflow id.
-  // The dropdown only renders when `onWorkflowIdChange` is provided (create mode);
-  // edit-mode workflow management lives in the task detail Workflow tab.
+  // The dropdown only renders when `onWorkflowIdChange` is provided (create mode).
   selectedWorkflowId?: string | null;
   onWorkflowIdChange?: (workflowId: string | null) => void;
+  /*
+   * FNXC:WorkflowOptionalSteps 2026-07-10-00:00:
+   * Edit mode needs the task's resolved workflow id to fetch the optional-step catalog without enabling workflow selection in the edit form. This id is catalog-only: create mode still resolves from selectedWorkflowId/default workflow and remains the only path that seeds defaultOn steps.
+   */
+  optionalStepsWorkflowId?: string | null;
   // Optional workflow steps the task can opt into. TaskForm fetches + seeds these
-  // from the selected workflow's `defaultOn` and lifts the enabled set to the
-  // parent (which puts it in the create payload). Only active in create mode.
+  // from the selected workflow's `defaultOn` in create mode, while edit mode only
+  // mutates the provided task-specific ids.
   enabledWorkflowSteps?: string[];
   onEnabledWorkflowStepsChange?: (ids: string[], meta?: EnabledWorkflowStepsChangeMeta) => void;
 
@@ -215,6 +220,7 @@ export function TaskForm({
   onSelectedPresetIdChange,
   selectedWorkflowId,
   onWorkflowIdChange,
+  optionalStepsWorkflowId,
   enabledWorkflowSteps,
   onEnabledWorkflowStepsChange,
   pendingImages,
@@ -264,6 +270,7 @@ export function TaskForm({
     (branch || "") !== "" ||
     (baseBranch || "") !== "" ||
     (nodeId || "") !== "" ||
+    (mode === "edit" && (enabledWorkflowSteps?.length ?? 0) > 0) ||
     githubTrackingEnabled === true ||
     (githubRepoOverride || "") !== "";
 
@@ -355,35 +362,44 @@ export function TaskForm({
     selectedWorkflowId === null
       ? null
       : (selectedWorkflowId ?? settings?.defaultWorkflowId ?? (settings ? "builtin:coding" : null));
+  const resolvedOptionalWorkflowId = onWorkflowIdChange ? effectiveOptionalWorkflowId : (optionalStepsWorkflowId ?? null);
   useEffect(() => {
-    if (!onWorkflowIdChange) return; // edit mode: optional steps are managed in the Workflow tab.
+    const isCreateOptionalStepPicker = Boolean(onWorkflowIdChange);
+    const isEditOptionalStepPicker = mode === "edit" && Boolean(optionalStepsWorkflowId);
+    if (!isCreateOptionalStepPicker && !isEditOptionalStepPicker) return;
     let cancelled = false;
     setOptionalSteps([]);
-    if (!effectiveOptionalWorkflowId) {
+    if (!resolvedOptionalWorkflowId) {
       // Clear any in-flight loading state (a prior fetch may have been cancelled
       // mid-flight when switching to "No workflow"), so the loading row never sticks.
       setOptionalStepsLoading(false);
-      onEnabledWorkflowStepsChange?.([], { optionalStepsAvailable: false });
+      if (isCreateOptionalStepPicker) {
+        onEnabledWorkflowStepsChange?.([], { optionalStepsAvailable: false });
+      }
       return;
     }
     setOptionalStepsLoading(true);
-    fetchWorkflowOptionalSteps(effectiveOptionalWorkflowId, projectId)
+    fetchWorkflowOptionalSteps(resolvedOptionalWorkflowId, projectId)
       .then((steps) => {
         if (cancelled) return;
         setOptionalSteps(steps);
-        /*
-        FNXC:FastOptionalSteps 2026-06-30-10:25:
-        Optional-step fetches race user mode changes. When the latest mode is Fast, seed an explicit empty set after loading instead of defaultOn ids so async workflow metadata cannot re-enable optional gates the operator has not manually reselected.
-        */
-        const seededSteps = executionModeRef.current === "fast"
-          ? []
-          : steps.filter((s) => s.defaultOn).map((s) => s.templateId);
-        onEnabledWorkflowStepsChange?.(seededSteps, { optionalStepsAvailable: steps.length > 0 });
+        if (isCreateOptionalStepPicker) {
+          /*
+          FNXC:FastOptionalSteps 2026-06-30-10:25:
+          Optional-step fetches race user mode changes. When the latest mode is Fast, seed an explicit empty set after loading instead of defaultOn ids so async workflow metadata cannot re-enable optional gates the operator has not manually reselected.
+          */
+          const seededSteps = executionModeRef.current === "fast"
+            ? []
+            : steps.filter((s) => s.defaultOn).map((s) => s.templateId);
+          onEnabledWorkflowStepsChange?.(seededSteps, { optionalStepsAvailable: steps.length > 0 });
+        }
       })
       .catch(() => {
         if (cancelled) return;
         setOptionalSteps([]);
-        onEnabledWorkflowStepsChange?.([], { optionalStepsAvailable: false });
+        if (isCreateOptionalStepPicker) {
+          onEnabledWorkflowStepsChange?.([], { optionalStepsAvailable: false });
+        }
       })
       .finally(() => {
         if (!cancelled) setOptionalStepsLoading(false);
@@ -394,7 +410,7 @@ export function TaskForm({
     // onEnabledWorkflowStepsChange intentionally omitted from deps: a new identity
     // each render must not re-trigger the fetch/re-seed (would clobber user toggles).
     // Callers must pass a stable callback (NewTaskModal passes a useState setter).
-  }, [onWorkflowIdChange, effectiveOptionalWorkflowId, projectId]);
+  }, [onWorkflowIdChange, optionalStepsWorkflowId, mode, resolvedOptionalWorkflowId, projectId]);
 
   const enabledOptionalStepIds = enabledWorkflowSteps ?? [];
   /*
@@ -403,10 +419,10 @@ export function TaskForm({
   */
   const handleExecutionModeChange = useCallback((nextMode: TaskExecutionModeSelection) => {
     onExecutionModeChange?.(nextMode);
-    if (nextMode === "fast") {
+    if (nextMode === "fast" && onWorkflowIdChange) {
       onEnabledWorkflowStepsChange?.([], { optionalStepsAvailable: optionalSteps.length > 0 });
     }
-  }, [onEnabledWorkflowStepsChange, onExecutionModeChange, optionalSteps.length]);
+  }, [onEnabledWorkflowStepsChange, onExecutionModeChange, onWorkflowIdChange, optionalSteps.length]);
 
   const toggleOptionalStep = useCallback(
     (templateId: string) => {
@@ -440,6 +456,7 @@ export function TaskForm({
     (branch || "") !== "" ||
     (baseBranch || "") !== "" ||
     (nodeId || "") !== "" ||
+    (mode === "edit" && (enabledWorkflowSteps?.length ?? 0) > 0) ||
     githubTrackingEnabled === true ||
     (githubRepoOverride || "") !== "";
 
@@ -793,6 +810,11 @@ export function TaskForm({
   const selectedNode = (nodeOptions ?? []).find((node) => node.id === nodeId);
   const nodeInlineLabel = selectedNode?.name ?? t("taskForm.nodeInlineDefault", "Node");
   const modelInlineLabel = selectedPreset?.name ?? (presetMode === "custom" ? t("taskForm.modelsCustom", "Models") : t("taskForm.modelsDefault", "Models"));
+  const inlinePriority = priority ?? DEFAULT_TASK_PRIORITY;
+  const InlinePriorityIcon = getPriorityIcon(inlinePriority);
+  const inlinePriorityLabel = getPriorityLabel(inlinePriority);
+  const inlinePriorityButtonLabel = t("taskForm.priorityInlineAria", "Priority: {{priority}}", { priority: inlinePriorityLabel });
+  const inlineFastButtonLabel = t("taskForm.toggleFastMode", "Toggle fast execution mode");
 
   const revealAdvancedControl = useCallback((selector: string) => {
     if (!forceMoreOptionsOpen) setShowMoreOptions(true);
@@ -948,7 +970,10 @@ export function TaskForm({
       Common quick-add action row, adjacent to the description (create mode only). The deep/advanced controls stay collapsed behind the "Advanced" disclosure, but the buttons users reach for most — Attach, Fast (execution-mode), Priority — are surfaced INLINE here next to Plan, styled identically to QuickEntryBox's quick-add buttons (shared `.btn .btn-sm`, `.dep-trigger`, lucide icons at size 12). They are wired to TaskForm's existing state/handlers, NOT duplicated:
         - Attach   → fileInputRef.click() (same hidden input the Advanced Attachments group uses; onImagesChange handles the file).
         - Fast     → toggles executionMode standard⇄fast via onExecutionModeChange (mirrors QuickEntryBox quick-entry-fast-toggle).
-        - Priority → cycles through TASK_PRIORITIES via onPriorityChange (Flag affordance).
+        - Priority → cycles through TASK_PRIORITIES via onPriorityChange and uses the shared priorityIndicator glyph language.
+
+      FNXC:NewTaskDialogAffordances 2026-07-10-21:45:
+      Priority and Fast are icon-only in the inline New Task row to match QuickEntryBox: priority uses the shared up/high, down/low, flag/normal, alert/urgent helper, and Fast uses Zap while title/aria-label/test-id semantics preserve accessibility and tests.
       Plan/Subtask remain gated on their handoff callbacks. Model selectors, branch/base, node, review level, and GitHub tracking stay in the Advanced disclosure.
 
       FNXC:NewTaskDialogAffordances 2026-06-23-21:20:
@@ -1031,12 +1056,12 @@ export function TaskForm({
               className={`btn btn-sm ${executionMode === "fast" ? "btn-primary" : ""}`}
               onClick={() => handleExecutionModeChange(executionMode === "fast" ? "standard" : "fast")}
               aria-pressed={executionMode === "fast"}
+              aria-label={inlineFastButtonLabel}
               disabled={disabled}
               data-testid="task-form-inline-fast"
-              title={t("taskForm.toggleFastMode", "Toggle fast execution mode")}
+              title={inlineFastButtonLabel}
             >
-              <Zap size={12} className="task-form-action-icon" />
-              {t("taskForm.fast", "Fast")}
+              <Zap size={12} className="task-form-action-icon" aria-hidden="true" />
             </button>
           )}
 
@@ -1121,26 +1146,22 @@ export function TaskForm({
             </button>
           )}
 
-          {/* FNXC:NewTask 2026-06-23-00:10: Priority — cycles TASK_PRIORITIES via onPriorityChange (Flag affordance, same label shape as QuickEntryBox). */}
+          {/* FNXC:NewTask 2026-06-23-00:10: Priority — cycles TASK_PRIORITIES via onPriorityChange (shared icon-only glyph language, same accessible label shape as QuickEntryBox). */}
           {onPriorityChange && (
             <button
               type="button"
               className="btn btn-sm"
               onClick={() => {
-                const current = priority ?? DEFAULT_TASK_PRIORITY;
-                const idx = TASK_PRIORITIES.indexOf(current);
+                const idx = TASK_PRIORITIES.indexOf(inlinePriority);
                 const next = TASK_PRIORITIES[(idx + 1) % TASK_PRIORITIES.length];
                 onPriorityChange(next);
               }}
+              aria-label={inlinePriorityButtonLabel}
               disabled={disabled}
               data-testid="task-form-inline-priority"
-              title={t("taskForm.priorityLabel", "Priority")}
+              title={inlinePriorityButtonLabel}
             >
-              <Flag size={12} className="task-form-action-icon" />
-              {(() => {
-                const p = priority ?? DEFAULT_TASK_PRIORITY;
-                return `${p[0].toUpperCase()}${p.slice(1)}`;
-              })()}
+              <InlinePriorityIcon size={12} className="task-form-action-icon" aria-hidden="true" />
             </button>
           )}
         </div>
@@ -1740,6 +1761,26 @@ export function TaskForm({
           <small className="workflow-select-help" data-testid="task-workflow-help">
             {t("taskForm.workflowHelp", "The selected workflow's steps run automatically around this task's execution.")}
           </small>
+        </div>
+      )}
+
+      {mode === "edit" && onEnabledWorkflowStepsChange && (optionalStepsLoading || optionalSteps.length > 0) && (
+        <div className="form-group" data-testid="task-form-edit-workflow-steps-group">
+          {/* FNXC:WorkflowOptionalSteps 2026-07-10-00:18: Edit-mode Workflow Steps belongs in More options immediately before GitHub Tracking so shared edit/create forms keep the documented advanced-section order while avoiding an empty button shell for workflows with no optional steps. */}
+          <label>{t("taskForm.workflowStepsLabel", "Workflow Steps")}</label>
+          {optionalStepsLoading ? (
+            <small className="workflow-optional-steps-loading" data-testid="task-edit-optional-steps-loading">
+              {t("taskForm.optionalStepsLoading", "Loading optional steps…")}
+            </small>
+          ) : (
+            <WorkflowOptionalStepsDropdown
+              steps={optionalSteps}
+              enabledIds={enabledOptionalStepIds}
+              onToggle={toggleOptionalStep}
+              disabled={disabled}
+              triggerTestId="task-form-edit-optional-steps"
+            />
+          )}
         </div>
       )}
 

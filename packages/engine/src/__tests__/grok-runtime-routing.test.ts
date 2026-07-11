@@ -190,6 +190,36 @@ describe("Grok CLI runtime routing (FN-7725)", () => {
     expect(onText.mock.calls.map((c) => c[0])).toEqual(["hi ", "there"]);
   });
 
+  it("surfaces code-0 zero-NDJSON Grok exits through the shared runtime session seam", async () => {
+    const { proc, stdout } = makeFakeGrokProcess();
+    const spawn = vi.fn().mockReturnValue(proc);
+    const grokRegistration = await createGrokRegistration(spawn);
+    const pluginRunner = createMockPluginRunner({
+      getRuntimeById: vi.fn().mockReturnValue(grokRegistration),
+    });
+    const onText = vi.fn();
+    const result = await createResolvedAgentSession({
+      sessionPurpose: "executor",
+      runtimeHint: "grok",
+      pluginRunner,
+      cwd: "/tmp/project",
+      onText,
+    });
+
+    const session = result.session as {
+      state?: { errorMessage?: string };
+      promptWithFallback: (prompt: string) => Promise<void>;
+    };
+    const promptPromise = session.promptWithFallback("hello grok");
+    stdout.end();
+    (proc as EventEmitter).emit("close", 0, null);
+
+    await promptPromise;
+
+    expect(session.state?.errorMessage).toContain("Grok CLI produced no NDJSON output");
+    expect(onText).toHaveBeenCalledWith(expect.stringContaining("Grok CLI produced no NDJSON output"));
+  });
+
   it("falls back to the default pi runtime when the Grok plugin runtime is not registered", async () => {
     const pluginRunner = createMockPluginRunner({
       getRuntimeById: vi.fn().mockReturnValue(undefined),

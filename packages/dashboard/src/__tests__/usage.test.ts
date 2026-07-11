@@ -9,6 +9,11 @@ const coreInteropMocks = vi.hoisted(() => ({
   readStoredCredentialsFromAuthFile: vi.fn(),
 }));
 
+const nodePtyMocks = vi.hoisted(() => ({
+  available: false,
+  spawn: vi.fn(),
+}));
+
 vi.mock("@fusion/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@fusion/core")>()),
   choosePreferredStoredCredential: coreInteropMocks.choosePreferredStoredCredential,
@@ -62,7 +67,10 @@ vi.mock("node:child_process", () => ({
 
 // Mock node-pty for CLI fallback — default: not available (simulates test env)
 vi.mock("node-pty", () => {
-  throw new Error("node-pty not available in test environment");
+  if (!nodePtyMocks.available) {
+    throw new Error("node-pty not available in test environment");
+  }
+  return { spawn: nodePtyMocks.spawn };
 });
 
 describe("usage", () => {
@@ -72,6 +80,8 @@ describe("usage", () => {
     mockRequest.mockClear();
     mockReadFile.mockClear();
     mockExecFileSync.mockClear();
+    nodePtyMocks.available = false;
+    nodePtyMocks.spawn.mockReset();
     mockExecFileSync.mockImplementation(() => {
       throw new Error("File not found");
     });
@@ -246,6 +256,28 @@ describe("usage", () => {
       expect(copilot).toBeUndefined();
     });
 
+    it("omits Fusion-sourced Copilot credentials when GitHub reports no subscription", async () => {
+      coreInteropMocks.readStoredCredentialsFromAuthFile.mockReturnValue({
+        "github-copilot": { type: "oauth", access: "fusion-gho", refresh: "r", expires: Date.now() + 60_000 },
+      });
+      mockRequest.mockImplementation((_options: any, callback: any) => {
+        const mockRes = {
+          statusCode: 404,
+          headers: {},
+          on: vi.fn((event: string, handler: any) => {
+            if (event === "data") handler(Buffer.from('{"message":"No Copilot subscription found"}'));
+            if (event === "end") handler();
+          }),
+        };
+        callback(mockRes);
+        return mockReq;
+      });
+
+      const providers = await fetchAllProviderUsage();
+      const copilot = providers.find((p) => p.name === "GitHub Copilot");
+      expect(copilot).toBeUndefined();
+    });
+
     it("surfaces Fusion re-login guidance when Fusion-sourced token gets 401", async () => {
       coreInteropMocks.readStoredCredentialsFromAuthFile.mockReturnValue({
         "github-copilot": { type: "oauth", access: "fusion-gho", refresh: "r", expires: Date.now() + 60_000 },
@@ -269,6 +301,29 @@ describe("usage", () => {
       expect(copilot?.error).toContain("re-login from Fusion Settings");
     });
 
+    it("surfaces Fusion HTTP failures when a configured Copilot provider fails transiently", async () => {
+      coreInteropMocks.readStoredCredentialsFromAuthFile.mockReturnValue({
+        "github-copilot": { type: "oauth", access: "fusion-gho", refresh: "r", expires: Date.now() + 60_000 },
+      });
+      mockRequest.mockImplementation((_options: any, callback: any) => {
+        const mockRes = {
+          statusCode: 500,
+          headers: {},
+          on: vi.fn((event: string, handler: any) => {
+            if (event === "data") handler(Buffer.from('{"message":"server unavailable"}'));
+            if (event === "end") handler();
+          }),
+        };
+        callback(mockRes);
+        return mockReq;
+      });
+
+      const providers = await fetchAllProviderUsage();
+      const copilot = providers.find((p) => p.name === "GitHub Copilot");
+      expect(copilot?.status).toBe("error");
+      expect(copilot?.error).toContain("HTTP 500");
+    });
+
     it("falls back to gh CLI when no Fusion credential is present", async () => {
       coreInteropMocks.readStoredCredentialsFromAuthFile.mockReturnValue({});
       mockExecFileSync.mockImplementation((cmd: string, args: string[]) => {
@@ -289,8 +344,9 @@ describe("usage", () => {
       expect(copilot!.windows.some((window) => window.label === "Chat (Monthly)")).toBe(true);
     });
 
-    it("returns error when Copilot subscription not found (404)", async () => {
+    it("omits gh CLI Copilot when GitHub reports no subscription", async () => {
       mockReadFile.mockRejectedValue(new Error("File not found"));
+      coreInteropMocks.readStoredCredentialsFromAuthFile.mockReturnValue({});
       mockExecFileSync.mockImplementation((cmd: string, args: string[]) => {
         if (cmd === "gh" && args[0] === "auth") {
           return "";
@@ -303,9 +359,26 @@ describe("usage", () => {
 
       const providers = await fetchAllProviderUsage();
       const copilot = providers.find((p) => p.name === "GitHub Copilot");
-      expect(copilot).toBeDefined();
-      expect(copilot!.status).toBe("error");
-      expect(copilot!.error).toContain("No Copilot subscription");
+      expect(copilot).toBeUndefined();
+    });
+
+    it("surfaces gh CLI auth-expired errors as configured but failing", async () => {
+      mockReadFile.mockRejectedValue(new Error("File not found"));
+      coreInteropMocks.readStoredCredentialsFromAuthFile.mockReturnValue({});
+      mockExecFileSync.mockImplementation((cmd: string, args: string[]) => {
+        if (cmd === "gh" && args[0] === "auth") {
+          return "";
+        }
+        if (cmd === "gh" && args[0] === "api") {
+          throw new Error("HTTP 401: Bad credentials");
+        }
+        throw new Error("File not found");
+      });
+
+      const providers = await fetchAllProviderUsage();
+      const copilot = providers.find((p) => p.name === "GitHub Copilot");
+      expect(copilot?.status).toBe("error");
+      expect(copilot?.error).toContain("GitHub auth expired");
     });
   });
 
@@ -772,7 +845,54 @@ describe("usage", () => {
       expect(sessionWindow!.resetText).toContain("resets in");
     });
 
-    it("parses all four usage windows from API response", async () => {
+    it("parses all five usage windows from API response", async () => {
+      setupClaudeMocks({
+        credFileContent: {
+          accessToken: "test-token",
+          scopes: ["user:profile"],
+          subscriptionType: "max",
+        },
+      });
+
+      setupClaudeApiResponse({
+        five_hour: {
+          utilization: 40.0,
+          resets_at: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+        },
+        seven_day: {
+          utilization: 20.0,
+          resets_at: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+        },
+        seven_day_sonnet: {
+          utilization: 15.0,
+          resets_at: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+        },
+        seven_day_opus: {
+          utilization: 5.0,
+          resets_at: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+        },
+        seven_day_fable: {
+          utilization: 0,
+          resets_at: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+        },
+      });
+
+      const providers = await fetchAllProviderUsage();
+      const claude = providers.find((p) => p.name === "Claude")!;
+
+      expect(claude.status).toBe("ok");
+      expect(claude.windows).toHaveLength(5);
+      expect(claude.windows.map((w) => w.label)).toEqual([
+        "Session (5h)",
+        "Weekly",
+        "Weekly (Sonnet)",
+        "Weekly (Opus)",
+        "Weekly (Fable)",
+      ]);
+      expect(claude.windows.find((w) => w.label === "Weekly (Fable)")?.percentUsed).toBe(0);
+    });
+
+    it("omits Weekly (Fable) when API response has no Fable window", async () => {
       setupClaudeMocks({
         credFileContent: {
           accessToken: "test-token",
@@ -804,13 +924,67 @@ describe("usage", () => {
       const claude = providers.find((p) => p.name === "Claude")!;
 
       expect(claude.status).toBe("ok");
-      expect(claude.windows).toHaveLength(4);
       expect(claude.windows.map((w) => w.label)).toEqual([
         "Session (5h)",
         "Weekly",
         "Weekly (Sonnet)",
         "Weekly (Opus)",
       ]);
+      expect(claude.windows.some((w) => w.label === "Weekly (Fable)")).toBe(false);
+    });
+
+    it("parses Weekly (Fable) from CLI fallback output after a 429 rate limit", async () => {
+      setupClaudeMocks({
+        credFileContent: {
+          accessToken: "test-token",
+          scopes: ["user:profile"],
+        },
+      });
+
+      _setSleepFn(async () => {});
+      nodePtyMocks.available = true;
+      nodePtyMocks.spawn.mockImplementation(() => ({
+        write: vi.fn(),
+        kill: vi.fn(),
+        onData: vi.fn((handler: (data: string) => void) => {
+          handler([
+            "Current week (Fable)",
+            "████ 12% used",
+            "Resets in 2d 4h",
+          ].join("\n"));
+        }),
+        onExit: vi.fn((handler: () => void) => {
+          handler();
+        }),
+      }));
+
+      const mockReq = { on: vi.fn(), write: vi.fn(), end: vi.fn() };
+      mockRequest.mockImplementation((_options: any, callback: any) => {
+        const mockRes = {
+          statusCode: 429,
+          headers: {},
+          on: vi.fn((event: string, handler: any) => {
+            if (event === "data") handler(Buffer.from('{"error":"rate_limited"}'));
+            if (event === "end") handler();
+          }),
+        };
+        callback(mockRes);
+        return mockReq;
+      });
+
+      const providers = await fetchAllProviderUsage();
+      const claude = providers.find((p) => p.name === "Claude")!;
+
+      expect(claude.status).toBe("ok");
+      expect(claude.windows).toHaveLength(1);
+      expect(claude.windows[0]).toMatchObject({
+        label: "Weekly (Fable)",
+        percentUsed: 12,
+        percentLeft: 88,
+      });
+      expect(mockRequest).toHaveBeenCalledTimes(3);
+
+      _resetSleepFn();
     });
 
     it("falls back to CLI parsing on 429 rate limit", async () => {
@@ -2440,11 +2614,74 @@ describe("usage", () => {
   });
 
   describe("Gemini provider", () => {
+    const setupGeminiFiles = (options: { selectedType?: string; accessToken?: string | null } = {}) => {
+      const { selectedType, accessToken = "test-token" } = options;
+      mockReadFile.mockImplementation((filePath: string) => {
+        if (filePath.includes("gemini")) {
+          if (filePath.includes("oauth_creds")) {
+            return JSON.stringify({
+              ...(accessToken ? { access_token: accessToken } : {}),
+              id_token: "header.eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20ifQ.signature",
+            });
+          }
+          if (filePath.includes("settings") && selectedType) {
+            return JSON.stringify({
+              security: {
+                auth: {
+                  selectedType,
+                },
+              },
+            });
+          }
+        }
+        return Promise.reject(new Error("File not found"));
+      });
+    };
+
+    const mockGeminiResponse = (statusCode: number, body: unknown = {}) => {
+      const mockReq = { on: vi.fn(), write: vi.fn(), end: vi.fn(), destroy: vi.fn() };
+      mockRequest.mockImplementation((_options: any, callback: any) => {
+        const mockRes = {
+          statusCode,
+          headers: {},
+          on: vi.fn((event: string, handler: any) => {
+            if (event === "data") handler(Buffer.from(typeof body === "string" ? body : JSON.stringify(body)));
+            if (event === "end") handler();
+          }),
+        };
+        callback(mockRes);
+        return mockReq;
+      });
+    };
+
+    const mockGeminiNetworkError = (error: Error) => {
+      const mockReq = {
+        on: vi.fn((event: string, handler: any) => {
+          if (event === "error") queueMicrotask(() => handler(error));
+        }),
+        write: vi.fn(),
+        end: vi.fn(),
+        destroy: vi.fn(),
+      };
+      mockRequest.mockReturnValue(mockReq);
+    };
+
     it("detects no auth when oauth_creds.json doesn't exist", async () => {
       mockReadFile.mockImplementation(async () => {
         return Promise.reject(new Error("File not found"));
       });
 
+      clearUsageCache();
+      const providers = await fetchAllProviderUsage();
+      const gemini = providers.find((p) => p.name === "Gemini");
+
+      expect(gemini).toBeUndefined();
+    });
+
+    it("detects no auth when oauth_creds.json has no access token", async () => {
+      setupGeminiFiles({ accessToken: null });
+
+      clearUsageCache();
       const providers = await fetchAllProviderUsage();
       const gemini = providers.find((p) => p.name === "Gemini");
 
@@ -2467,43 +2704,10 @@ describe("usage", () => {
         ],
       };
 
-      mockReadFile.mockImplementation((path: string) => {
-        if (path.includes("gemini")) {
-          if (path.includes("oauth_creds")) {
-            return JSON.stringify({
-              access_token: "test-token",
-              id_token: "header.eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20ifQ.signature",
-            });
-          }
-          // settings.json doesn't exist (oauth-personal is default)
-          return Promise.reject(new Error("File not found"));
-        }
-        return Promise.reject(new Error("File not found"));
-      });
+      setupGeminiFiles();
+      mockGeminiResponse(200, mockResponse);
 
-      const mockReq = {
-        on: vi.fn(),
-        write: vi.fn(),
-        end: vi.fn(),
-      };
-
-      mockRequest.mockImplementation((options: any, callback: any) => {
-        const mockRes = {
-          statusCode: 200,
-          headers: {},
-          on: vi.fn((event: string, handler: any) => {
-            if (event === "data") {
-              handler(Buffer.from(JSON.stringify(mockResponse)));
-            }
-            if (event === "end") {
-              handler();
-            }
-          }),
-        };
-        callback(mockRes);
-        return mockReq;
-      });
-
+      clearUsageCache();
       const providers = await fetchAllProviderUsage();
       const gemini = providers.find((p) => p.name === "Gemini")!;
 
@@ -2529,33 +2733,10 @@ describe("usage", () => {
         ],
       };
 
-      mockReadFile.mockImplementation((path: string) => {
-        if (path.includes("gemini")) {
-          if (path.includes("oauth_creds")) {
-            return JSON.stringify({
-              access_token: "test-token",
-              id_token: "header.eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20ifQ.signature",
-            });
-          }
-          return Promise.reject(new Error("File not found"));
-        }
-        return Promise.reject(new Error("File not found"));
-      });
+      setupGeminiFiles();
+      mockGeminiResponse(200, mockResponse);
 
-      const mockReq = { on: vi.fn(), write: vi.fn(), end: vi.fn() };
-      mockRequest.mockImplementation((_options: any, callback: any) => {
-        const mockRes = {
-          statusCode: 200,
-          headers: {},
-          on: vi.fn((event: string, handler: any) => {
-            if (event === "data") handler(Buffer.from(JSON.stringify(mockResponse)));
-            if (event === "end") handler();
-          }),
-        };
-        callback(mockRes);
-        return mockReq;
-      });
-
+      clearUsageCache();
       const providers = await fetchAllProviderUsage();
       const gemini = providers.find((p) => p.name === "Gemini")!;
 
@@ -2564,32 +2745,70 @@ describe("usage", () => {
       expect(flashWindow.resetAt).toBe(new Date(resetTime).toISOString());
     });
 
-    it("handles unsupported auth type (api-key)", async () => {
-      mockReadFile.mockImplementation((path: string) => {
-        if (path.includes("gemini")) {
-          if (path.includes("oauth_creds")) {
-            return JSON.stringify({
-              access_token: "test-token",
-            });
-          }
-          if (path.includes("settings")) {
-            return JSON.stringify({
-              security: {
-                auth: {
-                  selectedType: "api-key",
-                },
-              },
-            });
-          }
-        }
-        return Promise.reject(new Error("File not found"));
-      });
+    it("omits unsupported auth type (api-key)", async () => {
+      setupGeminiFiles({ selectedType: "api-key" });
 
+      clearUsageCache();
+      const providers = await fetchAllProviderUsage();
+      const gemini = providers.find((p) => p.name === "Gemini");
+
+      expect(gemini).toBeUndefined();
+    });
+
+    it("omits unsupported auth type (vertex-ai)", async () => {
+      setupGeminiFiles({ selectedType: "vertex-ai" });
+
+      clearUsageCache();
+      const providers = await fetchAllProviderUsage();
+      const gemini = providers.find((p) => p.name === "Gemini");
+
+      expect(gemini).toBeUndefined();
+    });
+
+    it("omits Gemini when OAuth token returns 401", async () => {
+      setupGeminiFiles();
+      mockGeminiResponse(401, { error: "unauthorized" });
+
+      clearUsageCache();
+      const providers = await fetchAllProviderUsage();
+      const gemini = providers.find((p) => p.name === "Gemini");
+
+      expect(gemini).toBeUndefined();
+    });
+
+    it("omits Gemini when OAuth token returns 403", async () => {
+      setupGeminiFiles();
+      mockGeminiResponse(403, { error: "forbidden" });
+
+      clearUsageCache();
+      const providers = await fetchAllProviderUsage();
+      const gemini = providers.find((p) => p.name === "Gemini");
+
+      expect(gemini).toBeUndefined();
+    });
+
+    it("keeps configured Gemini visible for HTTP 500 failures", async () => {
+      setupGeminiFiles();
+      mockGeminiResponse(500, { error: "backend unavailable" });
+
+      clearUsageCache();
       const providers = await fetchAllProviderUsage();
       const gemini = providers.find((p) => p.name === "Gemini")!;
 
       expect(gemini.status).toBe("error");
-      expect(gemini.error).toContain("Unsupported auth type");
+      expect(gemini.error).toContain("HTTP 500");
+    });
+
+    it("keeps configured Gemini visible for network failures", async () => {
+      setupGeminiFiles();
+      mockGeminiNetworkError(new Error("network error"));
+
+      clearUsageCache();
+      const providers = await fetchAllProviderUsage();
+      const gemini = providers.find((p) => p.name === "Gemini")!;
+
+      expect(gemini.status).toBe("error");
+      expect(gemini.error).toContain("network error");
     });
   });
 

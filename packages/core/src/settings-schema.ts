@@ -48,11 +48,13 @@ type MovedProjectSettingsKey =
   | "planningThinkingLevel"
   | "planningFallbackProvider"
   | "planningFallbackModelId"
+  | "planningFallbackThinkingLevel"
   | "validatorProvider"
   | "validatorModelId"
   | "validatorThinkingLevel"
   | "validatorFallbackProvider"
-  | "validatorFallbackModelId";
+  | "validatorFallbackModelId"
+  | "validatorFallbackThinkingLevel";
 
 type ProjectSettingsSchema = Omit<ProjectSettings, MovedProjectSettingsKey>;
 
@@ -108,6 +110,11 @@ export const DEFAULT_GLOBAL_SETTINGS = {
   mergeRequestContractShadowEnabled: false,
   fallbackProvider: undefined,
   fallbackModelId: undefined,
+  /*
+  FNXC:Settings-ThinkingLevel 2026-07-10-11:13:
+  Fallback thinking levels mirror their provider/model scope: global fallbackThinkingLevel is global, planning/validator fallback thinking levels are workflow-moved, and titleSummarizerFallbackThinkingLevel stays project-scoped. Undefined preserves inheritance until runtime/UI follow-ups consume the stored values.
+  */
+  fallbackThinkingLevel: undefined,
   defaultThinkingLevel: undefined,
   ntfyEnabled: false,
   ntfyTopic: undefined,
@@ -580,6 +587,7 @@ export const DEFAULT_PROJECT_SETTINGS = {
   titleSummarizerThinkingLevel: undefined,
   titleSummarizerFallbackProvider: undefined,
   titleSummarizerFallbackModelId: undefined,
+  titleSummarizerFallbackThinkingLevel: undefined,
   prTitlePromptInstructions: undefined,
   prDescriptionPromptInstructions: undefined,
   scripts: undefined,

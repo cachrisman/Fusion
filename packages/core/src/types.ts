@@ -3236,6 +3236,12 @@ export interface GlobalSettings {
    *  model fails due to transient provider-side issues such as rate limits or
    *  overloaded capacity. Must be set together with `fallbackProvider`. */
   fallbackModelId?: string;
+  /**
+   * FNXC:Settings-ThinkingLevel 2026-07-10-11:13:
+   * Fallback model lanes carry optional thinking companions so a swapped-in fallback can run at its own reasoning effort. Undefined means inherit; FN-7793 stores the schema foundation only, without runtime application or UI wiring.
+   * Optional thinking effort for the global fallback model pair. Inherits the default thinking level when unset.
+   */
+  fallbackThinkingLevel?: ThinkingLevel;
   /** Default thinking effort level for AI agent sessions.
    *  Controls how much reasoning effort the model uses — higher levels
    *  produce better results but cost more. When undefined, the engine
@@ -4081,6 +4087,8 @@ export interface ProjectSettings {
   /** Fallback model ID for planning/triage. When unset, falls back to the
    *  global fallback model. Must be set together with `planningFallbackProvider`. */
   planningFallbackModelId?: string;
+  /** Workflow-declared planning fallback thinking override. Companion to the planning fallback provider/model pair; inherits when unset. */
+  planningFallbackThinkingLevel?: ThinkingLevel;
   /** Project-level override for the base default AI model provider.
    *  When set, this overrides the global `defaultProvider`/`defaultModelId` baseline
    *  for all lanes that don't have their own explicit project override.
@@ -4124,6 +4132,8 @@ export interface ProjectSettings {
   /** Fallback model ID for validator/reviewer. When unset, falls back to the
    *  global fallback model. Must be set together with `validatorFallbackProvider`. */
   validatorFallbackModelId?: string;
+  /** Workflow-declared validator fallback thinking override. Companion to the validator fallback provider/model pair; inherits when unset. */
+  validatorFallbackThinkingLevel?: ThinkingLevel;
   /** Workflow-declared validator-lane thinking override. Inherits through task/default thinking when unset. */
   validatorThinkingLevel?: ThinkingLevel;
   /** Reusable model configuration presets for task creation. */
@@ -4640,6 +4650,8 @@ export interface ProjectSettings {
    *  planning fallback, then global fallback. Must be set together with
    *  `titleSummarizerFallbackProvider`. */
   titleSummarizerFallbackModelId?: string;
+  /** Optional project summarization fallback thinking override. Companion to the title summarizer fallback provider/model pair; inherits when unset. */
+  titleSummarizerFallbackThinkingLevel?: ThinkingLevel;
   /**
    * FNXC:PrMetadataGeneration 2026-06-27-00:00:
    * Project operators can add title-specific guidance to the Create PR metadata prompt without replacing the strict JSON schema contract. Blank or whitespace-only values are treated as unset so the default prompt remains byte-for-byte unchanged.

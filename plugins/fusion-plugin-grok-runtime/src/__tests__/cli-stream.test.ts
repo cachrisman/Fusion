@@ -35,17 +35,17 @@ describe("spawnGrokStream", () => {
     vi.restoreAllMocks();
   });
 
-  it("passes the selected model to grok --model when provided", () => {
+  it("passes the selected model and cwd using the real xAI Grok CLI flags", () => {
     spawnGrokStream("grok", "hello", { cwd: "/tmp/project", model: "grok-4.5" });
 
     expect(spawn).toHaveBeenCalledWith("grok", [
-      "--prompt",
+      "-p",
       "hello",
-      "--format",
+      "--output-format",
       "json",
-      "--model",
+      "-m",
       "grok-4.5",
-      "--directory",
+      "--cwd",
       "/tmp/project",
     ], {
       cwd: "/tmp/project",
@@ -55,15 +55,15 @@ describe("spawnGrokStream", () => {
     });
   });
 
-  it("omits --model when no model is provided", () => {
+  it("omits -m when no model is provided", () => {
     spawnGrokStream("grok", "hello", { cwd: "/tmp/project" });
 
     expect(spawn).toHaveBeenCalledWith("grok", [
-      "--prompt",
+      "-p",
       "hello",
-      "--format",
+      "--output-format",
       "json",
-      "--directory",
+      "--cwd",
       "/tmp/project",
     ], expect.objectContaining({ cwd: "/tmp/project" }));
   });

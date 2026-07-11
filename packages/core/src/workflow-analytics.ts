@@ -54,6 +54,8 @@ interface TaskTokenRow {
   totalTokens: number | null;
   modelProvider: string | null;
   modelId: string | null;
+  tokenUsageModelProvider: string | null;
+  tokenUsageModelId: string | null;
 }
 
 interface CountByWorkflowRow {
@@ -123,7 +125,14 @@ function addRowCost(
       cachedTokens: row.cachedTokens ?? 0,
       cacheWriteTokens: row.cacheWriteTokens ?? 0,
     },
-    { provider: row.modelProvider, model: row.modelId },
+    {
+      /*
+       * FNXC:CommandCenter 2026-07-10-08:25:
+       * Workflow cost analytics must mirror token analytics by pricing the actually-used token-usage model snapshot before legacy task model columns. FN-7757's static catalog rows could not help rows whose legacy model columns are NULL, so this fixes the durable resolution path without guessing prices for unknown models.
+       */
+      provider: row.tokenUsageModelProvider ?? row.modelProvider,
+      model: row.tokenUsageModelId ?? row.modelId,
+    },
     now,
     pricingOverrides,
   );
@@ -235,7 +244,9 @@ export function aggregateWorkflowAnalytics(
          t.tokenUsageCacheWriteTokens AS cacheWriteTokens,
          t.tokenUsageTotalTokens AS totalTokens,
          t.modelProvider,
-         t.modelId
+         t.modelId,
+         t.tokenUsageModelProvider,
+         t.tokenUsageModelId
        FROM tasks t
        LEFT JOIN task_workflow_selection s ON s.taskId = t.id
        WHERE ${tokenClauses.join(" AND ")}`,

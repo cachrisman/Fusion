@@ -769,6 +769,26 @@ export function wireCliRelaunchListener(options: {
   });
 }
 
+/*
+FNXC:GrokCliRouting 2026-07-10-00:00:
+Select the PluginRunner the default (no-project) ChatManager uses for runtime
+resolution. Grok CLI routing (deriveGrokRuntimeHintForNoVisibleKey → resolveRuntime)
+calls `getRuntimeById` and `createRuntimeContext`, which exist only on a real
+PluginRunner — a bare PluginLoader (what `options.pluginRunner` is in the CLI
+`dashboard` command) lacks them, so a `grok-cli/*` chat with no Fusion-visible
+GROK_API_KEY threw "getRuntimeById is not a function" and surfaced the misleading
+"requires the bundled Grok CLI runtime" error. Prefer the engine's PluginRunner
+(the same runner the project-scoped chat path already uses via
+engine.getPluginRunner()); fall back to `options.pluginRunner` only in UI-only
+mode where no engine exists.
+*/
+export function resolveChatManagerPluginRunner(
+  options?: Pick<ServerOptions, "engine" | "pluginRunner">,
+): ServerOptions["pluginRunner"] {
+  const engineRunner = options?.engine?.getPluginRunner?.();
+  return (engineRunner as ServerOptions["pluginRunner"] | undefined) ?? options?.pluginRunner;
+}
+
 export function createServer(store: TaskStore, options?: ServerOptions): ReturnType<typeof express> {
   // Register the universal post-create hook so every task-creation path
   // (HTTP routes, CLI, pi extension, mission triage, etc.) triggers
@@ -1374,12 +1394,24 @@ export function createServer(store: TaskStore, options?: ServerOptions): ReturnT
   // Create AgentStore for chat prompt enrichment (initialized lazily by ChatManager)
   const chatAgentStore = new AgentStore({ rootDir: store.getFusionDir() });
 
-  // Create ChatManager for AI chat message handling
+  // Create ChatManager for AI chat message handling.
+  /*
+  FNXC:GrokCliRouting 2026-07-10-00:00:
+  The default (no-project) ChatManager must receive a real PluginRunner — not the
+  bare PluginLoader passed as `options.pluginRunner`. Grok CLI routing
+  (deriveGrokRuntimeHintForNoVisibleKey → resolveRuntime) calls `getRuntimeById`
+  and `createRuntimeContext`, which exist only on PluginRunner; a PluginLoader
+  lacks them, so a `grok-cli/*` chat with no visible GROK_API_KEY threw
+  "getRuntimeById is not a function" → the misleading "requires the bundled Grok
+  CLI runtime" error. Prefer the engine's PluginRunner (the same runner the
+  project-scoped chat path already uses via engine.getPluginRunner()), falling
+  back to the loader only in UI-only mode where no engine exists.
+  */
   const chatManager = options?.chatManager ?? new ChatManager(
     chatStore,
     store.getRootDir(),
     chatAgentStore,
-    options?.pluginRunner,
+    resolveChatManagerPluginRunner(options),
     () => store.getSettings(),
     options?.engine?.getMessageStore(),
     store,
@@ -1621,6 +1653,20 @@ export function createServer(store: TaskStore, options?: ServerOptions): ReturnT
   });
 
   app.get("/api/health/reliability", async (req, res) => {
+    const projectId = getProjectIdFromRequest(req);
+    /*
+    FNXC:ReliabilityHealth 2026-07-10-11:15:
+    Reliability GET/reset must read/write the per-project store so multi-project servers report per-project stats.
+    Use the in-scope resolveProjectScopedStore helper (createServer scope) — NOT the badge-websocket getScopedStore, which lives in a different function and is not visible here.
+    Store creation can fail (getOrCreateProjectStore throwing on a DB error); mirror the project SSE handler and return a targeted 500 instead of letting the failure fall through to the generic Express error handler with a vague message.
+    */
+    let scopedStore: TaskStore;
+    try {
+      scopedStore = await resolveProjectScopedStore(projectId);
+    } catch (err: unknown) {
+      sendErrorResponse(res, 500, err instanceof Error ? err.message : "Failed to resolve project store");
+      return;
+    }
     const rawWindowDays = req.query.windowDays;
     const parsedWindowDays = rawWindowDays === undefined ? 7 : Number.parseInt(String(rawWindowDays), 10);
 
@@ -1632,7 +1678,7 @@ export function createServer(store: TaskStore, options?: ServerOptions): ReturnT
       return;
     }
 
-    const settings = await store.getSettings();
+    const settings = await scopedStore.getSettings();
     const resetAt = typeof settings.reliabilityStatsResetAt === "string" ? settings.reliabilityStatsResetAt : null;
 
     const nowMs = Date.now();
@@ -1643,11 +1689,11 @@ export function createServer(store: TaskStore, options?: ServerOptions): ReturnT
     const endIso = new Date(nowMs).toISOString();
 
     const [runAuditEvents, enteredByDay, bouncedByDay, durationEvents, mergedTaskIds] = await Promise.all([
-      Promise.resolve(store.getRunAuditEvents({ startTime: startIso, endTime: endIso, limit: 50_000 })),
-      store.getTaskMovedCountsByDay({ since: startIso, until: endIso, toColumn: "in-review" }),
-      store.getTaskMovedCountsByDay({ since: startIso, until: endIso, fromColumn: "in-review", toColumn: "in-progress" }),
-      store.getInReviewDurationEvents({ since: startIso, until: endIso }),
-      store.getTaskMergedTaskIds({ since: startIso, until: endIso }),
+      Promise.resolve(scopedStore.getRunAuditEvents({ startTime: startIso, endTime: endIso, limit: 50_000 })),
+      scopedStore.getTaskMovedCountsByDay({ since: startIso, until: endIso, toColumn: "in-review" }),
+      scopedStore.getTaskMovedCountsByDay({ since: startIso, until: endIso, fromColumn: "in-review", toColumn: "in-progress" }),
+      scopedStore.getInReviewDurationEvents({ since: startIso, until: endIso }),
+      scopedStore.getTaskMergedTaskIds({ since: startIso, until: endIso }),
     ]);
 
     const postMergeByDay = postMergeAuditFailuresPerDay(runAuditEvents, effectiveStartMs, nowMs);
@@ -1724,9 +1770,21 @@ export function createServer(store: TaskStore, options?: ServerOptions): ReturnT
     });
   });
 
-  app.post("/api/health/reliability/reset", async (_req, res) => {
+  app.post("/api/health/reliability/reset", async (req, res) => {
+    const projectId = getProjectIdFromRequest(req);
+    /*
+    FNXC:ReliabilityHealth 2026-07-10-11:15:
+    Same in-scope resolveProjectScopedStore + guard as the GET handler so the reset writes reliabilityStatsResetAt to the per-project store and a store-creation failure returns a targeted 500 rather than a vague generic error.
+    */
+    let scopedStore: TaskStore;
+    try {
+      scopedStore = await resolveProjectScopedStore(projectId);
+    } catch (err: unknown) {
+      sendErrorResponse(res, 500, err instanceof Error ? err.message : "Failed to resolve project store");
+      return;
+    }
     const resetAt = new Date().toISOString();
-    await store.updateSettings({ reliabilityStatsResetAt: resetAt });
+    await scopedStore.updateSettings({ reliabilityStatsResetAt: resetAt });
     res.json({ resetAt });
   });
 
@@ -1872,13 +1930,22 @@ export function createServer(store: TaskStore, options?: ServerOptions): ReturnT
   // API Error Handling Middleware - MUST be after API routes but before SPA fallback
   // This ensures API errors return JSON instead of falling through to the SPA fallback (which returns HTML)
    
+  /*
+  FNXC:ApiErrorDiagnostics 2026-07-10-14:00:
+  The /api error boundary is the chokepoint for every unhandled per-request error.
+  It must LOG the underlying error (stack + cause), not just echo a message, so a
+  500 is root-causable server-side — the reported "task write API returns 500 for
+  every task" was undiagnosable because the wrapped error's origin was never
+  recorded. The client-facing body stays generic in production (avoid leaking
+  internals); pass `error: err` so sendErrorResponse logs the stack/cause.
+  */
   app.use("/api", (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     if (res.headersSent) {
       return;
     }
 
     if (err instanceof ApiError) {
-      sendErrorResponse(res, err.statusCode, err.message, { details: err.details });
+      sendErrorResponse(res, err.statusCode, err.message, { details: err.details, error: err });
       return;
     }
 
@@ -1890,7 +1957,7 @@ export function createServer(store: TaskStore, options?: ServerOptions): ReturnT
           ? err.message
           : fallbackMessage;
 
-    sendErrorResponse(res, 500, message);
+    sendErrorResponse(res, 500, message, { error: err });
   });
 
   if (!isHeadless) {
@@ -2378,6 +2445,14 @@ export function setupBadgeWebSocket(
 
     const onTaskUpdated = (task: Task) => {
       const cacheKey = `${scopeKey}:${task.id}`;
+      // FNXC:BadgeSnapshotEviction 2026-07-10-15:00: evict (not re-cache) when a
+      // task is archived off the live board, and skip the publish so peers don't
+      // re-cache it. An unarchive re-emits task:updated with a live column and
+      // re-primes the entry. See isBadgeEligibleTask.
+      if (!isBadgeEligibleTask(task)) {
+        badgeSnapshots.delete(cacheKey);
+        return;
+      }
       const previousSnapshot = badgeSnapshots.get(cacheKey);
       const nextSnapshot: BadgeSnapshot = {
         prInfo: task.prInfo ?? null,
@@ -2413,6 +2488,13 @@ export function setupBadgeWebSocket(
 
     const onTaskCreated = (task: Task) => {
       const cacheKey = `${scopeKey}:${task.id}`;
+      // FNXC:BadgeSnapshotEviction 2026-07-10-15:00: an already-archived task
+      // (e.g. restored/imported into the archive) must not seed the live-board
+      // badge cache — same eligibility rule as the update listener.
+      if (!isBadgeEligibleTask(task)) {
+        badgeSnapshots.delete(cacheKey);
+        return;
+      }
       badgeSnapshots.set(cacheKey, {
         prInfo: task.prInfo ?? null,
         issueInfo: task.issueInfo ?? null,
@@ -2534,6 +2616,19 @@ export function setupBadgeWebSocket(
     dashboardApp.badgeWsManager = null;
     dashboardApp.__fnWebSocketsAttached = false;
   });
+}
+
+/*
+FNXC:BadgeSnapshotEviction 2026-07-10-15:00:
+The in-memory badge-snapshot cache is keyed by task id and only ever removed a task
+on hard-delete, so archived tasks accumulated for the daemon's whole lifetime — a slow
+memory leak on long-running servers with task churn. Badge snapshots are only needed for
+tasks visible on the live board; archived tasks leave it. This predicate is the single
+eligibility rule used by both the create and update listeners (and mirrored by the
+startup prime's `includeArchived:false`). Exported for unit coverage of the invariant.
+*/
+export function isBadgeEligibleTask(task: Pick<Task, "column">): boolean {
+  return task.column !== "archived";
 }
 
 /** Compare two badge snapshots for equality */

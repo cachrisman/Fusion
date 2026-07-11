@@ -205,7 +205,10 @@ export const BUILTIN_MOVED_WORKFLOW_SETTINGS: WorkflowSettingDefinition[] = [
   // falls through to the global lane / project default (KTD-7).
   /*
    * FNXC:Settings-ThinkingLevel 2026-07-10-00:00:
-   * Workflow-declared primary model lanes may pin a thinking effort per (workflow, project). Empty values inherit through the lane/global/default chain, enum options are validated against THINKING_LEVELS, and fallback/title-summarizer lanes intentionally reuse their primary lane thinking level instead of adding separate companion settings.
+   * Workflow-declared primary model lanes may pin a thinking effort per (workflow, project). Empty values inherit through the lane/global/default chain, enum options are validated against THINKING_LEVELS.
+   *
+   * FNXC:Settings-ThinkingLevel 2026-07-10-11:13:
+   * FN-7793: planning/validator fallback lanes now get their own companion thinking-level settings (`planningFallbackThinkingLevel`/`validatorFallbackThinkingLevel`, declared below), matching the global `fallbackThinkingLevel` and project `titleSummarizerFallbackThinkingLevel` keys — fallback lanes no longer merely reuse their primary lane's thinking level.
    */
   {
     id: "executionProvider",
@@ -258,6 +261,17 @@ export const BUILTIN_MOVED_WORKFLOW_SETTINGS: WorkflowSettingDefinition[] = [
     description: "Fallback model id for the planning phase.",
   },
   {
+    /*
+     * FNXC:Settings-ThinkingLevel 2026-07-10-11:13:
+     * Planning and validator fallback thinking levels are workflow-declared companions to their fallback provider/model lanes, persisted per (workflow, project). Empty means inherit; FN-7793 only declares the storage surface.
+     */
+    id: "planningFallbackThinkingLevel",
+    name: "Planning fallback thinking level",
+    type: "enum",
+    options: THINKING_LEVELS.map((level) => ({ value: level, label: level })),
+    description: "Thinking effort for the planning fallback model. Empty inherits from the task or default thinking level.",
+  },
+  {
     id: "validatorProvider",
     name: "Validator provider",
     type: "string",
@@ -287,6 +301,13 @@ export const BUILTIN_MOVED_WORKFLOW_SETTINGS: WorkflowSettingDefinition[] = [
     name: "Validator fallback model",
     type: "string",
     description: "Fallback model id for the validation phase.",
+  },
+  {
+    id: "validatorFallbackThinkingLevel",
+    name: "Validator fallback thinking level",
+    type: "enum",
+    options: THINKING_LEVELS.map((level) => ({ value: level, label: level })),
+    description: "Thinking effort for the validator fallback model. Empty inherits from the task or default thinking level.",
   },
 ];
 

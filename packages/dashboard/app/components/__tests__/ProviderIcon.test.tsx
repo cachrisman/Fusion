@@ -122,6 +122,7 @@ describe("ProviderIcon", () => {
 
   it("renders Cpu icon as fallback for unknown providers", () => {
     render(<ProviderIcon provider="unknown" />);
+    expect(screen.queryByTestId("xai-icon")).not.toBeInTheDocument();
     // Cpu icon from lucide-react renders as an svg without our custom data-testid
     const icon = screen.getByText((_, element) => {
       return element?.tagName.toLowerCase() === "svg" && 
@@ -132,6 +133,7 @@ describe("ProviderIcon", () => {
 
   it("renders Cpu icon as fallback for empty provider", () => {
     render(<ProviderIcon provider="" />);
+    expect(screen.queryByTestId("xai-icon")).not.toBeInTheDocument();
     const icon = screen.getByText((_, element) => {
       return element?.tagName.toLowerCase() === "svg" && 
              element?.parentElement?.getAttribute("data-provider") === "";
@@ -418,6 +420,31 @@ describe("ProviderIcon", () => {
   });
 
   // xAI provider tests
+  it.each(["xai", "grok", "grok-cli"])("renders xAI brand icon for exact %s provider key", (provider) => {
+    render(<ProviderIcon provider={provider} />);
+    expect(screen.getByTestId("xai-icon")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["grok-4.5", "grok-4.5"],
+    ["grok-4-fast", "grok-4-fast"],
+    ["grok-cli/grok-4-fast", "grok-cli/grok-4-fast"],
+    ["xai-grok-4", "xai-grok-4"],
+    ["Grok-4.5", "grok-4.5"],
+  ])("renders xAI brand icon for inferred Grok model/provider string %s", (provider, expectedDataProvider) => {
+    render(<ProviderIcon provider={provider} />);
+    const icon = screen.getByTestId("xai-icon").parentElement;
+    expect(icon).toHaveStyle({ color: "var(--text)" });
+    expect(icon).toHaveAttribute("data-provider", expectedDataProvider);
+  });
+
+  it("infers non-Grok provider icons from model-shaped ids", () => {
+    render(<ProviderIcon provider="gpt-5.5" />);
+    const icon = screen.getByTestId("openai-icon").parentElement;
+    expect(icon).toHaveStyle({ color: "var(--provider-openai)" });
+    expect(icon).toHaveAttribute("data-provider", "gpt-5.5");
+  });
+
   it("renders xAI brand icon for xai provider", () => {
     render(<ProviderIcon provider="xai" />);
     expect(screen.getByTestId("xai-icon")).toBeInTheDocument();

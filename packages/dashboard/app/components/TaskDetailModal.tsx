@@ -1055,6 +1055,9 @@ export function TaskDetailContent({
   const [editExecutionMode, setEditExecutionMode] = useState<"standard" | "fast">(normalizeExecutionModeValue(task.executionMode));
   const [editSelectedPresetId, setEditSelectedPresetId] = useState("");
   const [editSelectedWorkflowSteps, setEditSelectedWorkflowSteps] = useState<string[]>(task.enabledWorkflowSteps || []);
+  const handleEditWorkflowStepsChange = useCallback((enabledWorkflowSteps: string[]) => {
+    setEditSelectedWorkflowSteps(enabledWorkflowSteps);
+  }, []);
   const [editSourceIssueProvider, setEditSourceIssueProvider] = useState(task.sourceIssue?.provider ?? "");
   const [editSourceIssueRepository, setEditSourceIssueRepository] = useState(task.sourceIssue?.repository ?? "");
   const [editSourceIssueExternalId, setEditSourceIssueExternalId] = useState(task.sourceIssue?.externalIssueId ?? "");
@@ -3812,6 +3815,9 @@ export function TaskDetailContent({
                 onPresetModeChange={setEditPresetMode}
                 selectedPresetId={editSelectedPresetId}
                 onSelectedPresetIdChange={setEditSelectedPresetId}
+                optionalStepsWorkflowId={taskWorkflowBadge?.id}
+                enabledWorkflowSteps={editSelectedWorkflowSteps}
+                onEnabledWorkflowStepsChange={handleEditWorkflowStepsChange}
                 pendingImages={editPendingImages}
                 onImagesChange={setEditPendingImages}
                 tasks={tasks.filter((t) => t.id !== task.id)}

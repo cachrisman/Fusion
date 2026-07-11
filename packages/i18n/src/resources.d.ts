@@ -1308,6 +1308,7 @@ export default interface Resources {
       "newChatTitle": "New Chat",
       "noAgentsAvailable": "No agents available",
       "noConversationsYet": "No conversations yet",
+      "noMessage": "No message",
       "noMessages": "No messages",
       "noMessagesYet": "No messages yet. Start the conversation!",
       "noRoomsYet": "No rooms yet.",

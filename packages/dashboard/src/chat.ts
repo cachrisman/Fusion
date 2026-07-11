@@ -54,6 +54,7 @@ import {
   createChatTaskDocumentTools,
   createWorkflowAuthoringTools,
   resolveMcpServersForStore,
+  resolveExecutorThinkingLevel,
 } from "@fusion/engine";
 import * as engineModule from "@fusion/engine";
 
@@ -1057,6 +1058,10 @@ export class ChatManager {
       | "fallbackModelId"
       | "defaultProvider"
       | "defaultModelId"
+      | "defaultThinkingLevel"
+      | "defaultThinkingLevelOverride"
+      | "executionThinkingLevel"
+      | "executionGlobalThinkingLevel"
       | "chatRoomRecentVerbatimMessages"
       | "chatRoomCompactionFetchLimit"
       | "chatRoomSummaryMaxChars"
@@ -1066,6 +1071,10 @@ export class ChatManager {
       | "fallbackModelId"
       | "defaultProvider"
       | "defaultModelId"
+      | "defaultThinkingLevel"
+      | "defaultThinkingLevelOverride"
+      | "executionThinkingLevel"
+      | "executionGlobalThinkingLevel"
       | "chatRoomRecentVerbatimMessages"
       | "chatRoomCompactionFetchLimit"
       | "chatRoomSummaryMaxChars"
@@ -1156,6 +1165,10 @@ export class ChatManager {
     fallbackModelId?: string;
     defaultProvider?: string;
     defaultModelId?: string;
+    defaultThinkingLevel?: Settings["defaultThinkingLevel"];
+    defaultThinkingLevelOverride?: Settings["defaultThinkingLevelOverride"];
+    executionThinkingLevel?: Settings["executionThinkingLevel"];
+    executionGlobalThinkingLevel?: Settings["executionGlobalThinkingLevel"];
   }> {
     if (!this.getSettings) {
       return {};
@@ -1168,6 +1181,10 @@ export class ChatManager {
         fallbackModelId: settings?.fallbackModelId ?? undefined,
         defaultProvider: settings?.defaultProvider ?? undefined,
         defaultModelId: settings?.defaultModelId ?? undefined,
+        defaultThinkingLevel: settings?.defaultThinkingLevel ?? undefined,
+        defaultThinkingLevelOverride: settings?.defaultThinkingLevelOverride ?? undefined,
+        executionThinkingLevel: settings?.executionThinkingLevel ?? undefined,
+        executionGlobalThinkingLevel: settings?.executionGlobalThinkingLevel ?? undefined,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2208,6 +2225,11 @@ export class ChatManager {
         !hasExplicitAgentRuntimeModel
         || usesConfiguredDefaultModel
         || !!(requestedModelProvider && requestedModelId);
+      /*
+       * FNXC:Chat-ThinkingLevel 2026-07-10-00:00:
+       * Model-loop chat sessions apply the per-session thinking level through the engine `defaultThinkingLevel` session option; an empty session value inherits the project/global execution default resolved by resolveExecutorThinkingLevel.
+       */
+      const effectiveThinkingLevel = resolveExecutorThinkingLevel(session.thinkingLevel ?? undefined, chatModelSettings);
 
       const messagingTools = agent?.id && this.messageStore
         ? [
@@ -2260,6 +2282,7 @@ export class ChatManager {
               defaultModelId: effectiveModelId,
             }
           : {}),
+        ...(effectiveThinkingLevel ? { defaultThinkingLevel: effectiveThinkingLevel } : {}),
         ...(allowFallback && chatModelSettings.fallbackProvider && chatModelSettings.fallbackModelId
           ? {
               fallbackProvider: chatModelSettings.fallbackProvider,

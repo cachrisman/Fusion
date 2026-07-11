@@ -25,7 +25,7 @@ const {
   mockTaskStoreUpdateSettings,
   mockMessageStoreSetHook,
   mockSchedulerConfigurePrMonitoring,
-  mockIsGitRepository,
+  mockDetectGitRepository,
   mockReapOrphanWorktrees,
   mockScanIdleWorktrees,
   mockGetRegisteredWorktreePaths,
@@ -44,7 +44,7 @@ const {
   mockTaskStoreUpdateSettings: vi.fn().mockResolvedValue(undefined),
   mockMessageStoreSetHook: vi.fn(),
   mockSchedulerConfigurePrMonitoring: vi.fn(),
-  mockIsGitRepository: vi.fn().mockResolvedValue(true),
+  mockDetectGitRepository: vi.fn().mockResolvedValue({ status: "repo" }),
   mockReapOrphanWorktrees: vi.fn().mockResolvedValue(0),
   mockScanIdleWorktrees: vi.fn().mockResolvedValue([]),
   mockGetRegisteredWorktreePaths: vi.fn().mockResolvedValue(new Set<string>()),
@@ -130,7 +130,7 @@ vi.mock("../../worktree-pool.js", async () => {
   // Stub them out so runtime.start() never spawns git.
   return {
     ...actual,
-    isGitRepository: mockIsGitRepository,
+    detectGitRepository: mockDetectGitRepository,
     reapOrphanWorktrees: mockReapOrphanWorktrees,
     scanIdleWorktrees: mockScanIdleWorktrees,
     getRegisteredWorktreePaths: mockGetRegisteredWorktreePaths,
@@ -261,8 +261,8 @@ describe("InProcessRuntime", () => {
     mockTaskStoreGetTask.mockResolvedValue(null);
     mockResumeTaskForAgent.mockReset();
     mockResumeTaskForAgent.mockResolvedValue(undefined);
-    mockIsGitRepository.mockReset();
-    mockIsGitRepository.mockResolvedValue(true);
+    mockDetectGitRepository.mockReset();
+    mockDetectGitRepository.mockResolvedValue({ status: "repo" });
     mockReapOrphanWorktrees.mockReset();
     mockReapOrphanWorktrees.mockResolvedValue(0);
     mockScanIdleWorktrees.mockReset();
@@ -346,13 +346,54 @@ describe("InProcessRuntime", () => {
         expect(gitExecFileCalls).toHaveLength(0);
         expect(gitSpawnCalls).toHaveLength(0);
         expect(mockReapOrphanWorktrees).toHaveBeenCalledWith(testDir, expect.any(Object));
-        expect(mockIsGitRepository).toHaveBeenCalledWith(testDir);
+        expect(mockDetectGitRepository).toHaveBeenCalledWith(testDir);
         expect(mockScanIdleWorktrees).toHaveBeenCalled();
       } finally {
         execSpy.mockRestore();
         execFileSpy.mockRestore();
         spawnSpy.mockRestore();
       }
+    }, 30000);
+
+    it("warns with git init guidance only when startup detection positively reports not-repo", async () => {
+      const warnSpy = vi.spyOn(runtimeLog, "warn").mockImplementation(() => undefined as any);
+      mockDetectGitRepository.mockResolvedValueOnce({
+        status: "not-repo",
+        stderr: "fatal: not a git repository (or any of the parent directories): .git",
+      });
+
+      await runtime.start();
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("is not a Git repository"));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Run 'git init'"));
+      warnSpy.mockRestore();
+    }, 30000);
+
+    it("warns with the real git detection failure instead of not-repo guidance on startup errors", async () => {
+      const warnSpy = vi.spyOn(runtimeLog, "warn").mockImplementation(() => undefined as any);
+      mockDetectGitRepository.mockResolvedValueOnce({
+        status: "error",
+        reason: "dubious-ownership",
+        stderr: `fatal: detected dubious ownership in repository at '${testDir}'`,
+      });
+
+      await runtime.start();
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("detected dubious ownership"));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(`git config --global --add safe.directory "${testDir}"`));
+      expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("is not a Git repository"));
+      expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("Run 'git init'"));
+      warnSpy.mockRestore();
+    }, 30000);
+
+    it("does not warn about git repository status when startup detection succeeds", async () => {
+      const warnSpy = vi.spyOn(runtimeLog, "warn").mockImplementation(() => undefined as any);
+
+      await runtime.start();
+
+      expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("Git repository"));
+      expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("Git error"));
+      warnSpy.mockRestore();
     }, 30000);
 
     it("passes executor recovery callbacks into SelfHealingManager", async () => {
