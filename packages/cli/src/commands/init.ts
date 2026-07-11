@@ -21,6 +21,8 @@ import {
   isValidSqliteDatabaseFile,
   readProjectIdentity,
   writeProjectIdentity,
+  type RegisteredProject,
+  type IsolationMode,
 } from "@fusion/core";
 import { maybeInstallClaudeSkillForNewProject } from "./claude-skills-runner.js";
 import { isGitRepo } from "./git.js";
@@ -37,6 +39,198 @@ export interface InitOptions {
   path?: string;
   /** Initialize a git repository if one does not exist */
   git?: boolean;
+}
+
+/**
+ * FNXC:McpServer 2026-07-11-10:00:
+ * Options for {@link scaffoldFusionProject} — the log-silent scaffolding
+ * core shared by `fn init` (CLI, keeps its own console logging) and
+ * `fn_project_create`'s init-new MCP path (which must emit ZERO stdout,
+ * since stdout is the JSON-RPC transport channel for `fn mcp serve`).
+ */
+export interface ScaffoldFusionProjectOptions {
+  /** Override the auto-detected project name */
+  name?: string;
+  /** Initialize a git repository if one does not exist */
+  git?: boolean;
+  /** Execution isolation mode for the newly registered project (default: "in-process"). */
+  isolation?: IsolationMode;
+}
+
+/**
+ * Structured result of {@link scaffoldFusionProject}. Callers (runInit / the
+ * MCP fn_project_create handler) render their OWN log lines from this result
+ * — the function itself performs no console output.
+ */
+export interface ScaffoldFusionProjectResult {
+  /** The registered central-registry project row, when registration succeeded. */
+  project?: RegisteredProject;
+  /** Resolved project name used for scaffolding/registration. */
+  projectName: string;
+  /** Whether this call created `.fusion/` (false if it already existed). */
+  fusionDirCreated: boolean;
+  /** Whether this call created `fusion.db` (false if it already existed). */
+  dbCreated: boolean;
+  /** `"initialized"` when `--git` triggered a fresh `git init` for this call. */
+  gitInitializedByFlag: boolean;
+  /** `"initialized"` when CentralCore's own ensureGitRepositoryForProjectPath
+   * step (independent of the `--git` flag) set up the repository during
+   * registration. */
+  gitRepository?: "initialized";
+  /** `.gitignore` entries added by this call (empty if none were missing). */
+  gitignoreEntriesAdded: string[];
+  /** Whether `qmd` is available on PATH for indexed memory search. */
+  qmdAvailable: boolean;
+  /** Bundled Fusion skill install outcomes (one per detected client). */
+  bundledSkillResults: SkillInstallResult[];
+  /** True when the path was already registered in the central database. */
+  alreadyRegistered: boolean;
+  /** Set when the local files were scaffolded but central registration failed
+   * for a reason OTHER than {@link GitRepositoryInitializationError} (which
+   * is thrown, not returned, matching runInit's original hard-failure path). */
+  registrationError?: string;
+  /** Non-fatal identity-file persistence failure message, if any. */
+  identityPersistError?: string;
+}
+
+/**
+ * FNXC:McpServer 2026-07-11-10:00:
+ * Log-silent scaffolding core extracted from `runInit` (FUSI-020). Performs
+ * the create-`.fusion/`/create-`fusion.db`/optional-git/`.gitignore`-update/
+ * `ensureProjectForPath`+`updateProject(active)`+`writeProjectIdentity`
+ * sequence with NO `console.log`/`console.warn` calls — every observable
+ * outcome is returned in {@link ScaffoldFusionProjectResult} so callers
+ * render their own messaging (`runInit` keeps its existing stdout lines;
+ * the `fn_project_create` MCP handler renders a single tool-result summary
+ * and writes ZERO stdout, since stdout is the JSON-RPC transport channel).
+ * Callers are expected to have already confirmed there is NO existing valid
+ * `.fusion/fusion.db` at `cwd` — this function always scaffolds fresh; it
+ * does not implement the "already initialized" / "has .fusion/ but
+ * unregistered" early-return branches that live in `runInit` itself.
+ */
+export async function scaffoldFusionProject(
+  cwd: string,
+  opts: ScaffoldFusionProjectOptions = {},
+): Promise<ScaffoldFusionProjectResult> {
+  const fusionDir = join(cwd, ".fusion");
+  const dbPath = join(fusionDir, "fusion.db");
+  const projectName = opts.name ?? await detectProjectName(cwd);
+
+  let fusionDirCreated = false;
+  if (!existsSync(fusionDir)) {
+    mkdirSync(fusionDir, { recursive: true });
+    fusionDirCreated = true;
+  }
+
+  let gitInitializedByFlag = false;
+  if (opts.git && !(await isGitRepo(cwd))) {
+    await initializeGitRepo(cwd);
+    gitInitializedByFlag = true;
+  }
+
+  const gitignoreEntriesAdded = addLocalStorageToGitignoreSilent(cwd);
+
+  /**
+   * FNXC:ProjectMemory 2026-07-11-10:30:
+   * Durable board-DB creation must happen on the critical path BEFORE the
+   * informational qmd probe (FUSI-023 invariant, preserved through FUSI-020's
+   * extraction into scaffoldFusionProject). The qmd probe (`isQmdAvailable`) is
+   * defense-in-depth non-fatal: if it ever throws or hangs for any reason,
+   * `fn init` / fn_project_create must still have already written `fusion.db`
+   * rather than leaving `.fusion/` empty.
+   */
+  let dbCreated = false;
+  if (!existsSync(dbPath)) {
+    // A zero-byte bootstrap file is a valid SQLite starting point.
+    writeFileSync(dbPath, "");
+    dbCreated = true;
+  }
+
+  /**
+   * FNXC:ProjectMemory 2026-07-11-10:30:
+   * The qmd probe is purely informational and must NEVER gate or abort
+   * scaffolding (FUSI-023). It runs AFTER durable `fusion.db` creation above,
+   * and its rejection is swallowed here (reported as `qmdAvailable: false`) so
+   * a future qmd CLI change that throws/hangs can never stop central
+   * registration from proceeding on a valid, already-written board DB.
+   */
+  let qmdAvailable = false;
+  try {
+    qmdAvailable = await isQmdAvailable();
+  } catch {
+    qmdAvailable = false;
+  }
+
+  const bundledSkillInstall = installBundledFusionSkill();
+
+  const central = new CentralCore();
+  await central.init();
+
+  try {
+    const existing = await central.getProjectByPath(cwd);
+    if (existing) {
+      return {
+        project: existing,
+        projectName,
+        fusionDirCreated,
+        dbCreated,
+        gitInitializedByFlag,
+        gitignoreEntriesAdded,
+        qmdAvailable,
+        bundledSkillResults: bundledSkillInstall.results,
+        alreadyRegistered: true,
+      };
+    }
+
+    const identity = existsSync(dbPath) ? readProjectIdentity(fusionDir) : null;
+    const ensured = await central.ensureProjectForPath({
+      path: cwd,
+      identity: identity ?? undefined,
+      name: projectName,
+      isolationMode: opts.isolation,
+    });
+
+    const project = ensured.project;
+    await central.updateProject(project.id, { status: "active" });
+
+    let identityPersistError: string | undefined;
+    try {
+      writeProjectIdentity(fusionDir, { id: project.id, createdAt: project.createdAt });
+    } catch (identityError) {
+      identityPersistError = identityError instanceof Error ? identityError.message : String(identityError);
+    }
+
+    return {
+      project: { ...project, status: "active" },
+      projectName,
+      fusionDirCreated,
+      dbCreated,
+      gitInitializedByFlag,
+      gitRepository: ensured.gitRepository === "initialized" ? "initialized" : undefined,
+      gitignoreEntriesAdded,
+      qmdAvailable,
+      bundledSkillResults: bundledSkillInstall.results,
+      identityPersistError,
+      alreadyRegistered: false,
+    };
+  } catch (err) {
+    if (err instanceof GitRepositoryInitializationError) {
+      throw err;
+    }
+    return {
+      projectName,
+      fusionDirCreated,
+      dbCreated,
+      gitInitializedByFlag,
+      gitignoreEntriesAdded,
+      qmdAvailable,
+      bundledSkillResults: bundledSkillInstall.results,
+      alreadyRegistered: false,
+      registrationError: err instanceof Error ? err.message : String(err),
+    };
+  } finally {
+    await central.close();
+  }
 }
 
 /**
@@ -94,112 +288,80 @@ export async function runInit(options: InitOptions = {}): Promise<void> {
     );
   }
 
-  // Get or generate project name
+  // Get or generate project name (also used as the fallback in log lines
+  // below if scaffolding fails before its own name resolution runs).
   const projectName = options.name ?? await detectProjectName(cwd);
 
   console.log(`Initializing fn project: "${projectName}"`);
   console.log(`  Path: ${cwd}`);
 
-  // Create .fusion/ directory
-  if (!existsSync(fusionDir)) {
-    mkdirSync(fusionDir, { recursive: true });
+  /*
+  FNXC:McpServer 2026-07-11-10:00:
+  FUSI-020 extracted the create-.fusion/create-db/git/.gitignore/register
+  sequence into the log-silent scaffoldFusionProject() core (shared with the
+  fn_project_create MCP tool's init-new path). runInit renders ALL of its
+  original console.log lines from the returned ScaffoldFusionProjectResult
+  so this function's observable CLI output and idempotency are unchanged.
+  */
+  const result = await scaffoldFusionProject(cwd, { name: options.name, git: options.git });
+
+  if (result.fusionDirCreated) {
     console.log(`  ✓ Created .fusion/ directory`);
   }
-
-  if (options.git && !(await isGitRepo(cwd))) {
-    await initializeGitRepo(cwd);
+  if (result.gitInitializedByFlag) {
     console.log(`  ✓ Initialized git repository`);
   }
-
-  // Add local Fusion/Pi storage directories to .gitignore
-  await addLocalStorageToGitignore(cwd);
-
-  /**
-   * FNXC:ProjectMemory 2026-07-11-09:15:
-   * Durable board-DB creation must happen on the critical path BEFORE the
-   * informational qmd probe (FUSI-023). The qmd probe (`warnIfQmdMissing` →
-   * `isQmdAvailable`) is defense-in-depth non-fatal even after the executor fix
-   * in memory-backend.ts's `getDefaultExecFileAsync`: if it ever throws or hangs
-   * again for any reason, `fn init` must still have already written `fusion.db`
-   * and moved on to central registration rather than leaving `.fusion/` empty.
-   */
-  // Create fusion.db (empty SQLite file)
-  if (!existsSync(dbPath)) {
-    // A zero-byte bootstrap file is a valid SQLite starting point.
-    writeFileSync(dbPath, "");
+  if (result.gitignoreEntriesAdded.length > 0) {
+    console.log(`  ✓ Updated .gitignore (added: ${result.gitignoreEntriesAdded.join(", ")})`);
+  }
+  if (result.qmdAvailable) {
+    console.log(`  ✓ qmd available for memory search`);
+  } else {
+    console.log(`  ⚠ qmd not found; memory search will use local file fallback`);
+    console.log(`    Install qmd for indexed retrieval: ${QMD_INSTALL_COMMAND}`);
+  }
+  if (result.dbCreated) {
     console.log(`  ✓ Created fusion.db`);
   }
+  logBundledSkillInstallResults(result.bundledSkillResults);
 
-  await warnIfQmdMissingSafe();
+  if (result.registrationError) {
+    // If central DB registration fails, still report success since local files are created
+    console.log(`  ⚠ Could not register in central database: ${result.registrationError}`);
+    console.log(`\n✓ Project initialized locally (central registration can be done later)`);
+    console.log(`\n  To register later, run:`);
+    console.log(`    fn project add ${result.projectName} ${cwd}`);
+    return;
+  }
 
-  const bundledSkillInstall = installBundledFusionSkill();
-  logBundledSkillInstallResults(bundledSkillInstall.results);
+  const project = result.project!;
 
-  // Register in central database
-  const central = new CentralCore();
-  await central.init();
-
-  try {
-    // Check if already registered
-    const existing = await central.getProjectByPath(cwd);
-    if (existing) {
-      console.log(`  ✓ Already registered in central database`);
-      maybeInstallClaudeSkillForNewProject(cwd);
-      console.log(`\n✓ Project "${projectName}" is ready!`);
-      console.log(`\n  Next steps:`);
-      console.log(`    fn task list       # View tasks`);
-      console.log(`    fn task create    # Create a task`);
-      console.log(`    fn dashboard      # Open the web UI`);
-      await central.close();
-      return;
-    }
-
-    const identity = existsSync(dbPath) ? readProjectIdentity(fusionDir) : null;
-    const ensured = await central.ensureProjectForPath({
-      path: cwd,
-      identity: identity ?? undefined,
-      name: projectName,
-    });
-
-    const project = ensured.project;
-
-    // Activate the project (registration sets it to 'initializing')
-    await central.updateProject(project.id, { status: "active" });
-
-    try {
-      writeProjectIdentity(join(cwd, ".fusion"), {
-        id: project.id,
-        createdAt: project.createdAt,
-      });
-    } catch (identityError) {
-      console.warn(`  ⚠ Could not persist project identity: ${identityError instanceof Error ? identityError.message : String(identityError)}`);
-    }
-
+  if (result.alreadyRegistered) {
+    console.log(`  ✓ Already registered in central database`);
     maybeInstallClaudeSkillForNewProject(cwd);
-
-    if (ensured.gitRepository === "initialized") {
-      console.log(`  ✓ Initialized git repository`);
-    }
-    console.log(`  ✓ Registered in central database`);
-    console.log(`\n✓ Project "${project.name}" initialized successfully!`);
+    console.log(`\n✓ Project "${result.projectName}" is ready!`);
     console.log(`\n  Next steps:`);
     console.log(`    fn task list       # View tasks`);
     console.log(`    fn task create    # Create a task`);
     console.log(`    fn dashboard      # Open the web UI`);
-
-    await central.close();
-  } catch (err) {
-    if (err instanceof GitRepositoryInitializationError) {
-      await central.close();
-      throw err;
-    }
-    // If central DB registration fails, still report success since local files are created
-    console.log(`  ⚠ Could not register in central database: ${(err as Error).message}`);
-    console.log(`\n✓ Project initialized locally (central registration can be done later)`);
-    console.log(`\n  To register later, run:`);
-    console.log(`    fn project add ${projectName} ${cwd}`);
-    await central.close();
+    return;
   }
+
+  if (result.identityPersistError) {
+    console.warn(`  ⚠ Could not persist project identity: ${result.identityPersistError}`);
+  }
+
+  maybeInstallClaudeSkillForNewProject(cwd);
+
+  if (result.gitRepository === "initialized") {
+    console.log(`  ✓ Initialized git repository`);
+  }
+  console.log(`  ✓ Registered in central database`);
+  console.log(`\n✓ Project "${project.name}" initialized successfully!`);
+  console.log(`\n  Next steps:`);
+  console.log(`    fn task list       # View tasks`);
+  console.log(`    fn task create    # Create a task`);
+  console.log(`    fn dashboard      # Open the web UI`);
 }
 
 /**
@@ -240,7 +402,14 @@ async function detectProjectName(dir: string): Promise<string> {
  * Add local Fusion/Pi storage directories to .gitignore if not already present.
  * Idempotent: only adds missing entries.
  */
-async function addLocalStorageToGitignore(cwd: string): Promise<void> {
+/**
+ * Add local Fusion/Pi storage directories to .gitignore if not already
+ * present. Idempotent: only adds missing entries. Log-silent — returns the
+ * entries actually added so callers (runInit / scaffoldFusionProject) render
+ * their own messaging; failures are swallowed (best-effort, matching the
+ * original behavior) and simply yield an empty result.
+ */
+function addLocalStorageToGitignoreSilent(cwd: string): string[] {
   const gitignorePath = join(cwd, ".gitignore");
 
   let content = "";
@@ -258,17 +427,17 @@ async function addLocalStorageToGitignore(cwd: string): Promise<void> {
     .filter((entry) => !existingEntries.has(entry));
 
   if (missingEntries.length === 0) {
-    return;
+    return [];
   }
 
   const prefix = content.length === 0 || content.endsWith("\n") ? "" : "\n";
   const newContent = `${content}${prefix}${missingEntries.join("\n")}\n`;
   try {
     writeFileSync(gitignorePath, newContent);
-    console.log(`  ✓ Updated .gitignore (added: ${missingEntries.join(", ")})`);
+    return missingEntries;
   } catch {
     // Best-effort: don't fail init if we can't write to .gitignore
-    console.log(`  ⚠ Could not update .gitignore (best-effort)`);
+    return [];
   }
 }
 
@@ -319,33 +488,6 @@ async function ensureGitConfig(cwd: string, key: string, value: string): Promise
   }
 
   await execAsync(`git config ${key} "${value}"`, { cwd, timeout: 10_000 });
-}
-
-async function warnIfQmdMissing(): Promise<void> {
-  if (await isQmdAvailable()) {
-    console.log(`  ✓ qmd available for memory search`);
-    return;
-  }
-
-  console.log(`  ⚠ qmd not found; memory search will use local file fallback`);
-  console.log(`    Install qmd for indexed retrieval: ${QMD_INSTALL_COMMAND}`);
-}
-
-/**
- * FNXC:ProjectMemory 2026-07-11-09:15:
- * Defense-in-depth wrapper (FUSI-023): the qmd probe is purely informational and
- * must never gate or abort `fn init`. `writeFileSync(dbPath)` and central
- * registration already run before this is called; if `warnIfQmdMissing()` throws
- * for any reason (e.g. a future qmd CLI change), swallow it and report the local
- * fallback so init still completes and exits 0 with a valid `fusion.db`.
- */
-async function warnIfQmdMissingSafe(): Promise<void> {
-  try {
-    await warnIfQmdMissing();
-  } catch (err) {
-    console.log(`  ⚠ qmd probe failed; memory search will use local file fallback`);
-    console.log(`    ${err instanceof Error ? err.message : String(err)}`);
-  }
 }
 
 function logBundledSkillInstallResults(results: SkillInstallResult[]): void {

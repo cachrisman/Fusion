@@ -84,6 +84,8 @@ fn project detect
 fn project remove my-app --force
 ```
 
+The same central registry is also reachable from an operator's own MCP client via `fn mcp serve`: `fn_project_list`/`fn_project_show` are base-tier reads, and `fn_project_create`/`fn_project_update`/`fn_project_remove` are destructive-tier writes (gated behind `--allow-destructive` precisely because they mutate this GLOBAL cross-project registry, not just the current project). See [MCP](./mcp.md#the-v1-tool-allow-list) for the full tool contract.
+
 ## `--project` Flag and Resolution
 
 You can target a project explicitly:

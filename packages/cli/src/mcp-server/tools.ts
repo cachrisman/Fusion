@@ -91,6 +91,16 @@
  * serialization (settings carry secret-ref/token-bearing fields). Base tool
  * count forty → forty-one; with --allow-destructive: forty-seven →
  * forty-nine. `fn_settings_update` (DESTRUCTIVE tier, gated behind the SAME
+ *
+ * FNXC:McpServer 2026-07-11-10:00:
+ * FUSI-020 adds project registry tools on top of FUSI-019's set:
+ * `fn_project_list`/`fn_project_show` (BASE-tier reads over the GLOBAL
+ * cross-project `CentralCore` registry — base tool count forty-one →
+ * forty-three) plus `fn_project_create`/`fn_project_update`/
+ * `fn_project_remove` (DESTRUCTIVE tier — with --allow-destructive:
+ * forty-nine → fifty-two). See the FNXC:McpServer 2026-07-11-10:00 comments
+ * above the project read/write tool sections for the cross-project
+ * blast-radius rationale.
  * `--allow-destructive` flag as the rest of the tier — no second gate) is a
  * SHALLOW scope-selected PATCH via `store.updateSettings(patch)` (project)
  * / `store.updateGlobalSettings(patch)` (global) — it never reads-then-
@@ -105,6 +115,7 @@ import {
   TaskStore,
   AgentStore,
   ApprovalRequestStore,
+  CentralCore,
   AGENT_VALID_TRANSITIONS,
   resolveAgentProvisioningPolicy,
   resolveTaskGithubTracking,
@@ -115,10 +126,17 @@ import {
   ActiveGoalLimitExceededError,
   isGlobalSettingsKey,
   isProjectSettingsKey,
+  isValidSqliteDatabaseFile,
+  readProjectIdentity,
+  writeProjectIdentity,
   type Task,
   type ColumnId,
   type TaskPriority,
+  type RegisteredProject,
 } from "@fusion/core";
+import { scaffoldFusionProject } from "../commands/init.js";
+import { existsSync, statSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import { workflowDeleteParams } from "@fusion/engine";
 import {
   createWorkflowAuthoringTools,
@@ -1851,6 +1869,122 @@ const fnSettingsGet: McpToolDefinition = {
   },
 };
 
+// ── Project tools (read-only) ──────────────────────────────────────
+
+/*
+FNXC:McpServer 2026-07-11-10:00:
+FUSI-020 adds `fn_project_list`/`fn_project_show` — BASE-tier reads over
+`CentralCore.listProjects()`/`getProject()`, the SAME central-registry
+primitives the `fn project list`/`fn project show` CLI commands
+(packages/cli/src/commands/project.ts) already call. There is no
+pi-extension `fn_project_*` precedent to mirror, so these tool shapes are
+defined fresh here, following the McpToolDefinition conventions established
+by the tools above.
+
+CRITICAL: unlike every OTHER handler in this registry, project handlers get
+NO store/context-provided project database — `McpToolRuntimeContext` only
+ever carries `cwd`/`allowDestructive`, and the FIRST handler argument
+(`store: TaskStore`) is scoped to the SINGLE project `fn mcp serve` was
+launched for. `CentralCore` is Fusion's GLOBAL cross-project registry
+(`~/.fusion/fusion-central.db`), so every project handler below constructs
+its OWN `new CentralCore()`, calls `await init()`, and ALWAYS `close()`s it
+in a `finally` block — exactly the lifecycle `packages/cli/src/commands/
+project.ts` uses. This means an MCP session started for ONE project can
+read (list/show, base-tier) or mutate (create/update/remove, destructive-
+tier — see the FNXC:McpServer note above {@link DESTRUCTIVE_TOOL_TIER})
+the registry entry for ANY other registered project on the machine. That
+cross-project blast radius is precisely why create/update/remove sit behind
+`--allow-destructive` even though `fn_project_remove` itself is a reversible,
+registry-entry-only operation — see docs/mcp.md's Projects section for the
+operator-facing callout.
+*/
+
+async function findProjectByNameOrId(central: CentralCore, nameOrId: string): Promise<RegisteredProject | undefined> {
+  const byId = await central.getProject(nameOrId);
+  if (byId) return byId;
+  const all = await central.listProjects();
+  const lower = nameOrId.toLowerCase();
+  return all.find((p) => p.name.toLowerCase() === lower);
+}
+
+function renderProjectSummaryLine(project: RegisteredProject): string {
+  return `  ${project.id}: ${project.name} (${project.status} \u00b7 ${project.isolationMode}) \u2014 ${project.path}`;
+}
+
+const fnProjectList: McpToolDefinition = {
+  name: "fn_project_list",
+  description:
+    "List every project registered in Fusion's central cross-project registry (not just the current project). " +
+    "Base-tier read — does not require --allow-destructive.",
+  inputSchema: { type: "object", properties: {} },
+  async handler(_store, _args) {
+    const central = new CentralCore();
+    await central.init();
+    try {
+      const projects = await central.listProjects();
+      if (projects.length === 0) {
+        return textResult("No projects registered.", { structuredContent: { count: 0, projects: [] } });
+      }
+
+      const lines = [`Projects (${projects.length})`, ...projects.map(renderProjectSummaryLine)];
+      return textResult(lines.join("\n"), {
+        structuredContent: redactSecretsDeep({
+          count: projects.length,
+          projects: projects.map((p) => ({
+            id: p.id,
+            name: p.name,
+            path: p.path,
+            status: p.status,
+            isolationMode: p.isolationMode,
+            createdAt: p.createdAt,
+            updatedAt: p.updatedAt,
+            lastActivityAt: p.lastActivityAt,
+          })),
+        }),
+      });
+    } finally {
+      await central.close();
+    }
+  },
+};
+
+const fnProjectShow: McpToolDefinition = {
+  name: "fn_project_show",
+  description:
+    "Show full central-registry detail for a single project by id (or by exact name). " +
+    "Base-tier read — does not require --allow-destructive.",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string", description: "Project id (e.g. proj_...) or exact project name" } },
+    required: ["id"],
+  },
+  async handler(_store, args) {
+    const idArg = String(args.id ?? "").trim();
+    if (!idArg) return errorResult("id is required.");
+
+    const central = new CentralCore();
+    await central.init();
+    try {
+      const project = await findProjectByNameOrId(central, idArg);
+      if (!project) return errorResult(`Project ${idArg} not found`);
+
+      const lines = [
+        `${project.id}: ${project.name}`,
+        `Status: ${project.status}`,
+        `Isolation: ${project.isolationMode}`,
+        `Path: ${project.path}`,
+        `Created: ${project.createdAt}`,
+        `Updated: ${project.updatedAt}`,
+      ];
+      if (project.lastActivityAt) lines.push(`Last activity: ${project.lastActivityAt}`);
+
+      return textResult(lines.join("\n"), { structuredContent: redactSecretsDeep(project) });
+    } finally {
+      await central.close();
+    }
+  },
+};
+
 export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnTaskCreate,
   fnTaskList,
@@ -1893,6 +2027,8 @@ export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnMissionUnlinkGoal,
   fnMissionListGoals,
   fnSettingsGet,
+  fnProjectList,
+  fnProjectShow,
 ];
 
 // ── Destructive tools (opt-in via --allow-destructive) ─────────────────────
@@ -2204,6 +2340,267 @@ const fnFeatureDelete = bindMissionHierarchyDeleteTool({
 });
 
 /*
+FNXC:McpServer 2026-07-11-10:00:
+FUSI-020 adds the write half of the project registry: `fn_project_create`,
+`fn_project_update`, `fn_project_remove`. Every handler here constructs its
+OWN `new CentralCore()` (never a ctx-provided store), always `close()`s it in
+a `finally`, and dispatches to the SAME `CentralCore.registerProject` /
+`ensureProjectForPath` / `updateProject` / `unregisterProject` primitives the
+`fn project` CLI already uses (packages/cli/src/commands/project.ts) — no
+duplicated register/reattach/patch logic is reimplemented inline.
+
+Cross-project blast radius (why these sit in DESTRUCTIVE_TOOL_TIER even
+though `fn_project_remove` alone is reversible): `CentralCore` is the GLOBAL
+cross-project registry (`~/.fusion/fusion-central.db`), not the single
+project `fn mcp serve` was launched for. An operator's MCP session started
+for Project A can register, repath, rename, or unregister the registry
+entry for Project B, C, ... ANY project on the machine — a materially
+higher blast radius than a single-project board mutation. That is precisely
+why these three tools require --allow-destructive (same gate, no second
+confirmation hook, per the FUSI-002/FUSI-005 recorded decision) rather than
+living in the base set alongside fn_project_list/fn_project_show.
+
+`fn_project_create` covers TWO distinct outcomes from one entry point: (a)
+if `path` already has a valid `.fusion/fusion.db`, it REGISTERS the existing
+project (reads its identity file, calls `ensureProjectForPath` +
+`updateProject(active)` + `writeProjectIdentity`, mirroring `fn project
+add`'s register flow); (b) otherwise it SCAFFOLDS a brand-new project via
+the shared, log-silent `scaffoldFusionProject` core (packages/cli/src/
+commands/init.ts, extracted from `fn init` — see its own FNXC:McpServer
+note). The scaffold path performs real filesystem writes (`.fusion/`,
+`fusion.db`, optional `git init`, `.gitignore`) — it MUST emit ZERO stdout,
+since stdout is the MCP protocol channel; scaffoldFusionProject is log-
+silent by construction and any bundled-skill install noise is likewise
+never forwarded to console.log from this handler.
+
+`fn_project_remove` = `CentralCore.unregisterProject` — REGISTRY-ENTRY ONLY.
+It NEVER deletes `.fusion/` or any on-disk file; the project directory and
+its `fusion.db` are left completely untouched, and the project is re-
+addable at any time via `fn_project_create` (register-existing path) or
+`fn project add`. `unregisterProject` is idempotent, so removing an already-
+absent id returns `outcome: "noop"` rather than erroring.
+
+Every structured payload here is `redactSecretsDeep`-walked before being
+returned (project rows can carry a cached `settings` snapshot with secret-
+ref-bearing fields), and every path — success AND error — writes the
+stderr-only `auditDestructiveInvocation` line.
+*/
+
+const PROJECT_ISOLATION_MODES = ["in-process", "child-process"] as const;
+
+function resolveProjectPath(cwd: string, pathArg: unknown): string | undefined {
+  if (typeof pathArg !== "string" || pathArg.trim() === "") return undefined;
+  const raw = pathArg.trim();
+  return isAbsolute(raw) ? raw : resolve(cwd, raw);
+}
+
+const fnProjectCreate: McpToolDefinition = {
+  name: "fn_project_create",
+  description:
+    "DESTRUCTIVE: register a project in Fusion's GLOBAL central registry — either by registering an existing " +
+    "on-disk `.fusion/` project at `path`, or by scaffolding (via the same logic as `fn init`) and registering a " +
+    "brand-new project folder when `path` has no valid `.fusion/fusion.db` yet. Mutates the cross-project registry, " +
+    "not just the current project. Only registered when `fn mcp serve` is started with --allow-destructive.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "Absolute or cwd-relative path to register or scaffold+register." },
+      name: { type: "string", description: "Project display name (default: git remote / directory name)." },
+      isolation: { type: "string", enum: [...PROJECT_ISOLATION_MODES], description: "Execution isolation mode (default: in-process)." },
+      git: { type: "boolean", description: "Initialize a git repository if one does not exist (scaffold-new path only)." },
+    },
+    required: ["path"],
+  },
+  async handler(_store, args, ctx) {
+    const absPath = resolveProjectPath(ctx.cwd, args.path);
+    if (!absPath) return errorResult("path is required.");
+    if (!existsSync(absPath) || !statSync(absPath).isDirectory()) {
+      return errorResult(`Path does not exist or is not a directory: ${absPath}`);
+    }
+
+    const isolationArg = typeof args.isolation === "string" ? args.isolation : undefined;
+    if (isolationArg !== undefined && !PROJECT_ISOLATION_MODES.includes(isolationArg as (typeof PROJECT_ISOLATION_MODES)[number])) {
+      return errorResult(`isolation must be one of: ${PROJECT_ISOLATION_MODES.join(", ")}.`);
+    }
+    const isolation = isolationArg as (typeof PROJECT_ISOLATION_MODES)[number] | undefined;
+    const name = typeof args.name === "string" && args.name.trim() ? args.name.trim() : undefined;
+    const git = args.git === true;
+
+    const dbPath = join(absPath, ".fusion", "fusion.db");
+    const hasValidDb = existsSync(dbPath) && isValidSqliteDatabaseFile(dbPath);
+
+    if (hasValidDb) {
+      // Register an EXISTING on-disk .fusion/ project — mirrors `fn project add`'s register flow.
+      const central = new CentralCore();
+      await central.init();
+      try {
+        const alreadyRegistered = await central.getProjectByPath(absPath);
+        if (alreadyRegistered) {
+          auditDestructiveInvocation({ tool: "fn_project_create", resourceId: alreadyRegistered.id, outcome: "noop-already-registered" });
+          return textResult(`Project already registered: ${alreadyRegistered.id} (${alreadyRegistered.name})`, {
+            structuredContent: redactSecretsDeep({
+              projectId: alreadyRegistered.id,
+              name: alreadyRegistered.name,
+              path: alreadyRegistered.path,
+              status: alreadyRegistered.status,
+              isolationMode: alreadyRegistered.isolationMode,
+              outcome: "noop-already-registered",
+            }),
+          });
+        }
+
+        const identity = readProjectIdentity(join(absPath, ".fusion"));
+        const ensured = await central.ensureProjectForPath({
+          path: absPath,
+          identity: identity ?? undefined,
+          name,
+          isolationMode: isolation,
+        });
+        const activated = await central.updateProject(ensured.project.id, { status: "active" });
+        try {
+          writeProjectIdentity(join(absPath, ".fusion"), { id: activated.id, createdAt: activated.createdAt });
+        } catch {
+          // Best-effort identity backfill only.
+        }
+
+        auditDestructiveInvocation({ tool: "fn_project_create", resourceId: activated.id, outcome: "registered" });
+        return textResult(`Registered existing project ${activated.id} ("${activated.name}") at ${activated.path}.`, {
+          structuredContent: redactSecretsDeep({
+            projectId: activated.id,
+            name: activated.name,
+            path: activated.path,
+            status: activated.status,
+            isolationMode: activated.isolationMode,
+            outcome: "registered",
+          }),
+        });
+      } catch (error) {
+        auditDestructiveInvocation({ tool: "fn_project_create", resourceId: absPath, outcome: "error" });
+        if (error instanceof Error) return errorResult(error.message);
+        throw error;
+      } finally {
+        await central.close();
+      }
+    }
+
+    // No valid .fusion/fusion.db yet — scaffold a brand-new project via the shared, log-silent core.
+    try {
+      const result = await scaffoldFusionProject(absPath, { name, git, isolation });
+      if (result.registrationError) {
+        auditDestructiveInvocation({ tool: "fn_project_create", resourceId: absPath, outcome: "error" });
+        return errorResult(`Scaffolded local files but could not register in central database: ${result.registrationError}`);
+      }
+      const project = result.project!;
+      auditDestructiveInvocation({ tool: "fn_project_create", resourceId: project.id, outcome: result.alreadyRegistered ? "noop-already-registered" : "created" });
+      return textResult(`Scaffolded and registered new project ${project.id} ("${project.name}") at ${project.path}.`, {
+        structuredContent: redactSecretsDeep({
+          projectId: project.id,
+          name: project.name,
+          path: project.path,
+          status: project.status,
+          isolationMode: project.isolationMode,
+          outcome: result.alreadyRegistered ? "noop-already-registered" : "created",
+        }),
+      });
+    } catch (error) {
+      auditDestructiveInvocation({ tool: "fn_project_create", resourceId: absPath, outcome: "error" });
+      if (error instanceof Error) return errorResult(error.message);
+      throw error;
+    }
+  },
+};
+
+const fnProjectUpdate: McpToolDefinition = {
+  name: "fn_project_update",
+  description:
+    "DESTRUCTIVE: apply a shallow patch (name/path/status/isolationMode) to a project's central-registry entry. " +
+    "Mutates the cross-project registry, not just the current project. Only registered when `fn mcp serve` is " +
+    "started with --allow-destructive.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "Project id to update." },
+      name: { type: "string", description: "New display name." },
+      path: { type: "string", description: "New absolute project path." },
+      status: { type: "string", description: "New project status." },
+      isolationMode: { type: "string", enum: [...PROJECT_ISOLATION_MODES], description: "New execution isolation mode." },
+    },
+    required: ["id"],
+  },
+  async handler(_store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+
+    const patch: Record<string, unknown> = {};
+    if (typeof args.name === "string") patch.name = args.name;
+    if (typeof args.path === "string") patch.path = args.path;
+    if (typeof args.status === "string") patch.status = args.status;
+    if (typeof args.isolationMode === "string") patch.isolationMode = args.isolationMode;
+
+    if (Object.keys(patch).length === 0) {
+      return errorResult("At least one of name, path, status, isolationMode must be provided.");
+    }
+
+    const central = new CentralCore();
+    await central.init();
+    try {
+      const updated = await central.updateProject(id, patch as never);
+      auditDestructiveInvocation({ tool: "fn_project_update", resourceId: id, outcome: "updated" });
+      return textResult(`Updated project ${updated.id} ("${updated.name}").`, { structuredContent: redactSecretsDeep(updated) });
+    } catch (error) {
+      auditDestructiveInvocation({ tool: "fn_project_update", resourceId: id, outcome: "error" });
+      if (error instanceof Error) return errorResult(error.message);
+      throw error;
+    } finally {
+      await central.close();
+    }
+  },
+};
+
+const fnProjectRemove: McpToolDefinition = {
+  name: "fn_project_remove",
+  description:
+    "DESTRUCTIVE: unregister a project's CENTRAL-REGISTRY ENTRY only — this NEVER deletes `.fusion/` or any on-disk " +
+    "project files, and the project remains fully re-addable via fn_project_create. Mutates the GLOBAL cross-project " +
+    "registry. Only registered when `fn mcp serve` is started with --allow-destructive.",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string", description: "Project id to unregister." } },
+    required: ["id"],
+  },
+  async handler(_store, args) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+
+    const central = new CentralCore();
+    await central.init();
+    try {
+      const existing = await central.getProject(id);
+      if (!existing) {
+        auditDestructiveInvocation({ tool: "fn_project_remove", resourceId: id, outcome: "noop" });
+        return textResult(`No project registered with id ${id}; nothing to unregister.`, {
+          structuredContent: { projectId: id, outcome: "noop" },
+        });
+      }
+
+      await central.unregisterProject(id);
+      auditDestructiveInvocation({ tool: "fn_project_remove", resourceId: id, outcome: "unregistered" });
+      return textResult(
+        `Unregistered project ${existing.id} ("${existing.name}") from the central registry. ` +
+          `Data is preserved at ${existing.path} — re-add it with fn_project_create.`,
+        { structuredContent: redactSecretsDeep({ projectId: id, name: existing.name, path: existing.path, outcome: "unregistered" }) },
+      );
+    } catch (error) {
+      auditDestructiveInvocation({ tool: "fn_project_remove", resourceId: id, outcome: "error" });
+      if (error instanceof Error) return errorResult(error.message);
+      throw error;
+    } finally {
+      await central.close();
+    }
+  },
+};
+
+/*
 FNXC:McpServer 2026-07-11-09:30:
 fn_settings_update is a DESTRUCTIVE-tier write gated behind the SAME
 --allow-destructive flag as the rest of the tier (no second gate — same
@@ -2291,9 +2688,10 @@ const fnSettingsUpdate: McpToolDefinition = {
 };
 
 /**
- * The destructive tier — EXACTLY eight tools, appended to the base registry
+ * The destructive tier — EXACTLY eleven tools, appended to the base registry
  * only when `McpToolRuntimeContext.allowDestructive === true`. See the
- * module-level FNXC:McpServer 2026-07-10-22:10 and 2026-07-10-23:45 comments
+ * module-level FNXC:McpServer 2026-07-10-22:10 and 2026-07-10-23:45 comments,
+ * plus the FNXC:McpServer 2026-07-11-10:00 comment above the project tools,
  * for the gate rationale.
  */
 export const DESTRUCTIVE_TOOL_TIER: McpToolDefinition[] = [
@@ -2305,6 +2703,9 @@ export const DESTRUCTIVE_TOOL_TIER: McpToolDefinition[] = [
   fnSliceDelete,
   fnFeatureDelete,
   fnSettingsUpdate,
+  fnProjectCreate,
+  fnProjectUpdate,
+  fnProjectRemove,
 ];
 
 /**

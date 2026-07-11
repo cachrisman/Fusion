@@ -18,10 +18,89 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore, AgentStore, type WorkflowIr } from "@fusion/core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+
+/*
+FNXC:McpServer 2026-07-11-10:00:
+FUSI-020's project tools dispatch through `CentralCore`, whose real
+constructor resolves `~/.fusion/fusion-central.db` and THROWS when called
+without an explicit dir under VITEST (see resolveGlobalDir()'s test guard in
+packages/core/src/global-settings.ts) — by design, to stop a test from ever
+touching the real global registry. `packages/cli/src/commands/__tests__/
+init.test.ts` already solves this by mocking `CentralCore` wholesale; this
+file does the same with a minimal in-memory fake so fn_project_* tests never
+touch a real central database. `fakeCentralRegistry` is a MODULE-LEVEL map
+(cleared in `beforeEach` below) so it survives across the single hoisted
+`vi.mock` factory instantiation.
+*/
+const { fakeCentralRegistry } = vi.hoisted(() => ({
+  fakeCentralRegistry: new Map<string, Record<string, unknown>>(),
+}));
+
+vi.mock("@fusion/core", async () => {
+  const actual = await vi.importActual<typeof import("@fusion/core")>("@fusion/core");
+  let seq = 0;
+
+  class FakeCentralCore {
+    async init(): Promise<void> {}
+    async close(): Promise<void> {}
+
+    async listProjects(): Promise<Record<string, unknown>[]> {
+      return [...fakeCentralRegistry.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    }
+
+    async getProject(id: string): Promise<Record<string, unknown> | undefined> {
+      return fakeCentralRegistry.get(id);
+    }
+
+    async getProjectByPath(path: string): Promise<Record<string, unknown> | undefined> {
+      return [...fakeCentralRegistry.values()].find((p) => p.path === path);
+    }
+
+    async registerProject(input: { id?: string; name: string; path: string; isolationMode?: string }): Promise<Record<string, unknown>> {
+      const existingByPath = [...fakeCentralRegistry.values()].find((p) => p.path === input.path);
+      if (existingByPath) throw new Error(`Project already registered at path: ${input.path}`);
+      const now = new Date().toISOString();
+      const id = input.id ?? `proj_fake_${++seq}`;
+      const project = {
+        id,
+        name: input.name,
+        path: input.path,
+        status: "initializing",
+        isolationMode: input.isolationMode ?? "in-process",
+        createdAt: now,
+        updatedAt: now,
+      };
+      fakeCentralRegistry.set(id, project);
+      return project;
+    }
+
+    async ensureProjectForPath(input: { path: string; name?: string; isolationMode?: string }): Promise<{ project: Record<string, unknown>; reattached: boolean; outcome: string }> {
+      const existing = await this.getProjectByPath(input.path);
+      if (existing) return { project: existing, reattached: false, outcome: "existing" };
+      const project = await this.registerProject({ name: input.name ?? "project", path: input.path, isolationMode: input.isolationMode });
+      return { project, reattached: false, outcome: "created" };
+    }
+
+    async updateProject(id: string, updates: Record<string, unknown>): Promise<Record<string, unknown>> {
+      const existing = fakeCentralRegistry.get(id);
+      if (!existing) throw new Error(`Project not found: ${id}`);
+      const updated = { ...existing, ...updates, updatedAt: new Date().toISOString() };
+      fakeCentralRegistry.set(id, updated);
+      return updated;
+    }
+
+    async unregisterProject(id: string): Promise<void> {
+      fakeCentralRegistry.delete(id);
+    }
+  }
+
+  return { ...actual, CentralCore: FakeCentralCore };
+});
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { MCP_TOOL_REGISTRY, DESTRUCTIVE_TOOL_TIER, buildMcpToolRegistry, redactSecretsDeep } from "../tools.js";
 import { buildMcpServer } from "../server.js";
@@ -70,6 +149,9 @@ const EXPECTED_TOOL_NAMES = [
   "fn_mission_list_goals",
   // FUSI-019: settings read
   "fn_settings_get",
+  // FUSI-020: project registry reads
+  "fn_project_list",
+  "fn_project_show",
 ];
 
 const EXPECTED_DESTRUCTIVE_TOOL_NAMES = [
@@ -81,6 +163,9 @@ const EXPECTED_DESTRUCTIVE_TOOL_NAMES = [
   "fn_slice_delete",
   "fn_feature_delete",
   "fn_settings_update",
+  "fn_project_create",
+  "fn_project_update",
+  "fn_project_remove",
 ];
 
 const FORBIDDEN_NAME_PATTERNS = [/release/i, /publish/i, /version[-_]?tag/i, /changeset/i];
@@ -132,7 +217,7 @@ describe("buildMcpToolRegistry (FUSI-002 destructive gate)", () => {
     expect(buildMcpToolRegistry({}).map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
   });
 
-  it("adds exactly the eight destructive tools (FUSI-002's three plus FUSI-005's four mission-hierarchy tools plus FUSI-019's fn_settings_update), no more, no fewer, when allowDestructive is true", () => {
+  it("adds exactly the eleven destructive tools (FUSI-002's three plus FUSI-005's four mission-hierarchy tools plus FUSI-019's fn_settings_update plus FUSI-020's three project tools), no more, no fewer, when allowDestructive is true", () => {
     const names = buildMcpToolRegistry({ allowDestructive: true }).map((t) => t.name).sort();
     expect(names).toEqual([...EXPECTED_TOOL_NAMES, ...EXPECTED_DESTRUCTIVE_TOOL_NAMES].sort());
     expect(DESTRUCTIVE_TOOL_TIER.map((t) => t.name).sort()).toEqual([...EXPECTED_DESTRUCTIVE_TOOL_NAMES].sort());
@@ -187,6 +272,7 @@ describe("fn mcp serve — in-memory server smoke test", () => {
   let store: TaskStore;
 
   beforeEach(async () => {
+    fakeCentralRegistry.clear();
     tmpDir = await mkdtemp(join(tmpdir(), "fn-fusi-001-mcp-"));
     await mkdir(join(tmpDir, ".fusion"), { recursive: true });
     store = new TaskStore(tmpDir);
@@ -224,7 +310,7 @@ describe("fn mcp serve — in-memory server smoke test", () => {
     }
   });
 
-  it("adds exactly the eight destructive tools over an in-memory transport when allowDestructive is true", async () => {
+  it("adds exactly the eleven destructive tools over an in-memory transport when allowDestructive is true", async () => {
     const { client, mcpServer } = await connectClient({ allowDestructive: true });
     try {
       const { tools } = await client.listTools();
@@ -1176,6 +1262,203 @@ describe("fn mcp serve — in-memory server smoke test", () => {
         errSpy.mockRestore();
         await client.close();
         await mcpServer.close();
+      }
+    });
+  });
+
+  describe("project tools (FUSI-020)", () => {
+    let registeredDir: string;
+    let bareDir: string;
+
+    beforeEach(async () => {
+      registeredDir = await mkdtemp(join(tmpdir(), "fn-fusi-020-registered-"));
+      await mkdir(join(registeredDir, ".fusion"), { recursive: true });
+      const seedStore = new TaskStore(registeredDir);
+      await seedStore.init();
+      await seedStore.close();
+
+      bareDir = await mkdtemp(join(tmpdir(), "fn-fusi-020-bare-"));
+    });
+
+    afterEach(async () => {
+      await rm(registeredDir, { recursive: true, force: true });
+      await rm(bareDir, { recursive: true, force: true });
+    });
+
+    it("fn_project_list returns registered rows and the empty-state payload when none are registered", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        const empty = await client.callTool({ name: "fn_project_list", arguments: {} });
+        expect(empty.isError).not.toBe(true);
+        expect(empty.structuredContent).toEqual({ count: 0, projects: [] });
+
+        fakeCentralRegistry.set("proj_seed", {
+          id: "proj_seed",
+          name: "Seed Project",
+          path: registeredDir,
+          status: "active",
+          isolationMode: "in-process",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        });
+
+        const result = await client.callTool({ name: "fn_project_list", arguments: {} });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { count: number; projects: Array<{ id: string; name: string }> };
+        expect(structured.count).toBe(1);
+        expect(structured.projects[0]?.id).toBe("proj_seed");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_project_show returns a project for a valid id/name and isError for an unknown id", async () => {
+      fakeCentralRegistry.set("proj_seed", {
+        id: "proj_seed",
+        name: "Seed Project",
+        path: registeredDir,
+        status: "active",
+        isolationMode: "in-process",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const byId = await client.callTool({ name: "fn_project_show", arguments: { id: "proj_seed" } });
+        expect(byId.isError).not.toBe(true);
+        expect((byId.structuredContent as { id: string }).id).toBe("proj_seed");
+
+        const byName = await client.callTool({ name: "fn_project_show", arguments: { id: "Seed Project" } });
+        expect(byName.isError).not.toBe(true);
+        expect((byName.structuredContent as { id: string }).id).toBe("proj_seed");
+
+        const notFound = await client.callTool({ name: "fn_project_show", arguments: { id: "proj_does_not_exist" } });
+        expect(notFound.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_project_create registers an existing on-disk .fusion project", async () => {
+      const { client, mcpServer } = await connectClient({ allowDestructive: true });
+      try {
+        const result = await client.callTool({ name: "fn_project_create", arguments: { path: registeredDir, name: "Existing Registered" } });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { projectId: string; outcome: string; path: string };
+        expect(structured.outcome).toBe("registered");
+        expect(structured.path).toBe(registeredDir);
+        expect(fakeCentralRegistry.has(structured.projectId)).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_project_create scaffolds a brand-new project for a bare directory, writing ZERO stdout", async () => {
+      const { client, mcpServer } = await connectClient({ allowDestructive: true });
+      const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        expect(existsSync(join(bareDir, ".fusion", "fusion.db"))).toBe(false);
+
+        const result = await client.callTool({ name: "fn_project_create", arguments: { path: bareDir, name: "Brand New", git: false } });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { projectId: string; outcome: string; path: string };
+        expect(structured.outcome).toBe("created");
+        expect(structured.path).toBe(bareDir);
+        expect(existsSync(join(bareDir, ".fusion", "fusion.db"))).toBe(true);
+        expect(fakeCentralRegistry.has(structured.projectId)).toBe(true);
+
+        expect(stdoutSpy).not.toHaveBeenCalled();
+        expect(logSpy).not.toHaveBeenCalled();
+      } finally {
+        stdoutSpy.mockRestore();
+        logSpy.mockRestore();
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_project_update patches name/status and errors on an unknown id", async () => {
+      fakeCentralRegistry.set("proj_seed", {
+        id: "proj_seed",
+        name: "Seed Project",
+        path: registeredDir,
+        status: "active",
+        isolationMode: "in-process",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      });
+      const { client, mcpServer } = await connectClient({ allowDestructive: true });
+      try {
+        const result = await client.callTool({ name: "fn_project_update", arguments: { id: "proj_seed", name: "Renamed", status: "paused" } });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { name: string; status: string };
+        expect(structured.name).toBe("Renamed");
+        expect(structured.status).toBe("paused");
+
+        const notFound = await client.callTool({ name: "fn_project_update", arguments: { id: "proj_missing", name: "X" } });
+        expect(notFound.isError).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_project_remove unregisters the registry entry, preserves on-disk .fusion/, and is idempotent for an absent id", async () => {
+      fakeCentralRegistry.set("proj_seed", {
+        id: "proj_seed",
+        name: "Seed Project",
+        path: registeredDir,
+        status: "active",
+        isolationMode: "in-process",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      });
+      const { client, mcpServer } = await connectClient({ allowDestructive: true });
+      try {
+        const result = await client.callTool({ name: "fn_project_remove", arguments: { id: "proj_seed" } });
+        expect(result.isError).not.toBe(true);
+        expect((result.structuredContent as { outcome: string }).outcome).toBe("unregistered");
+        expect(fakeCentralRegistry.has("proj_seed")).toBe(false);
+        expect(existsSync(join(registeredDir, ".fusion"))).toBe(true);
+
+        const noop = await client.callTool({ name: "fn_project_remove", arguments: { id: "proj_seed" } });
+        expect(noop.isError).not.toBe(true);
+        expect((noop.structuredContent as { outcome: string }).outcome).toBe("noop");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_project_create/update/remove are absent from the base registry and present only when allowDestructive is true", async () => {
+      const base = await connectClient();
+      try {
+        const { tools } = await base.client.listTools();
+        const names = (tools ?? []).map((t) => t.name);
+        expect(names).toContain("fn_project_list");
+        expect(names).toContain("fn_project_show");
+        expect(names).not.toContain("fn_project_create");
+        expect(names).not.toContain("fn_project_update");
+        expect(names).not.toContain("fn_project_remove");
+      } finally {
+        await base.client.close();
+        await base.mcpServer.close();
+      }
+
+      const destructive = await connectClient({ allowDestructive: true });
+      try {
+        const { tools } = await destructive.client.listTools();
+        const names = (tools ?? []).map((t) => t.name);
+        expect(names).toContain("fn_project_create");
+        expect(names).toContain("fn_project_update");
+        expect(names).toContain("fn_project_remove");
+      } finally {
+        await destructive.client.close();
+        await destructive.mcpServer.close();
       }
     });
   });
