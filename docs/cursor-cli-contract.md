@@ -116,3 +116,63 @@ The original FN-3396 preflight treated the following as canonical pending strong
 - Model discovery must be dynamic-first with resilient fallback and no hardcoded static catalog by default.
 
 Binary candidates and expected failure states above remain accurate. The dynamic-first/no-static-catalog principle also still holds, but the specific commands are now confirmed rather than assumed — see "Structured output and model discovery" and "Windows PATH shim invocation" above for the verified `cursor-agent models` / `cursor-agent status --format json` contract that replaces the earlier `--json`-flag guesswork.
+
+## Execution / streaming contract
+
+<!--
+FNXC:CursorCli 2026-07-11-00:00:
+FUSI-063 implemented `CursorRuntimeAdapter.promptWithFallback()`, the last stub in the FN-3396/FN-7695..7700/FUSI-050 cursor-agent integration track. Everything below was captured live against a real `cursor-agent` binary (spec capture at v2026.07.08-0c04a8a, re-verified live at v2026.07.09-a3815c0 during implementation) — see `plugins/fusion-plugin-cursor-runtime/src/execution-process-manager.ts`, `stream-parser.ts`, and `runtime-adapter.ts` for the implementation.
+-->
+
+This section covers the headless execution contract used to run a full agentic turn through `cursor-agent`, as opposed to the probe/discovery/auth commands documented above.
+
+### Headless invocation
+
+Fusion delegates the entire agentic loop to `cursor-agent` (it has its own write/shell tools) rather than treating it as a raw text-completion provider — the same runtime-delegation model already used for the Droid CLI runtime. The confirmed invocation is:
+
+```
+cursor-agent -p --output-format stream-json --force --trust --workspace <cwd> --model <id> [--resume <chatId>] [--mode plan|ask] [--add-dir <path> ...] [--approve-mcps] "<prompt>"
+```
+
+Relevant flags (from `cursor-agent -p --help`, confirmed live):
+
+- `-p, --print` — required for non-interactive/scripted execution; grants the agent access to all tools including write and shell.
+- `--output-format stream-json` — emit one NDJSON event per line on stdout (only valid with `--print`).
+- `--stream-partial-output` — (not currently used by Fusion) would stream partial assistant text deltas instead of whole-block `assistant` events; omitted today because live capture showed cursor-agent emits full assistant text per block without it.
+- `--force` / `--yolo` (alias) — force-allow commands unless explicitly denied. Fusion always passes `--force` since the task worktree is already sandboxed/scoped by Fusion itself.
+- `--trust` — trust the current workspace without an interactive prompt (only valid with `--print`/headless mode); required for non-interactive execution.
+- `--workspace <path>` — the working directory. Fusion always sets this to the task's cwd and NEVER passes cursor-agent's own `-w`/`--worktree` flag, which would have cursor-agent create a SEPARATE isolated worktree under `~/.cursor/worktrees/<reponame>/<name>` — Fusion already owns worktree isolation.
+- `--model <id>` — accepts bracketed parameter overrides, e.g. `'claude-opus-4-8[context=1m,effort=high,fast=false]'`; Fusion passes the bare discovered/configured model id. Falls back to cursor-agent's own built-in `auto` alias only when no model id was configured (not a Fusion-side static catalog — confirmed live: an unmodeled invocation's `system`/`init` event reports `"model":"Auto"`).
+- `--resume [chatId]` / `--continue` / `create-chat` — session continuation. Fusion resumes a prior turn by passing `--resume <sessionId>`, where `sessionId` is captured off the previous turn's `system`/`result` event `session_id` field. `cursor-agent create-chat` (prints a bare chat id and exits) exists to pre-allocate a chat id up front but is not required for the common case — cursor-agent mints a session id itself on the first turn.
+- `--mode plan|ask` — read-only lanes. `plan`: read-only/planning (analyze, propose plans, no edits). `ask`: Q&A style for explanations and questions (read-only). Fusion passes `--mode plan` for `tools:"readonly"` sessions and omits the flag entirely for the default full-edit agent lane.
+- `--add-dir <path>` — repeatable; adds an additional workspace root directory beyond `--workspace`. Passed through when the caller supplies extra roots.
+- `--approve-mcps` — automatically approve all forwarded MCP servers. Passed through when MCP servers are forwarded to the session.
+
+### NDJSON event stream
+
+Five event shapes were confirmed via live capture of `cursor-agent -p --output-format stream-json ... "Say the word PONG and nothing else."`:
+
+1. **`system`/`init`** — first event of every stream:
+   ```json
+   {"type":"system","subtype":"init","apiKeySource":"login","cwd":"/private/tmp/cursor-scratch","session_id":"771e1505-...","model":"Auto","permissionMode":"default"}
+   ```
+2. **`user`** — echoes the received prompt: `message.content[]` is an array of `{type:"text", text}` blocks.
+3. **`thinking`** — `subtype:"delta"` carries incremental reasoning `text`; `subtype:"completed"` closes the block (no `text` field). Multiple `delta` events arrive per turn.
+4. **`assistant`** — final assistant message; `message.content[]` is an array of `{type:"text", text}` blocks. Live capture showed cursor-agent emits WHOLE text per block by default (not incremental deltas) unless `--stream-partial-output` is passed.
+5. **`result`** — terminal event of the stream:
+   ```json
+   {"type":"result","subtype":"success","duration_ms":4313,"duration_api_ms":4313,"is_error":false,"result":"PONG","session_id":"771e1505-...","request_id":"12b3f589-...","usage":{"inputTokens":11322,"outputTokens":39,"cacheReadTokens":5941,"cacheWriteTokens":0}}
+   ```
+   `is_error:true` means the turn failed; Fusion routes this into its existing fallback path (rejects the prompt promise) rather than silently resolving as success. `usage` field names (`inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheWriteTokens`) are cursor-agent's own casing, distinct from Fusion's internal `TaskTokenUsage` (`inputTokens`/`outputTokens`/`cachedTokens`/`cacheWriteTokens`/`totalTokens`) — Fusion maps field-by-field rather than assuming identical shape.
+
+Malformed/unrecognized NDJSON lines (including non-JSON diagnostic lines such as `cursor-retrieval: tracing to '<tmp log path>'`, which live capture confirmed are written to STDERR, never interleaved into the stdout NDJSON stream) are skipped rather than thrown — one bad line never kills the rest of the parse loop.
+
+### Security: diagnostics never reach the protocol channel
+
+Same rule as probe/discovery (see "Windows PATH shim invocation" above): cursor-agent's stderr output is captured into a bounded buffer for diagnostics-only logging (attached only to a thrown error message on stream failure), never written to the MCP/stdout protocol channel, and Fusion never dumps PATH, environment variables, or unbounded stdout/stderr.
+
+### Abort handling
+
+When the caller supplies an `AbortSignal`, an abort kills the child process (`SIGTERM` first, then an escalated `SIGKILL` after a bounded grace period if the process hasn't exited — mirroring the timeout-kill pattern already used for probe/discovery commands) and rejects the pending prompt promise cleanly rather than leaking the subprocess.
+
+**Update history:** 2026-07-11 — FUSI-063 implemented the execution adapter (`CursorRuntimeAdapter.promptWithFallback`/`createSession`/`describeModel`) using the contract documented in this section, closing out the FN-3396/FN-7695..7700/FUSI-050 cursor-agent integration track.
