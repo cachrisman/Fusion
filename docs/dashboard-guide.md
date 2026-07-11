@@ -762,6 +762,11 @@ Push follow-up (when shown):
 
 Branch names are dynamic from merge/audit payloads; the banner is not hardcoded to `main`.
 
+<!--
+FNXC:ReloadOnShip 2026-07-11-17:20:
+Self-host/dogfood installs that opt into settings.reloadOnShip get an automated variant of the Merge Advance Notice "Sync working tree" flow: when reloadOnShip is ON and an auto-merge advances the local default branch, the merger's runReloadOnShip hook fast-forwards a clean primary checkout, rebuilds affected @fusion/* dist in dependency order, and signals a client reload — without waiting for a manual Pull click. A dirty/unmerged-index/unsafe-dirty checkout is still refused fail-soft and the banner remains the manual fallback. See docs/settings-reference.md's `reloadOnShip` entry for the full three-phase contract.
+-->
+
 ## OAuth Re-login Banner
 
 The global OAuth re-login banner clears a provider row immediately after that provider successfully re-authenticates (from Settings → Authentication or Model Onboarding), instead of waiting for the next `GET /auth/status` poll interval.

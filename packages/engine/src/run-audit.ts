@@ -342,6 +342,41 @@ export type GitMutationType =
    */
   | "merge:auto-sync"
   /**
+   * FNXC:ReloadOnShip 2026-07-11-16:20:
+   * Emitted by the opt-in (default-OFF) `reloadOnShip` hook
+   * (`packages/engine/src/merger-reload-on-ship.ts`) after a successful
+   * isolated `reuse-task-worktree` auto-merge advances the local default
+   * branch. Motivating incident: FUSI-045's `fusion://skill` MCP resource
+   * shipped and was marked done, yet the running MCP server never had it,
+   * and rebuilding the CLI failed because stale `@fusion/engine` dist
+   * lacked a newly-added export that a shipped task had added to engine
+   * SOURCE. Every phase fail-softs: a rebuild/reload failure never wedges
+   * the merge or corrupts the operator's checkout.
+   *
+   * Phase (a) — primary-checkout update:
+   *   - `merge:reload-on-ship-checkout-refused` — the primary checkout was
+   *     not clean (dirty-autostashable / unmerged-index / unsafe-dirty per
+   *     `classifyTargetCheckoutState`); phase (a) is skipped, no clobber.
+   *     metadata: `{ taskId, rootDir, state, reason?, porcelainSample? }`
+   *   - `merge:reload-on-ship-checkout-updated` — the primary checkout was
+   *     clean and was fast-forwarded to the new tip.
+   *     metadata: `{ taskId, rootDir, previousSha, newSha, outcome }`
+   *
+   * Phase (b) — affected-package rebuild in dependency order:
+   *   - `merge:reload-on-ship-rebuild-started` — metadata: `{ taskId, packages: string[] }`
+   *   - `merge:reload-on-ship-rebuild-succeeded` — metadata: `{ taskId, packages: string[], durationMs }`
+   *   - `merge:reload-on-ship-rebuild-failed` — metadata: `{ taskId, package, exitCode, timedOut, stderrPreview }`
+   *
+   * Phase (c) — client reload signal:
+   *   - `merge:reload-on-ship-reload-signaled` — metadata: `{ taskId, signaled: boolean, reason? }`
+   */
+  | "merge:reload-on-ship-checkout-refused"
+  | "merge:reload-on-ship-checkout-updated"
+  | "merge:reload-on-ship-rebuild-started"
+  | "merge:reload-on-ship-rebuild-succeeded"
+  | "merge:reload-on-ship-rebuild-failed"
+  | "merge:reload-on-ship-reload-signaled"
+  /**
    * Emitted when contamination recovery detects a foreign commit attributable
    * to a `done` task that is not reachable from the integration branch — an
    * orphan produced by a pre-fix non-FF ref advance. `merger:orphan-rehome-ff`

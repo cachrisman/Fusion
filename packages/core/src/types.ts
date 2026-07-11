@@ -446,6 +446,42 @@ export type MergeAdvanceAutoSyncMode = (typeof MERGE_ADVANCE_AUTO_SYNC_MODES)[nu
 export function normalizeMergeAdvanceAutoSyncMode(value: unknown): MergeAdvanceAutoSyncMode {
   return value === "off" || value === "ff-only" || value === "stash-and-ff" ? value : "stash-and-ff";
 }
+
+/**
+ * FNXC:ReloadOnShip 2026-07-11-16:30:
+ * Self-host/dogfood-only opt-in (default OFF). When a successful isolated
+ * (`reuse-task-worktree`) auto-merge advances the LOCAL default branch,
+ * `reloadOnShip` makes the shipped change actually go live: (a) fast-forward
+ * the operator's primary checkout working files to the new tip — refused
+ * fail-soft (no clobber) unless the checkout is clean, reusing FUSI-060's
+ * `classifyTargetCheckoutState`; (b) rebuild ONLY the affected `@fusion/*`
+ * dist packages in dependency order (`@fusion/core` → `@fusion/engine` +
+ * `@fusion/dashboard` → `@runfusion/fusion`) so downstream prebuild scripts
+ * see new exports; (c) signal running Fusion process(es)/clients to reload.
+ * Motivating incident: FUSI-045's `fusion://skill` MCP resource shipped and
+ * was marked done, yet the running MCP server never had it, and rebuilding
+ * failed because stale `@fusion/engine` dist lacked a newly-added export
+ * (`workflowAddEdgeParams`) that a shipped task had added to engine SOURCE.
+ * Default OFF so normal (non-dogfood) installs are byte-for-byte unchanged;
+ * every phase fail-softs (log + run-audit) and never wedges the merge or
+ * clobbers the operator's in-progress edits. A plain `boolean` is accepted
+ * as shorthand for `{ enabled: boolean }` so the setting can grow per-phase
+ * gates later without a breaking change — see `isReloadOnShipEnabled` /
+ * `resolveReloadOnShipConfig` in `merger-reload-on-ship.ts`.
+ */
+export interface ReloadOnShipConfig {
+  /** Master opt-in switch. Everything else defaults on once this is true. */
+  enabled: boolean;
+  /** Phase (a): fast-forward the primary checkout when clean. Default true when enabled. */
+  updatePrimaryCheckout?: boolean;
+  /** Phase (b): rebuild affected `@fusion/*` dist in dependency order. Default true when enabled. */
+  rebuildDist?: boolean;
+  /** Phase (c): signal running clients/processes to reload. Default true when enabled. */
+  signalReload?: boolean;
+  /** Bounded timeout (ms) per-package rebuild command. Default 300_000 (5 min). */
+  rebuildTimeoutMs?: number;
+}
+export type ReloadOnShipSetting = boolean | ReloadOnShipConfig;
 /** How merge conflicts are resolved when the AI agent can't (or shouldn't) decide.
  *
  *  Both `smart-*` strategies share the same cascade: pre-merge fetch +
@@ -3941,6 +3977,19 @@ export interface ProjectSettings {
    *  If conflicts arise during the pull, they are resolved using the AI conflict resolution pipeline.
    *  Only applies when mergeStrategy is "direct". Default: false. */
   pushAfterMerge?: boolean;
+  /**
+   * FNXC:ReloadOnShip 2026-07-11-16:30:
+   * Self-host/dogfood-only opt-in, default OFF (see `ReloadOnShipConfig` for the
+   * full rationale). When set (boolean `true`/`false` or a `ReloadOnShipConfig`
+   * object), fires ONLY after a successful isolated (`reuse-task-worktree`)
+   * auto-merge advances the LOCAL default branch: (a) fast-forwards the
+   * operator's primary checkout when clean (refused fail-soft if dirty), (b)
+   * rebuilds affected `@fusion/*` dist in dependency order, (c) signals running
+   * clients to reload. `undefined`/absent/`false` all resolve to OFF — normal
+   * installs are byte-for-byte unchanged. Every phase fail-softs and never
+   * wedges the merge. See `isReloadOnShipEnabled`/`resolveReloadOnShipConfig`
+   * in `packages/engine/src/merger-reload-on-ship.ts`. */
+  reloadOnShip?: ReloadOnShipSetting;
   /** The git remote and branch to push to after merging (e.g. "origin", "origin main").
    *  When set to just a remote name (e.g. "origin"), the current branch is pushed.
    *  When set to "remote branch" format, both the remote and branch are specified.

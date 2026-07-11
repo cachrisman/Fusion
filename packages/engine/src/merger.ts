@@ -155,6 +155,7 @@ import { evaluateBranchGroupPromotion, resolveBranchGroupMergeRouting } from "./
 import { advanceIntegrationBranchRef, IntegrationBranchConcurrentAdvanceError } from "./merger-ref-update-advance.js";
 import { syncWorktreeToHead, type SyncWorktreeResult } from "./worktree-ref-sync.js";
 import { appendAutoWidenedScopeToPrompt, evaluateScopeAutoWiden } from "./merger-scope-auto-widen.js";
+import { isReloadOnShipEnabled, runReloadOnShip } from "./merger-reload-on-ship.js";
 
 export { DiffVolumeRegressionError } from "./merger-diff-volume-gate.js";
 export { IntegrationBranchConcurrentAdvanceError } from "./merger-ref-update-advance.js";
@@ -10853,6 +10854,35 @@ export async function aiMergeTask(
           } catch (syncErr: unknown) {
             mergerLog.warn(
               `${taskId}: mergeAdvanceAutoSync threw — continuing merge: ${syncErr instanceof Error ? syncErr.message : String(syncErr)}`,
+            );
+          }
+        }
+
+        /*
+         * FNXC:ReloadOnShip 2026-07-11-16:50:
+         * Self-host/dogfood reload-on-ship hook (default OFF via
+         * settings.reloadOnShip; see merger-reload-on-ship.ts). Fires only
+         * AFTER advanceIntegrationBranchRef proved the isolated merge
+         * advanced the LOCAL default/integration branch, and only after the
+         * existing runMergeAdvanceAutoSync worktree-sync pass above. Wrapped
+         * in its own try/catch — like mergeAdvanceAutoSync above — so a
+         * rebuild/reload failure can never wedge the merge or flip this
+         * already-successful merge result to failure.
+         */
+        if (isReloadOnShipEnabled(settings.reloadOnShip)) {
+          try {
+            await runReloadOnShip({
+              taskId,
+              projectRootDir,
+              integrationBranch,
+              previousSha: expectedCurrentSha,
+              newSha: worktreeHeadSha,
+              settings,
+              audit,
+            });
+          } catch (reloadErr: unknown) {
+            mergerLog.warn(
+              `${taskId}: reloadOnShip threw — continuing merge: ${reloadErr instanceof Error ? reloadErr.message : String(reloadErr)}`,
             );
           }
         }

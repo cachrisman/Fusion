@@ -371,6 +371,15 @@ export const DEFAULT_PROJECT_SETTINGS = {
   integrationBranch: undefined,
   // `requirePrApproval` MOVED to workflow settings (U4) — see MOVED_SETTINGS_KEYS.
   pushAfterMerge: false,
+  /*
+  FNXC:ReloadOnShip 2026-07-11-16:30:
+  Self-host/dogfood-only opt-in; default OFF so normal installs are byte-for-byte
+  unchanged. See `ReloadOnShipConfig` in types.ts for the full three-phase
+  rationale (fast-forward primary checkout → rebuild affected @fusion/* dist in
+  dependency order → signal running clients to reload) and the motivating
+  FUSI-045 shipped-but-not-live incident.
+  */
+  reloadOnShip: { enabled: false },
   pushRemote: "origin",
   unavailableNodePolicy: "block",
   owningNodeHandoffPolicy: "reassign-to-local",
