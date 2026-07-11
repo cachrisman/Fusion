@@ -106,6 +106,7 @@ Observed command behavior in this environment:
 
 - Use **`cursor-cli`** as the provider ID.
 - Rationale: aligns with task requirement; no conflicting provider ID observed in current codebase scan.
+- FUSI-069: this plugin (`cliProviders[0]`, `providerId: "cursor-cli"`) only DECLARES the provider/probe/discovery contract described in this document; registering `cursor-cli` into the engine's execution `ModelRegistry` (so a `cursor-cli/<id>` task selection actually resolves) and routing that selection to this plugin's `CursorRuntimeAdapter` runtime is the responsibility of the engine's plugin-cliProviders bridge (`registerExtensionProviders` in `packages/engine/src/pi.ts`, plus the `cursor-cli` -> `cursor` runtime derivation in `packages/engine/src/agent-session-helpers.ts`). See `docs/settings-reference.md` ("Grok"/"Cursor" provider paragraphs) for the operator-facing behavior.
 
 ## Contract freeze for FN-3396 (superseded by the verified contract below)
 

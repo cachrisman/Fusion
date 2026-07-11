@@ -292,6 +292,43 @@ function deriveGrokRuntimeHintForNoVisibleKey(
   throw buildMissingGrokRuntimeError();
 }
 
+/**
+ * FNXC:CursorCli 2026-07-11-00:00:
+ * FUSI-069: `cursor-cli` (the Cursor Runtime plugin's cliProviders
+ * contribution) is unlike `grok-cli` — `cursor-agent` has NO HTTP endpoint at
+ * all, so there is no "direct pi endpoint when a key is visible" fallback the
+ * way Grok has one. A `cursor-cli` selection must ALWAYS route to the `cursor`
+ * plugin runtime (FUSI-063 `CursorRuntimeAdapter`), never fall through to pi's
+ * HTTP stream path, which would either mis-stream or (once FUSI-069's
+ * ModelRegistry bridge makes the model merely "resolvable") attempt the inert
+ * `streamSimple` guard registered in pi.ts and throw there instead of running
+ * `cursor-agent`. Mirrors `deriveGrokRuntimeHintForNoVisibleKey`'s shape
+ * without the visible-key gate.
+ */
+const CURSOR_CLI_PROVIDER_ID = "cursor-cli";
+const CURSOR_RUNTIME_ID = "cursor";
+
+function buildMissingCursorRuntimeError(): Error {
+  return new Error(
+    "Cursor CLI models require the bundled Cursor CLI runtime plugin (cursor-agent has no direct HTTP endpoint). "
+    + "Install and enable the Cursor Runtime plugin to use cursor-cli models.",
+  );
+}
+
+function deriveCursorRuntimeHint(
+  runtimeOptions: AgentRuntimeOptions,
+  pluginRunner: PluginRunner | undefined,
+): string | undefined {
+  if (runtimeOptions.defaultProvider !== CURSOR_CLI_PROVIDER_ID
+    && runtimeOptions.fallbackProvider !== CURSOR_CLI_PROVIDER_ID) return undefined;
+  try {
+    if (pluginRunner?.getRuntimeById(CURSOR_RUNTIME_ID)) return CURSOR_RUNTIME_ID;
+  } catch {
+    throw buildMissingCursorRuntimeError();
+  }
+  throw buildMissingCursorRuntimeError();
+}
+
 function applyGrokCliNoKeyRuntimeOptions(
   runtimeOptions: AgentRuntimeOptions,
 ): AgentRuntimeOptions {
@@ -529,6 +566,11 @@ export async function createResolvedAgentSession(
   const runtimeOptions: AgentRuntimeOptions = {
     ...runtimeOptionsRaw,
     ...(mergedSkillNames.length > 0 ? { skills: mergedSkillNames } : {}),
+    // FNXC:PluginProviderBridge 2026-07-11-00:00:
+    // FUSI-069: forward pluginRunner through to the resolved runtime's createSession()
+    // so the default pi runtime (createFnAgent -> registerExtensionProviders) can bridge
+    // enabled plugin cliProviders (e.g. cursor-cli) into its execution ModelRegistry.
+    pluginRunner,
   };
   // FNXC:McpConfig 2026-06-25-22:06:
   // createResolvedAgentSession is the common lane helper for executor, reviewer, validator, workflow model-node, summarization, and merger-adjacent paths that pass MCP through this seam. Preserve `mcpServers` verbatim here; runtime-resolution/pi own support-gated forwarding and content-free skip logging.
@@ -563,7 +605,20 @@ export async function createResolvedAgentSession(
   const autoGrokRuntimeHint = !useMockRuntime && !runtimeHint
     ? deriveGrokRuntimeHintForNoVisibleKey(runtimeOptions, pluginRunner)
     : undefined;
-  const effectiveRuntimeHint = autoGrokRuntimeHint ?? runtimeHint;
+
+  /*
+  FNXC:CursorCli 2026-07-11-00:00:
+  FUSI-069: cursor-cli always requires the cursor plugin runtime (cursor-agent has no
+  HTTP endpoint, unlike grok-cli's xAI fallback), so this derivation is unconditional —
+  no visible-key gate. Explicit runtime hints still win, and mock/test-mode routing is
+  unaffected (guarded by !useMockRuntime, matching the Grok derivation above). Skipped
+  when a Grok hint already won so the two auto-derivations never race.
+  */
+  const autoCursorRuntimeHint = !useMockRuntime && !runtimeHint && !autoGrokRuntimeHint
+    ? deriveCursorRuntimeHint(runtimeOptions, pluginRunner)
+    : undefined;
+
+  const effectiveRuntimeHint = autoGrokRuntimeHint ?? autoCursorRuntimeHint ?? runtimeHint;
   const effectiveRuntimeOptionsWithModel: AgentRuntimeOptions = autoGrokRuntimeHint
     ? applyGrokCliNoKeyRuntimeOptions(effectiveRuntimeOptions)
     : effectiveRuntimeOptions;
@@ -633,7 +688,8 @@ export async function createResolvedAgentSession(
         ...(fallbackModelDegraded ? { fallbackModelDegraded: true, fallbackModelDegradedProvider: fallbackModelDegraded.provider, fallbackModelDegradedModelId: fallbackModelDegraded.modelId, fallbackModelDegradedReason: fallbackModelDegraded.reason } : {}),
         ...(effectiveRuntimeHint ? { runtimeHint: effectiveRuntimeHint } : {}),
         ...(autoGrokRuntimeHint ? { reason: "grok-cli-no-visible-key" } : {}),
-        ...(!autoGrokRuntimeHint && "fallbackReason" in resolved && resolved.fallbackReason ? { reason: resolved.fallbackReason } : {}),
+        ...(autoCursorRuntimeHint ? { reason: "cursor-cli-plugin-runtime-required" } : {}),
+        ...(!autoGrokRuntimeHint && !autoCursorRuntimeHint && "fallbackReason" in resolved && resolved.fallbackReason ? { reason: resolved.fallbackReason } : {}),
       },
     });
   } catch (err) {

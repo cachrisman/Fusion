@@ -79,6 +79,8 @@ import { READONLY_ALLOWLIST, filterCustomToolsForReadonly, isReadonlyAllowed } f
 import { createStreamingDeltaNormalizer } from "./streaming-delta.js";
 import { isModelAuthTierIncompatibilityError, isProviderModelNotFoundError, isUnsupportedMessageRoleError } from "./transient-error-detector.js";
 import { isUsageLimitError } from "./usage-limit-detector.js";
+import type { PluginRunner } from "./plugin-runner.js";
+import type { CliProviderContribution } from "@fusion/core";
 import { logMcpForwardingSkipped, runtimeSupportsMcp } from "./mcp-runtime-support.js";
 import { connectMcpSessionTools, type McpClientFactory, type McpSessionToolset } from "./mcp-session-tools.js";
 export { isModelAuthTierIncompatibilityError } from "./transient-error-detector.js";
@@ -1014,6 +1016,15 @@ export type BuiltinWebToolName = "WebSearch" | "WebFetch";
 export interface AgentOptions {
   cwd: string;
   systemPrompt: string;
+  /**
+   * FNXC:PluginProviderBridge 2026-07-11-00:00:
+   * FUSI-069: optional PluginRunner used to bridge enabled Fusion-plugin
+   * `cliProviders` (e.g. cursor-cli) into the execution ModelRegistry seeded
+   * by `registerExtensionProviders`. Omitted (or a caller with no plugin
+   * runner) degrades safely to the pre-existing zai/grok/pi-extension-only
+   * seeding — no plugin-provider models are registered, but nothing throws.
+   */
+  pluginRunner?: PluginRunner;
   /** Structured prompt layers for cross-session caching. When provided,
    *  the stable layer is used as systemPromptOverride and the dynamic
    *  layer as appendSystemPromptOverride. Falls back to systemPrompt
@@ -1479,7 +1490,133 @@ function resolveVendoredDroidCliEntry(): string | null {
   }
 }
 
-async function registerExtensionProviders(cwd: string, modelRegistry: ModelRegistry): Promise<void> {
+/**
+ * FNXC:PluginProviderBridge 2026-07-11-00:00:
+ * FUSI-069: bridge one enabled Fusion-plugin `cliProviders` contribution (e.g.
+ * cursor-cli) into the pi execution `ModelRegistry`. Mirrors the shape used by
+ * `GROK_PROVIDER_REGISTRATION` (grok-provider.ts) but the models are
+ * registered with an inert `streamSimple` that throws immediately rather than
+ * an HTTP baseUrl/api pair: `cursor-agent` (and any future plugin CLI runtime)
+ * has no HTTP endpoint, so execution must always be dispatched to the plugin
+ * runtime (see `deriveCursorRuntimeHint` in agent-session-helpers.ts) — this
+ * registration exists only to make `provider/modelId` RESOLVABLE (so
+ * `resolveConfiguredModel` in this file stops throwing "not found in the pi
+ * model registry"), never to be streamed against directly. If routing ever
+ * fails to intercept a plugin-provider session, the thrown error names the
+ * misroute instead of silently attempting a bogus network call.
+ *
+ * Guard contract (required by the task's Do-NOT list): a single unavailable /
+ * unauthenticated / throwing plugin provider degrades to ZERO registered rows
+ * for THAT provider and must never abort the caller's loop or the surrounding
+ * zai/grok/pi-extension registration.
+ */
+async function registerPluginCliProvider(
+  modelRegistry: ModelRegistry,
+  pluginRunner: PluginRunner,
+  pluginId: string,
+  contribution: CliProviderContribution,
+): Promise<void> {
+  const providerId = contribution.providerId;
+  if (!providerId || !contribution.discoverModels) return;
+
+  try {
+    const pluginContext = await pluginRunner.createRuntimeContext(pluginId);
+    if (!pluginContext) {
+      extensionsLog.warn(`Skipping plugin cliProvider "${providerId}" from "${pluginId}": no runtime context available`);
+      return;
+    }
+
+    const discovery = await contribution.discoverModels(pluginContext);
+    const discoveredModels = Array.isArray(discovery?.models) ? discovery.models : [];
+    if (discoveredModels.length === 0) {
+      // Unauthenticated/unavailable/binary-missing degrades to zero rows —
+      // never a throw, never a partial/garbage registration.
+      return;
+    }
+
+    modelRegistry.registerProvider(providerId, {
+      name: contribution.displayName ?? providerId,
+      // No real HTTP endpoint: `cursor-agent` (and any plugin cliProvider) is
+      // dispatched by runtimeHint to the plugin runtime, never streamed by pi.
+      // pi's registerProvider() requires a baseUrl when models are supplied;
+      // this placeholder is never dialed because streamSimple below always
+      // throws before any network call would be attempted.
+      api: "openai-completions",
+      baseUrl: "fusion-plugin-cli-provider://" + providerId,
+      // No credentials are ever sent: streamSimple below throws before any
+      // request would be constructed. This placeholder only satisfies pi's
+      // registerProvider() validation that a models-bearing provider config
+      // declares an apiKey or oauth.
+      apiKey: "fusion-plugin-cli-provider-unused",
+      streamSimple: () => {
+        throw new Error(
+          `Provider "${providerId}" is a plugin cliProvider with no HTTP endpoint; it must be dispatched to `
+          + `the "${contribution.runtime?.runtimeId ?? providerId}" plugin runtime instead of pi's direct stream path.`,
+        );
+      },
+      models: discoveredModels.map((model) => {
+        const metadata = (model as { reasoning?: boolean; contextWindow?: number; metadata?: Record<string, unknown> }) ?? {};
+        const reasoning = typeof metadata.reasoning === "boolean"
+          ? metadata.reasoning
+          : typeof metadata.metadata?.reasoning === "boolean"
+            ? (metadata.metadata!.reasoning as boolean)
+            : false;
+        const contextWindow = typeof metadata.contextWindow === "number"
+          ? metadata.contextWindow
+          : typeof metadata.metadata?.contextWindow === "number"
+            ? (metadata.metadata!.contextWindow as number)
+            : 128000;
+        return {
+          id: model.id,
+          name: model.label ?? model.id,
+          reasoning,
+          input: ["text" as const],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow,
+          maxTokens: 65536,
+        };
+      }),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    extensionsLog.warn(`Failed to bridge plugin cliProvider "${providerId}" from "${pluginId}": ${message}`);
+  }
+}
+
+/**
+ * FNXC:PluginProviderBridge 2026-07-11-00:00:
+ * FUSI-069: iterate every enabled plugin `cliProviders` contribution and bridge
+ * each independently via `registerPluginCliProvider`. Each provider is fully
+ * isolated: a failure/degrade for one provider must never affect another, or
+ * the zai/grok/pi-extension registrations already performed above.
+ */
+async function registerPluginCliProviders(
+  modelRegistry: ModelRegistry,
+  pluginRunner: PluginRunner | undefined,
+): Promise<void> {
+  if (!pluginRunner) return;
+  let contributions: Array<{ pluginId: string; contribution: CliProviderContribution }>;
+  try {
+    contributions = pluginRunner.getCliProviderContributions();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    extensionsLog.warn(`Failed to list plugin cliProvider contributions: ${message}`);
+    return;
+  }
+  for (const { pluginId, contribution } of contributions) {
+    await registerPluginCliProvider(modelRegistry, pluginRunner, pluginId, contribution);
+  }
+}
+
+// Exported (in addition to being used internally by createFnAgent) so unit
+// tests can exercise the plugin cliProviders bridge (FUSI-069) directly
+// against a fake ModelRegistry/PluginRunner without spinning up a full pi
+// session.
+export async function registerExtensionProviders(
+  cwd: string,
+  modelRegistry: ModelRegistry,
+  pluginRunner?: PluginRunner,
+): Promise<void> {
   registerBuiltInZaiProvider(modelRegistry, (message) => extensionsLog.warn(message));
   registerBuiltInGrokProvider(modelRegistry, (message) => extensionsLog.warn(message));
 
@@ -1545,13 +1682,23 @@ async function registerExtensionProviders(cwd: string, modelRegistry: ModelRegis
     extensionsResult.runtime.pendingProviderRegistrations = [];
     mergeBuiltInZaiProviderModels(modelRegistry, (message) => extensionsLog.warn(message));
     mergeBuiltInGrokProviderModels(modelRegistry, (message) => extensionsLog.warn(message));
-    modelRegistry.refresh();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     extensionsLog.error(`Failed to discover extensions: ${message}`);
     createExtensionRuntime();
-    modelRegistry.refresh();
   }
+
+  /*
+   * FNXC:PluginProviderBridge 2026-07-11-00:00:
+   * FUSI-069: bridge enabled Fusion-plugin cliProviders (cursor-cli, and any
+   * future plugin CLI runtime) AFTER built-in + pi-extension registration and
+   * BEFORE the final refresh(), and deliberately outside the pi-extension
+   * try/catch above so a pi-extension discovery failure never prevents plugin
+   * cliProviders from registering (and vice versa — each provider is already
+   * independently guarded inside registerPluginCliProvider).
+   */
+  await registerPluginCliProviders(modelRegistry, pluginRunner);
+  modelRegistry.refresh();
 }
 
 // ── Worktree Path Boundary Helpers ──────────────────────────────────────────
@@ -2149,7 +2296,7 @@ export async function createFnAgent(options: AgentOptions): Promise<AgentResult>
   // and resource loading all use the correct root when cwd is a worktree,
   // subdirectory, or any path other than the project root itself.
   const resolvedProjectRoot = getProjectRootFromWorktree(options.cwd) ?? resolvePiExtensionProjectRoot(options.cwd);
-  await registerExtensionProviders(resolvedProjectRoot, modelRegistry);
+  await registerExtensionProviders(resolvedProjectRoot, modelRegistry, options.pluginRunner);
 
   const customProviders = readCustomProviders();
   for (const provider of customProviders) {

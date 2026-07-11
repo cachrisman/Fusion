@@ -265,9 +265,10 @@ describe("OpenClaw runtime E2E pipeline", () => {
 
     expect(result.runtimeId).toBe("pi");
     expect(result.wasConfigured).toBe(false);
-    expect(mockCreateFnAgent).toHaveBeenCalledWith({
+    // FUSI-069: createResolvedAgentSession now forwards pluginRunner/mcpServers through to createFnAgent.
+    expect(mockCreateFnAgent).toHaveBeenCalledWith(expect.objectContaining({
       cwd: testRoot,
       systemPrompt: "fallback",
-    });
+    }));
   });
 });

@@ -20,6 +20,7 @@ import type { SkillSelectionContext } from "./skill-resolver.js";
 import type { FallbackModelUsedPayload } from "./pi.js";
 import type { AgentActionGateContext } from "./agent-action-gate.js";
 import type { SystemPromptLayers } from "./prompt-layers.js";
+import type { PluginRunner } from "./plugin-runner.js";
 
 /**
  * Options for creating an agent session.
@@ -157,6 +158,16 @@ export interface AgentRuntimeOptions {
   actionGateContext?: AgentActionGateContext;
   /** Permanent-agent action gating context for v1 category classification enforcement. */
   permanentAgentGating?: PermanentAgentGatingContext;
+  /**
+   * FNXC:PluginProviderBridge 2026-07-11-00:00:
+   * FUSI-069: the PluginRunner instance for the current project, forwarded from
+   * `createResolvedAgentSession` through the resolved runtime's `createSession()`
+   * so the default pi runtime (`DefaultPiRuntime` -> `createFnAgent`) can bridge
+   * enabled Fusion-plugin `cliProviders` (e.g. cursor-cli) into its execution
+   * `ModelRegistry`. Plugin runtimes ignore this field; only the default pi
+   * runtime consumes it.
+   */
+  pluginRunner?: PluginRunner;
 }
 
 /**

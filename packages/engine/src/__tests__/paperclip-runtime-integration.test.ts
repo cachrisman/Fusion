@@ -158,11 +158,12 @@ describe("Paperclip runtime integration via engine resolution pipeline", () => {
     expect(result.wasConfigured).toBe(true);
     expect(result.session).toBe(runtimeSession);
     expect(result.sessionFile).toBe("/tmp/paperclip.session.json");
-    expect(createSession).toHaveBeenCalledWith({
+    // FUSI-069: createResolvedAgentSession now forwards pluginRunner through to the resolved runtime's createSession.
+    expect(createSession).toHaveBeenCalledWith(expect.objectContaining({
       cwd: "/tmp/project",
       systemPrompt: "You are helpful",
       tools: "coding",
-    });
+    }));
   });
 
   it("falls back to default pi runtime when Paperclip factory throws", async () => {
@@ -184,9 +185,10 @@ describe("Paperclip runtime integration via engine resolution pipeline", () => {
 
     expect(result.runtimeId).toBe("pi");
     expect(result.wasConfigured).toBe(false);
-    expect(mockCreateFnAgent).toHaveBeenCalledWith({
+    // FUSI-069: createResolvedAgentSession now forwards pluginRunner/mcpServers through to createFnAgent.
+    expect(mockCreateFnAgent).toHaveBeenCalledWith(expect.objectContaining({
       cwd: "/tmp/project",
       systemPrompt: "Use fallback",
-    });
+    }));
   });
 });

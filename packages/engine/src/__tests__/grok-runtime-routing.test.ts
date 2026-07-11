@@ -235,10 +235,19 @@ describe("Grok CLI runtime routing (FN-7725)", () => {
 
     expect(result.runtimeId).toBe("pi");
     expect(result.wasConfigured).toBe(false);
-    expect(mockCreateFnAgent).toHaveBeenCalledWith({
+    /*
+     * FNXC:PluginProviderBridge 2026-07-11-00:00:
+     * FUSI-069: createResolvedAgentSession now forwards `pluginRunner` (and the
+     * always-present `mcpServers: undefined`) through to createFnAgent so the
+     * default pi runtime can bridge enabled plugin cliProviders (cursor-cli) into
+     * its execution ModelRegistry — assert via objectContaining instead of an
+     * exact-shape match so this test doesn't churn on unrelated seam additions.
+     */
+    expect(mockCreateFnAgent).toHaveBeenCalledWith(expect.objectContaining({
       cwd: "/tmp/project",
       systemPrompt: "fallback",
-    });
+      pluginRunner,
+    }));
   });
 
   it("does not route through Grok when runtimeHint is unset (non-grok agent unaffected)", async () => {

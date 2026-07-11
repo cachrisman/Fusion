@@ -103,6 +103,11 @@ export class DefaultPiRuntime implements AgentRuntime {
   async createSession(options: AgentRuntimeOptions): Promise<AgentSessionResult> {
     // FNXC:McpConfig 2026-06-25-22:04:
     // DefaultPiRuntime is the typed bridge from shared AgentRuntimeOptions into createFnAgent. Normalize the legacy stdio ACP shape here so all lanes can pass the FN-7022 three-transport shape without breaking older Route A callers.
+    //
+    // FNXC:PluginProviderBridge 2026-07-11-00:00:
+    // FUSI-069: forward `pluginRunner` through unchanged so `createFnAgent` ->
+    // `registerExtensionProviders` can bridge enabled Fusion-plugin `cliProviders`
+    // (e.g. cursor-cli) into the execution ModelRegistry it seeds.
     return createFnAgent({
       ...options,
       mcpServers: normalizeAgentRuntimeMcpServers(options.mcpServers),
