@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import * as fusionCore from "@fusion/core";
 import type { AgentState, AgentCapability, AgentUpdateInput, Artifact, ArtifactCreateInput, ArtifactWithTask, TaskDocument, TaskDocumentCreateInput, TaskStore, RunMutationContext, MessageStore, Message, SourceType, Settings, ResearchRun, ResearchRunStatus, TaskCreateInput, ReflectionStore, ApprovalRequestStore, ProjectSettings, ChatStore, WorkflowSettingDefinition, GoalStatus } from "@fusion/core";
-import { listTraits, isBuiltinWorkflowId, AgentStore, validateColumnAgentBindings, ColumnAgentBindingError, stripApprovalBypassFlags, WorkflowSettingRejectionError, resolveEffectiveSettingsById, resolveWorkflowIrById, findOrphanedSettingValues, BUILTIN_WORKFLOW_SETTINGS, MAX_TASK_LIST_TEXT_CHARS, formatCurrentTaskLine, normalizeWorkflowIcon } from "@fusion/core";
+import { listTraits, isBuiltinWorkflowId, AgentStore, validateColumnAgentBindings, ColumnAgentBindingError, stripApprovalBypassFlags, WorkflowSettingRejectionError, resolveEffectiveSettingsById, resolveWorkflowIrById, findOrphanedSettingValues, BUILTIN_WORKFLOW_SETTINGS, MAX_TASK_LIST_TEXT_CHARS, formatCurrentTaskLine, normalizeWorkflowIcon, addNodeToIr, removeNodeFromIr, addEdgeToIr, removeEdgeFromIr, type WorkflowIrNode, type WorkflowIrEdge } from "@fusion/core";
 import { promoteHeldTask } from "./hold-release.js";
 import { DASHBOARD_USER_ID, canAgentTakeImplementationTaskForExplicitRouting, dailyMemoryPath, ensureOpenClawMemoryFiles, extractAgentProvisioningRequest, formatRoleMismatchReason, getMemoryBackendCapabilities, getProjectMemory, isEphemeralAgent, memoryLongTermPath, normalizeMessageParticipant, reconcileDeterministicDuplicate, resolveAgentProvisioningPolicy, resolveMemoryBackend, resolveResearchSettings, resolveTaskGithubTracking, runDeterministicDuplicateGuard, scheduleQmdProjectMemoryRefresh, searchProjectMemory, shouldSkipBackgroundQmdRefresh } from "@fusion/core";
 import { ResearchOrchestrator } from "./research-orchestrator.js";
@@ -472,6 +472,48 @@ export const workflowSettingsParams = Type.Object({
         "rejection (unknown-setting/type-mismatch/enum-violation/no-settings-defined) nothing is " +
         "persisted and the typed rejection list is returned.",
     }),
+  ),
+});
+
+/*
+FNXC:McpWorkflow 2026-07-11-15:00:
+FUSI-046: granular add/remove-node and add/remove-edge param schemas reuse
+the SAME `workflowIrNodeSchema`/`workflowIrEdgeSchema` sub-shapes the
+whole-IR `fn_workflow_create`/`fn_workflow_update` `ir` param already
+advertises (FUSI-043), so a source-blind MCP client sees one consistent
+node/edge shape across the whole-IR and granular tool surfaces.
+*/
+export const workflowAddNodeParams = Type.Object({
+  workflow_id: Type.String({ description: "The workflow definition ID to mutate (built-ins cannot be edited)." }),
+  node: workflowIrNodeSchema,
+  edges: Type.Optional(
+    Type.Array(workflowIrEdgeSchema, {
+      description:
+        "Edge(s) connecting the new node, added atomically in the SAME mutation. Required unless the node's " +
+        "`kind` is one of the interpreter-entry kinds exempt from start-reachability (merge-gate, merge-attempt, " +
+        "manual-merge-hold, retry-backoff, recovery-router, branch-group-member-integration, " +
+        "branch-group-promotion, pr-create, pr-respond, pr-merge) — every other node must be reachable from " +
+        "the workflow's start node at validation time, and a freshly added node has no other edges yet.",
+    }),
+  ),
+});
+
+export const workflowRemoveNodeParams = Type.Object({
+  workflow_id: Type.String({ description: "The workflow definition ID to mutate (built-ins cannot be edited)." }),
+  node_id: Type.String({ description: "Id of the node to remove. Rejected if the node still has incident edges — remove those first." }),
+});
+
+export const workflowAddEdgeParams = Type.Object({
+  workflow_id: Type.String({ description: "The workflow definition ID to mutate (built-ins cannot be edited)." }),
+  edge: workflowIrEdgeSchema,
+});
+
+export const workflowRemoveEdgeParams = Type.Object({
+  workflow_id: Type.String({ description: "The workflow definition ID to mutate (built-ins cannot be edited)." }),
+  from: Type.String({ description: "Source node id of the edge to remove." }),
+  to: Type.String({ description: "Target node id of the edge to remove." }),
+  condition: Type.Optional(
+    Type.String({ description: "Optional edge condition to disambiguate when multiple edges share the same from/to pair (e.g. 'success'/'failure')." }),
   ),
 });
 
@@ -2879,6 +2921,171 @@ export function createWorkflowSettingsTool(store: TaskStore): ToolDefinition {
   };
 }
 
+/*
+FNXC:McpWorkflow 2026-07-11-15:00:
+FUSI-046: the four granular workflow tools below (add/remove-node,
+add/remove-edge) are the fine-grained complement to whole-IR
+`fn_workflow_update` — a read→mutate→write flow (fn_workflow_get to fetch
+the full IR, mutate one node/edge, fn_workflow_update to persist) already
+works, but a client that only wants to add ONE node had to round-trip the
+entire graph. Each factory: (1) fetches the current IR via
+store.getWorkflowDefinition, (2) applies the PURE @fusion/core helper
+(addNodeToIr/removeNodeFromIr/addEdgeToIr/removeEdgeFromIr — the SAME
+whole-IR validator `parseWorkflowIr` runs inside each helper, so a granular
+edit can never persist a graph fn_workflow_update would reject), (3)
+persists via store.updateWorkflowDefinition. `removeNodeFromIr` CASCADES to
+remove the node's own incident edges atomically (proven necessary: removing
+them one edge at a time via separate calls fails start-reachability
+validation on the FIRST edge removal for any ordinary mid-graph node), and
+`addNodeToIr` accepts an optional `edges` array for the same reason (a
+freshly added node with no edges is itself unreachable) — both still route
+through the ONE `parseWorkflowIr` pass, no second validation path. — which throws "Built-in
+workflows cannot be edited" for a builtin id, exactly mirroring
+createWorkflowUpdateTool's built-in rejection, with zero duplicated
+validation. Registered base-tier on MCP (bindWorkflowTool) — reversible
+graph edits, not `*_delete`-class.
+*/
+
+async function fetchWorkflowIrForMutation(
+  store: TaskStore,
+  workflowId: string,
+): Promise<{ def: Awaited<ReturnType<TaskStore["getWorkflowDefinition"]>> }> {
+  const def = await store.getWorkflowDefinition(workflowId);
+  if (!def) throw new Error(`Unknown workflow id '${workflowId}'. Use fn_workflow_list to discover valid IDs.`);
+  return { def };
+}
+
+export function createWorkflowAddNodeTool(store: TaskStore): ToolDefinition {
+  return {
+    name: "fn_workflow_add_node",
+    label: "Add Workflow Node",
+    description:
+      "Add a single node to a custom workflow's IR without a whole-IR round-trip. Built-ins cannot be edited. " +
+      "Pass `edges` to connect the node atomically in the SAME call — required unless the node kind is one of " +
+      "the interpreter-entry kinds exempt from start-reachability (merge-gate, merge-attempt, manual-merge-hold, " +
+      "retry-backoff, recovery-router, branch-group-member-integration, branch-group-promotion, pr-create, " +
+      "pr-respond, pr-merge); every other node must already be reachable from the workflow's start node when " +
+      "the mutation is validated, and a freshly added node has no other edges yet. The resulting graph is " +
+      "validated the same way fn_workflow_update validates a full IR replace.",
+    parameters: workflowAddNodeParams,
+    execute: async (_id: string, params: Static<typeof workflowAddNodeParams>) => {
+      try {
+        const { def } = await fetchWorkflowIrForMutation(store, params.workflow_id);
+        const nextIr = addNodeToIr(
+          def!.ir,
+          params.node as unknown as WorkflowIrNode,
+          (params.edges ?? []) as unknown as WorkflowIrEdge[],
+        );
+        const updated = await store.updateWorkflowDefinition(params.workflow_id, { ir: nextIr });
+        return {
+          content: [{ type: "text" as const, text: `Added node '${params.node.id}' to workflow ${updated.id}.` }],
+          details: { workflowId: updated.id, ir: updated.ir },
+        };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } catch (err: any) {
+        return {
+          content: [{ type: "text" as const, text: `ERROR: Failed to add node: ${err?.message ?? err}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+  };
+}
+
+export function createWorkflowRemoveNodeTool(store: TaskStore): ToolDefinition {
+  return {
+    name: "fn_workflow_remove_node",
+    label: "Remove Workflow Node",
+    description:
+      "Remove a single node from a custom workflow's IR. Built-ins cannot be edited. CASCADES to also remove " +
+      "every edge incident to the removed node (both incoming and outgoing) in the SAME atomic mutation — a " +
+      "non-cascading two-step removal is unsafe in general, since removing a mid-graph node's incident edges " +
+      "one at a time would strand it unreachable from start before the node itself could be removed. No OTHER " +
+      "edge is touched. The resulting graph is validated the same way fn_workflow_update validates a full IR " +
+      "replace — a removal that leaves some OTHER node unreachable still fails.",
+    parameters: workflowRemoveNodeParams,
+    execute: async (_id: string, params: Static<typeof workflowRemoveNodeParams>) => {
+      try {
+        const { def } = await fetchWorkflowIrForMutation(store, params.workflow_id);
+        const nextIr = removeNodeFromIr(def!.ir, params.node_id);
+        const updated = await store.updateWorkflowDefinition(params.workflow_id, { ir: nextIr });
+        return {
+          content: [{ type: "text" as const, text: `Removed node '${params.node_id}' from workflow ${updated.id}.` }],
+          details: { workflowId: updated.id, ir: updated.ir },
+        };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } catch (err: any) {
+        return {
+          content: [{ type: "text" as const, text: `ERROR: Failed to remove node: ${err?.message ?? err}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+  };
+}
+
+export function createWorkflowAddEdgeTool(store: TaskStore): ToolDefinition {
+  return {
+    name: "fn_workflow_add_edge",
+    label: "Add Workflow Edge",
+    description:
+      "Add a single edge to a custom workflow's IR without a whole-IR round-trip. Built-ins cannot be edited. " +
+      "Both endpoint node ids must already exist. The resulting graph is validated the same way " +
+      "fn_workflow_update validates a full IR replace.",
+    parameters: workflowAddEdgeParams,
+    execute: async (_id: string, params: Static<typeof workflowAddEdgeParams>) => {
+      try {
+        const { def } = await fetchWorkflowIrForMutation(store, params.workflow_id);
+        const nextIr = addEdgeToIr(def!.ir, params.edge as unknown as WorkflowIrEdge);
+        const updated = await store.updateWorkflowDefinition(params.workflow_id, { ir: nextIr });
+        return {
+          content: [{ type: "text" as const, text: `Added edge '${params.edge.from}' -> '${params.edge.to}' to workflow ${updated.id}.` }],
+          details: { workflowId: updated.id, ir: updated.ir },
+        };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } catch (err: any) {
+        return {
+          content: [{ type: "text" as const, text: `ERROR: Failed to add edge: ${err?.message ?? err}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+  };
+}
+
+export function createWorkflowRemoveEdgeTool(store: TaskStore): ToolDefinition {
+  return {
+    name: "fn_workflow_remove_edge",
+    label: "Remove Workflow Edge",
+    description:
+      "Remove a single edge from a custom workflow's IR, matched by from/to (and optional condition to " +
+      "disambiguate). Built-ins cannot be edited. The resulting graph is validated the same way " +
+      "fn_workflow_update validates a full IR replace.",
+    parameters: workflowRemoveEdgeParams,
+    execute: async (_id: string, params: Static<typeof workflowRemoveEdgeParams>) => {
+      try {
+        const { def } = await fetchWorkflowIrForMutation(store, params.workflow_id);
+        const nextIr = removeEdgeFromIr(def!.ir, { from: params.from, to: params.to, condition: params.condition });
+        const updated = await store.updateWorkflowDefinition(params.workflow_id, { ir: nextIr });
+        return {
+          content: [{ type: "text" as const, text: `Removed edge '${params.from}' -> '${params.to}' from workflow ${updated.id}.` }],
+          details: { workflowId: updated.id, ir: updated.ir },
+        };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } catch (err: any) {
+        return {
+          content: [{ type: "text" as const, text: `ERROR: Failed to remove edge: ${err?.message ?? err}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+  };
+}
+
 /**
  * Create a `fn_trait_list` tool that returns the trait catalog from
  * {@link listTraits} — the column-behavior building blocks (id, name, flags)
@@ -2958,6 +3165,10 @@ export function createWorkflowAuthoringTools(
     createWorkflowUpdateTool(store, opts),
     createWorkflowDeleteTool(store),
     createWorkflowSettingsTool(store),
+    createWorkflowAddNodeTool(store),
+    createWorkflowRemoveNodeTool(store),
+    createWorkflowAddEdgeTool(store),
+    createWorkflowRemoveEdgeTool(store),
     createTraitListTool(),
   ];
 }

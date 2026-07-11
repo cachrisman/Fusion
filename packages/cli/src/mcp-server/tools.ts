@@ -155,6 +155,7 @@ import {
   isValidSqliteDatabaseFile,
   readProjectIdentity,
   writeProjectIdentity,
+  validateNodeOverrideChange,
   type Task,
   type ColumnId,
   type TaskPriority,
@@ -171,6 +172,11 @@ import {
   workflowCreateParams,
   workflowUpdateParams,
   workflowSelectParams,
+  workflowSettingsParams,
+  workflowAddNodeParams,
+  workflowRemoveNodeParams,
+  workflowAddEdgeParams,
+  workflowRemoveEdgeParams,
 } from "@fusion/engine";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -367,13 +373,39 @@ const fnTaskCreate: McpToolDefinition = {
   },
 };
 
+/*
+FNXC:McpServer 2026-07-11-15:00:
+FUSI-046: `fn_task_list`'s `column` filter/grouping must be WORKFLOW-AWARE,
+not hardcoded to the six default columns — a task board using a custom
+workflow (e.g. the coding-ideas workflow's `ideas` backlog column) previously
+had tasks silently dropped from the unfiltered listing (the `for (const col
+of COLUMNS)` grouping loop never visited a non-default column id) and the
+`column` param's JSON-Schema `enum: [...COLUMNS]` REJECTED a workflow-specific
+filter value outright, so an MCP client could not even ask for `column:
+"ideas"`. Fix: (1) drop the rejecting `enum` — accept any column string; (2)
+group over the UNION of the six defaults and every DISTINCT `task.column`
+value actually present on the board (defaults first, extras after, stable
+order), so a workflow-specific column with occupants is always visible
+unfiltered and always filterable explicitly. `columnLabel` already falls back
+to the raw id for an unknown column, so an unrecognized filter value still
+renders (empty result, not a crash) rather than throwing.
+*/
 const fnTaskList: McpToolDefinition = {
   name: "fn_task_list",
-  description: "List all tasks on the Fusion board, grouped by column.",
+  description:
+    "List all tasks on the Fusion board, grouped by column. `column` accepts any of the six default columns " +
+    "(todo, planning, in-progress, in-review, done, archived) PLUS any workflow-specific column defined by a " +
+    "custom workflow (e.g. an 'ideas' backlog column) — workflow-specific columns are also shown unfiltered.",
   inputSchema: {
     type: "object",
     properties: {
-      column: { type: "string", enum: [...COLUMNS], description: "Filter to a specific column" },
+      column: {
+        type: "string",
+        description:
+          "Filter to a specific column. Accepts the six defaults (todo, planning, in-progress, in-review, done, " +
+          "archived) or any workflow-specific column id (e.g. 'ideas'). An unrecognized value returns an empty " +
+          "result rather than an error.",
+      },
       limit: { type: "number", description: "Max tasks to show per column (default: 10)" },
     },
   },
@@ -383,12 +415,20 @@ const fnTaskList: McpToolDefinition = {
 
     const perColumn = typeof args.limit === "number" ? args.limit : 10;
     const requestedColumn = typeof args.column === "string" ? (args.column as ColumnId) : undefined;
+    // Union of the six default columns and every distinct column actually
+    // present on the board — defaults first (stable, familiar ordering), then
+    // any workflow-specific extras in first-seen order — so a task parked in a
+    // custom workflow column (e.g. `ideas`) is never silently dropped.
+    const extraColumns = [...new Set(tasks.map((t) => t.column))].filter(
+      (col) => !(COLUMNS as readonly string[]).includes(col),
+    );
+    const allColumns: ColumnId[] = [...COLUMNS, ...(extraColumns as ColumnId[])];
     const lines: string[] = [];
-    for (const col of COLUMNS) {
+    for (const col of allColumns) {
       if (requestedColumn && requestedColumn !== col) continue;
       const colTasks = tasks.filter((t) => t.column === col);
       if (colTasks.length === 0) continue;
-      lines.push(`${(COLUMN_LABELS as Record<string, string>)[col] ?? col} (${colTasks.length}):`);
+      lines.push(`${(COLUMN_LABELS as Record<string, string>)[col] ?? columnLabel(col)} (${colTasks.length}):`);
       const shown = colTasks.slice(0, perColumn);
       for (const t of shown) lines.push(`  ${formatTaskLine(t)}`);
       const hidden = colTasks.length - shown.length;
@@ -798,7 +838,7 @@ protects built-in workflows and re-homes occupants, so the destructive tier
 below does not re-implement any of that; it only gates registration of the
 name behind `allowDestructive` and adds a stderr audit line.
 */
-function bindWorkflowTool(name: "fn_workflow_list" | "fn_workflow_get" | "fn_workflow_create" | "fn_workflow_update" | "fn_workflow_select" | "fn_workflow_delete", description: string, inputSchema: McpJsonSchema): McpToolDefinition {
+function bindWorkflowTool(name: "fn_workflow_list" | "fn_workflow_get" | "fn_workflow_create" | "fn_workflow_update" | "fn_workflow_select" | "fn_workflow_delete" | "fn_workflow_settings" | "fn_workflow_add_node" | "fn_workflow_remove_node" | "fn_workflow_add_edge" | "fn_workflow_remove_edge", description: string, inputSchema: McpJsonSchema): McpToolDefinition {
   return {
     name,
     description,
@@ -894,6 +934,83 @@ const fnWorkflowDelete = bindWorkflowTool(
 );
 
 /*
+FNXC:McpServer 2026-07-11-15:00:
+FUSI-046: `fn_workflow_settings` closes the biggest remaining MCP-surface gap
+— the CLI's own guidance already told operators "these live in workflow
+settings — edit via the editor or fn_workflow_settings", but no such tool was
+registered here, so a source-blind MCP client could not set autoMerge,
+planApprovalMode, review/approval gates, or per-phase model lanes on a
+workflow AT ALL (directly blocking MCP-only Trio/WF-001 setup). Dispatches
+through the SAME `bindWorkflowTool` → `createWorkflowAuthoringTools` factory
+as every other workflow tool — `createWorkflowSettingsTool` already existed
+in that factory (agent-tools.ts) for the chat/planning/executor lanes; this
+is purely a registration gap fix, no new domain logic. Base-tier (NOT
+destructive): `set` is a reversible per-(workflow, project) VALUES write —
+`null` clears an override — exactly like `fn_workflow_update`'s base-tier
+IR/name/description edits, and unlike the `*_delete` tools.
+*/
+const fnWorkflowSettings = bindWorkflowTool(
+  "fn_workflow_settings",
+  "Read or write a workflow's setting VALUES (the per-(workflow, project) policy knobs: step timeouts, " +
+    "review/approval gates, per-phase model lanes). action='get' returns both the raw `stored` values and the " +
+    "engine `effective` values (declaration defaults filled in, orphaned values dropped). action='set' writes " +
+    "`values` against the NAMED workflow's declared settings; a `null` value clears an override. Built-in " +
+    "workflow VALUES are writable, but built-in DECLARATIONS are not — declarations are authored in the " +
+    "workflow IR's `settings` array via fn_workflow_create/fn_workflow_update. An invalid value returns the " +
+    "typed rejection list and persists nothing.",
+  jsonSchemaOf(workflowSettingsParams),
+);
+
+/*
+FNXC:McpWorkflow 2026-07-11-15:00:
+FUSI-046: granular add/remove-node and add/remove-edge tools — the
+fine-grained complement to whole-IR `fn_workflow_update`, over a
+read(fn_workflow_get)→mutate→write flow. Same `bindWorkflowTool` →
+`createWorkflowAuthoringTools` dispatch as every other workflow tool; the
+underlying @fusion/core `addNodeToIr`/`removeNodeFromIr`/`addEdgeToIr`/
+`removeEdgeFromIr` helpers (packages/core/src/workflow-ir.ts) route every
+mutation through the SAME `parseWorkflowIr` whole-IR validator
+`fn_workflow_update` uses — no second validation path. Base-tier (NOT
+destructive): each mutates a custom workflow's own IR in a reversible way
+(a removed node/edge can be re-added) and re-homes nothing, so this is NOT
+`*_delete`-class.
+*/
+const fnWorkflowAddNode = bindWorkflowTool(
+  "fn_workflow_add_node",
+  "Add a single node to a custom workflow's IR without a whole-IR round-trip. Built-ins cannot be edited. " +
+    "Pass `edges` to connect the node atomically in the SAME call — required unless the node kind is one of " +
+    "the interpreter-entry kinds exempt from start-reachability (merge-gate, merge-attempt, manual-merge-hold, " +
+    "retry-backoff, recovery-router, branch-group-member-integration, branch-group-promotion, pr-create, " +
+    "pr-respond, pr-merge); every other node must already be reachable from the workflow's start node when " +
+    "validated, and a freshly added node has no other edges yet. The resulting graph is validated the same way " +
+    "fn_workflow_update validates a full IR replace.",
+  jsonSchemaOf(workflowAddNodeParams),
+);
+const fnWorkflowRemoveNode = bindWorkflowTool(
+  "fn_workflow_remove_node",
+  "Remove a single node from a custom workflow's IR. Built-ins cannot be edited. CASCADES to also remove every " +
+    "edge incident to the removed node (both incoming and outgoing) in the SAME atomic mutation — a non-cascading " +
+    "two-step removal is unsafe in general, since removing a mid-graph node's incident edges one at a time would " +
+    "strand it unreachable from start before the node itself could be removed. No OTHER edge is touched. The " +
+    "resulting graph is validated the same way fn_workflow_update validates a full IR replace.",
+  jsonSchemaOf(workflowRemoveNodeParams),
+);
+const fnWorkflowAddEdge = bindWorkflowTool(
+  "fn_workflow_add_edge",
+  "Add a single edge to a custom workflow's IR without a whole-IR round-trip. Built-ins cannot be edited. Both " +
+    "endpoint node ids must already exist. The resulting graph is validated the same way fn_workflow_update " +
+    "validates a full IR replace.",
+  jsonSchemaOf(workflowAddEdgeParams),
+);
+const fnWorkflowRemoveEdge = bindWorkflowTool(
+  "fn_workflow_remove_edge",
+  "Remove a single edge from a custom workflow's IR, matched by from/to (and optional condition to " +
+    "disambiguate when multiple edges share the same from/to pair). Built-ins cannot be edited. The resulting " +
+    "graph is validated the same way fn_workflow_update validates a full IR replace.",
+  jsonSchemaOf(workflowRemoveEdgeParams),
+);
+
+/*
 FNXC:McpServer 2026-07-10-23:59:
 FUSI-006 adds `fn_task_archive` to the BASE registry (not the destructive
 tier gated by --allow-destructive). Archive is a fully reversible soft-move
@@ -942,6 +1059,138 @@ const fnTaskArchive: McpToolDefinition = {
       if (error instanceof Error) return errorResult(error.message);
       throw error;
     }
+  },
+};
+
+/*
+FNXC:McpServer 2026-07-11-15:00:
+FUSI-046: `fn_task_update` closes the "no task-edit on MCP; had to
+archive+recreate" papercut — it mirrors the pi-extension `fn_task_update`
+handler (packages/cli/src/extension.ts) FIELD FOR FIELD: title/description/
+depends/agentId/nodeId/priority/workflow_id, the SAME `validateAssignableAgentId`
++ `normalizeNullableStringInput` + `validateNodeOverrideChange` pre-validation
+(including the FN-7641 `nodeId='end'` merge-proof guard), the same
+at-least-one-field guard, and the same final `store.updateTask(id, updates)` /
+`store.selectTaskWorkflowAndReconcile` / `store.clearTaskWorkflowSelection`
+dispatch — no re-implemented update logic. Base-tier: an in-place edit,
+reversible and analogous to `fn_task_create`/`fn_task_archive`, not a
+`*_delete`-class mutation.
+*/
+const fnTaskUpdate: McpToolDefinition = {
+  name: "fn_task_update",
+  description:
+    "Update fields on an existing task. Supports modifying the title, description, dependencies, assigned " +
+    "agent, priority, and workflow_id after task creation. Set workflow_id to a workflow ID to select it, or " +
+    "null to clear the workflow selection. At least one field must be provided.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "Task ID (e.g. FN-001)" },
+      title: { type: "string", description: "New task title" },
+      description: { type: "string", description: "New task description" },
+      depends: {
+        type: "array",
+        items: { type: "string" },
+        description: "New dependency list — replaces existing dependencies (e.g. ['FN-001', 'FN-002'])",
+      },
+      agentId: {
+        type: ["string", "null"],
+        description: "Agent ID to assign this task to, or null to clear (e.g. 'agent-abc123')",
+      },
+      nodeId: {
+        type: ["string", "null"],
+        description: "Node ID override for this task, or null to clear",
+      },
+      priority: { type: "string", enum: [...TASK_PRIORITIES], description: "Task priority (low, normal, high, urgent)" },
+      workflow_id: {
+        type: ["string", "null"],
+        description:
+          "Workflow ID to select for this task (e.g. 'WF-003' or 'builtin:coding'), or null to clear the " +
+          "workflow selection and revert to the project default. Use fn_workflow_list to discover valid IDs.",
+      },
+    },
+    required: ["id"],
+  },
+  async handler(store, args, ctx) {
+    const id = String(args.id ?? "").trim();
+    if (!id) return errorResult("id is required.");
+
+    let task: Task;
+    try {
+      task = await store.getTask(id);
+    } catch {
+      return errorResult(`Task ${id} not found`);
+    }
+
+    const updates: Record<string, unknown> = {};
+    const updatedFields: string[] = [];
+
+    if (typeof args.title === "string") {
+      updates.title = args.title.trim();
+      updatedFields.push("title");
+    }
+    if (typeof args.description === "string") {
+      updates.description = args.description.trim();
+      updatedFields.push("description");
+    }
+    if (Array.isArray(args.depends)) {
+      updates.dependencies = args.depends as string[];
+      updatedFields.push("dependencies");
+    }
+    if (args.agentId !== undefined) {
+      const normalizedAgentId = normalizeNullableStringInput(
+        args.agentId === null ? null : typeof args.agentId === "string" ? args.agentId : undefined,
+      );
+      if (typeof normalizedAgentId === "string") {
+        const agentError = await validateAssignableAgentId(ctx.cwd, normalizedAgentId, task);
+        if (agentError) return errorResult(agentError);
+      }
+      updates.assignedAgentId = normalizedAgentId;
+      updatedFields.push("agentId");
+    }
+    if (args.nodeId !== undefined) {
+      const normalizedNodeId = normalizeNullableStringInput(
+        args.nodeId === null ? null : typeof args.nodeId === "string" ? args.nodeId : undefined,
+      );
+      const validation = validateNodeOverrideChange(task, normalizedNodeId ?? null);
+      if (!validation.allowed) return errorResult(validation.message ?? "Node override change blocked");
+      updates.nodeId = normalizedNodeId;
+      updatedFields.push("nodeId");
+    }
+    if (typeof args.priority === "string") {
+      updates.priority = args.priority as TaskPriority;
+      updatedFields.push("priority");
+    }
+    if (args.workflow_id !== undefined) {
+      if (args.workflow_id === null) {
+        await store.clearTaskWorkflowSelection(task.id);
+        updatedFields.push("workflowId");
+      } else if (typeof args.workflow_id === "string") {
+        const workflowId = args.workflow_id.trim();
+        if (workflowId.length > 0) {
+          try {
+            await store.selectTaskWorkflowAndReconcile(task.id, workflowId);
+          } catch (error) {
+            return errorResult(error instanceof Error ? error.message : String(error));
+          }
+          updatedFields.push("workflowId");
+        }
+      }
+    }
+
+    if (updatedFields.length === 0) {
+      return errorResult(
+        "No fields to update. Provide at least one of: title, description, depends, agentId, nodeId, priority, workflow_id.",
+      );
+    }
+
+    if (Object.keys(updates).length > 0) {
+      await store.updateTask(id, updates);
+    }
+
+    return textResult(`Updated ${id}: ${updatedFields.join(", ")}`, {
+      structuredContent: redactSecretsDeep({ taskId: id, updatedFields }),
+    });
   },
 };
 
@@ -2039,6 +2288,7 @@ export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnTaskShow,
   fnTaskSearch,
   fnTaskArchive,
+  fnTaskUpdate,
   fnDelegateTask,
   fnListAgents,
   fnAgentShow,
@@ -2050,6 +2300,11 @@ export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnWorkflowCreate,
   fnWorkflowUpdate,
   fnWorkflowSelect,
+  fnWorkflowSettings,
+  fnWorkflowAddNode,
+  fnWorkflowRemoveNode,
+  fnWorkflowAddEdge,
+  fnWorkflowRemoveEdge,
   fnMissionList,
   fnMissionShow,
   fnMilestoneList,

@@ -22,6 +22,10 @@ import {
   createWorkflowCreateTool,
   createWorkflowUpdateTool,
   createWorkflowDeleteTool,
+  createWorkflowAddNodeTool,
+  createWorkflowRemoveNodeTool,
+  createWorkflowAddEdgeTool,
+  createWorkflowRemoveEdgeTool,
   createTraitListTool,
   qmdAgentMemoryCollectionName,
   readAgentMemoryWorkspaceLongTerm,
@@ -940,6 +944,234 @@ describe("createWorkflowDeleteTool", () => {
     expect((result as { isError?: boolean }).isError).toBe(true);
     const text = result.content[0]?.type === "text" ? result.content[0].text : "";
     expect(text).toMatch(/cannot be deleted/);
+  });
+});
+
+/*
+FNXC:McpWorkflow 2026-07-11-15:00:
+FUSI-046: granular add/remove-node and add/remove-edge tool unit coverage.
+Uses a minimal mock store (matching the createWorkflowCreateTool/UpdateTool/
+DeleteTool test pattern above) so these stay fast — the round-trip through
+the REAL parseWorkflowIr validator (inside addNodeToIr et al) is exercised
+regardless of the mock, since those are pure @fusion/core functions, not
+store methods.
+*/
+function basicWorkflowIr() {
+  return {
+    version: "v2" as const,
+    name: "Granular",
+    columns: [{ id: "todo", name: "Todo", traits: [] }],
+    nodes: [
+      { id: "start", kind: "start", column: "todo" },
+      { id: "end", kind: "end", column: "todo" },
+    ],
+    edges: [{ from: "start", to: "end", condition: "success" }],
+  };
+}
+
+describe("createWorkflowAddNodeTool", () => {
+  it("adds a node and persists the mutated IR via updateWorkflowDefinition", async () => {
+    const def = { id: "WF-010", name: "Granular", ir: basicWorkflowIr() };
+    const store = {
+      getWorkflowDefinition: vi.fn().mockResolvedValue(def),
+      updateWorkflowDefinition: vi.fn().mockImplementation(async (_id: string, updates: any) => ({ id: "WF-010", name: "Granular", ir: updates.ir })),
+    };
+    const tool = createWorkflowAddNodeTool(store as any);
+    const result = await tool.execute(
+      "c",
+      {
+        workflow_id: "WF-010",
+        node: { id: "gate1", kind: "gate", column: "todo" },
+        edges: [{ from: "start", to: "gate1", condition: "success" }, { from: "gate1", to: "end", condition: "success" }],
+      } as any,
+      undefined,
+      undefined,
+      {} as any,
+    );
+    expect((result as { isError?: boolean }).isError).toBeFalsy();
+    expect(store.updateWorkflowDefinition).toHaveBeenCalledWith(
+      "WF-010",
+      expect.objectContaining({ ir: expect.objectContaining({ nodes: expect.arrayContaining([expect.objectContaining({ id: "gate1" })]) }) }),
+    );
+  });
+
+  it("rejects a node with no connecting edges (start-reachability) unless the kind is interpreter-entry-exempt", async () => {
+    const def = { id: "WF-010", name: "Granular", ir: basicWorkflowIr() };
+    const store = { getWorkflowDefinition: vi.fn().mockResolvedValue(def), updateWorkflowDefinition: vi.fn() };
+    const tool = createWorkflowAddNodeTool(store as any);
+    const result = await tool.execute("c", { workflow_id: "WF-010", node: { id: "gate1", kind: "gate", column: "todo" } } as any, undefined, undefined, {} as any);
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+    expect(text).toMatch(/not reachable/);
+  });
+
+  it("allows an interpreter-entry-exempt node kind with no connecting edges", async () => {
+    const def = { id: "WF-010", name: "Granular", ir: basicWorkflowIr() };
+    const store = {
+      getWorkflowDefinition: vi.fn().mockResolvedValue(def),
+      updateWorkflowDefinition: vi.fn().mockImplementation(async (_id: string, updates: any) => ({ id: "WF-010", name: "Granular", ir: updates.ir })),
+    };
+    const tool = createWorkflowAddNodeTool(store as any);
+    const result = await tool.execute("c", { workflow_id: "WF-010", node: { id: "router1", kind: "recovery-router" } } as any, undefined, undefined, {} as any);
+    expect((result as { isError?: boolean }).isError).toBeFalsy();
+  });
+
+  it("rejects a duplicate node id", async () => {
+    const def = { id: "WF-010", name: "Granular", ir: basicWorkflowIr() };
+    const store = { getWorkflowDefinition: vi.fn().mockResolvedValue(def), updateWorkflowDefinition: vi.fn() };
+    const tool = createWorkflowAddNodeTool(store as any);
+    const result = await tool.execute("c", { workflow_id: "WF-010", node: { id: "start", kind: "gate" } } as any, undefined, undefined, {} as any);
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    expect(store.updateWorkflowDefinition).not.toHaveBeenCalled();
+  });
+
+  it("rejects a built-in workflow id the same way fn_workflow_update rejects", async () => {
+    const def = { id: "builtin:coding", name: "Coding", ir: basicWorkflowIr() };
+    const store = {
+      getWorkflowDefinition: vi.fn().mockResolvedValue(def),
+      updateWorkflowDefinition: vi.fn().mockRejectedValue(new Error("Built-in workflows cannot be edited")),
+    };
+    const tool = createWorkflowAddNodeTool(store as any);
+    const result = await tool.execute("c", { workflow_id: "builtin:coding", node: { id: "router1", kind: "recovery-router" } } as any, undefined, undefined, {} as any);
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+    expect(text).toMatch(/cannot be edited/);
+  });
+
+  it("surfaces an unknown workflow id error", async () => {
+    const store = { getWorkflowDefinition: vi.fn().mockResolvedValue(undefined), updateWorkflowDefinition: vi.fn() };
+    const tool = createWorkflowAddNodeTool(store as any);
+    const result = await tool.execute("c", { workflow_id: "WF-missing", node: { id: "gate1", kind: "gate" } } as any, undefined, undefined, {} as any);
+    expect((result as { isError?: boolean }).isError).toBe(true);
+  });
+});
+
+describe("createWorkflowRemoveNodeTool", () => {
+  it("cascades to remove a mid-graph node's own incident edges atomically, touching no other edge", async () => {
+    const ir = {
+      ...basicWorkflowIr(),
+      nodes: [...basicWorkflowIr().nodes, { id: "gate1", kind: "gate", column: "todo" }],
+      edges: [
+        { from: "start", to: "gate1", condition: "success" },
+        { from: "gate1", to: "end", condition: "success" },
+        { from: "start", to: "end", condition: "success" },
+      ],
+    };
+    const def = { id: "WF-010", name: "Granular", ir };
+    const store = {
+      getWorkflowDefinition: vi.fn().mockResolvedValue(def),
+      updateWorkflowDefinition: vi.fn().mockImplementation(async (_id: string, updates: any) => ({ id: "WF-010", name: "Granular", ir: updates.ir })),
+    };
+    const tool = createWorkflowRemoveNodeTool(store as any);
+    const result = await tool.execute("c", { workflow_id: "WF-010", node_id: "gate1" } as any, undefined, undefined, {} as any);
+    expect((result as { isError?: boolean }).isError).toBeFalsy();
+    const [, updates] = store.updateWorkflowDefinition.mock.calls[0] as [string, { ir: any }];
+    expect(updates.ir.nodes.map((n: any) => n.id)).not.toContain("gate1");
+    expect(updates.ir.edges).toEqual([expect.objectContaining({ from: "start", to: "end" })]);
+  });
+
+  it("removes a node with no incident edges", async () => {
+    const ir = {
+      ...basicWorkflowIr(),
+      nodes: [...basicWorkflowIr().nodes, { id: "orphan", kind: "recovery-router" }],
+    };
+    const def = { id: "WF-010", name: "Granular", ir };
+    const store = {
+      getWorkflowDefinition: vi.fn().mockResolvedValue(def),
+      updateWorkflowDefinition: vi.fn().mockImplementation(async (_id: string, updates: any) => ({ id: "WF-010", name: "Granular", ir: updates.ir })),
+    };
+    const tool = createWorkflowRemoveNodeTool(store as any);
+    const result = await tool.execute("c", { workflow_id: "WF-010", node_id: "orphan" } as any, undefined, undefined, {} as any);
+    expect((result as { isError?: boolean }).isError).toBeFalsy();
+    expect(store.updateWorkflowDefinition).toHaveBeenCalled();
+  });
+
+  it("rejects a nonexistent node id", async () => {
+    const def = { id: "WF-010", name: "Granular", ir: basicWorkflowIr() };
+    const store = { getWorkflowDefinition: vi.fn().mockResolvedValue(def), updateWorkflowDefinition: vi.fn() };
+    const tool = createWorkflowRemoveNodeTool(store as any);
+    const result = await tool.execute("c", { workflow_id: "WF-010", node_id: "missing" } as any, undefined, undefined, {} as any);
+    expect((result as { isError?: boolean }).isError).toBe(true);
+  });
+
+  it("rejects a builtin workflow id", async () => {
+    const ir = { ...basicWorkflowIr(), nodes: [...basicWorkflowIr().nodes, { id: "orphan", kind: "recovery-router" }] };
+    const def = { id: "builtin:coding", name: "Coding", ir };
+    const store = {
+      getWorkflowDefinition: vi.fn().mockResolvedValue(def),
+      updateWorkflowDefinition: vi.fn().mockRejectedValue(new Error("Built-in workflows cannot be edited")),
+    };
+    const tool = createWorkflowRemoveNodeTool(store as any);
+    const result = await tool.execute("c", { workflow_id: "builtin:coding", node_id: "orphan" } as any, undefined, undefined, {} as any);
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+    expect(text).toMatch(/cannot be edited/);
+  });
+});
+
+describe("createWorkflowAddEdgeTool / createWorkflowRemoveEdgeTool", () => {
+  it("adds an edge between two existing nodes", async () => {
+    const ir = {
+      ...basicWorkflowIr(),
+      nodes: [...basicWorkflowIr().nodes, { id: "gate1", kind: "gate", column: "todo" }],
+    };
+    const def = { id: "WF-010", name: "Granular", ir };
+    const store = {
+      getWorkflowDefinition: vi.fn().mockResolvedValue(def),
+      updateWorkflowDefinition: vi.fn().mockImplementation(async (_id: string, updates: any) => ({ id: "WF-010", name: "Granular", ir: updates.ir })),
+    };
+    const tool = createWorkflowAddEdgeTool(store as any);
+    const result = await tool.execute("c", { workflow_id: "WF-010", edge: { from: "start", to: "gate1", condition: "success" } } as any, undefined, undefined, {} as any);
+    expect((result as { isError?: boolean }).isError).toBeFalsy();
+    expect(store.updateWorkflowDefinition).toHaveBeenCalled();
+  });
+
+  it("rejects an edge referencing a nonexistent node", async () => {
+    const def = { id: "WF-010", name: "Granular", ir: basicWorkflowIr() };
+    const store = { getWorkflowDefinition: vi.fn().mockResolvedValue(def), updateWorkflowDefinition: vi.fn() };
+    const tool = createWorkflowAddEdgeTool(store as any);
+    const result = await tool.execute("c", { workflow_id: "WF-010", edge: { from: "start", to: "missing" } } as any, undefined, undefined, {} as any);
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    expect(store.updateWorkflowDefinition).not.toHaveBeenCalled();
+  });
+
+  it("removes a matching edge, leaving the graph valid", async () => {
+    // gate1 sits between start and end; an extra direct start->end bypass edge
+    // means removing it still leaves a fully connected, valid graph.
+    const ir = {
+      ...basicWorkflowIr(),
+      nodes: [...basicWorkflowIr().nodes, { id: "gate1", kind: "gate", column: "todo" }],
+      edges: [
+        { from: "start", to: "gate1", condition: "success" },
+        { from: "gate1", to: "end", condition: "success" },
+        { from: "start", to: "end", condition: "success" },
+      ],
+    };
+    const def = { id: "WF-010", name: "Granular", ir };
+    const store = {
+      getWorkflowDefinition: vi.fn().mockResolvedValue(def),
+      updateWorkflowDefinition: vi.fn().mockImplementation(async (_id: string, updates: any) => ({ id: "WF-010", name: "Granular", ir: updates.ir })),
+    };
+    const tool = createWorkflowRemoveEdgeTool(store as any);
+    const result = await tool.execute("c", { workflow_id: "WF-010", from: "start", to: "end", condition: "success" } as any, undefined, undefined, {} as any);
+    expect((result as { isError?: boolean }).isError).toBeFalsy();
+    expect(store.updateWorkflowDefinition).toHaveBeenCalledWith(
+      "WF-010",
+      expect.objectContaining({
+        ir: expect.objectContaining({
+          edges: expect.not.arrayContaining([expect.objectContaining({ from: "start", to: "end" })]),
+        }),
+      }),
+    );
+  });
+
+  it("rejects removal of a nonexistent edge", async () => {
+    const def = { id: "WF-010", name: "Granular", ir: basicWorkflowIr() };
+    const store = { getWorkflowDefinition: vi.fn().mockResolvedValue(def), updateWorkflowDefinition: vi.fn() };
+    const tool = createWorkflowRemoveEdgeTool(store as any);
+    const result = await tool.execute("c", { workflow_id: "WF-010", from: "start", to: "nowhere" } as any, undefined, undefined, {} as any);
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    expect(store.updateWorkflowDefinition).not.toHaveBeenCalled();
   });
 });
 

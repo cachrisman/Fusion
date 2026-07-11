@@ -322,9 +322,16 @@ describe("Invariant G — tool-count parity across surfaces stays source-derived
     // already carries FUSI-018's mission/goal mutation base tools, the real
     // registry sizes are 43 base / 11 destructive / 54 combined (was 27/11/38
     // on the pre-FUSI-018 branch). Keep this map in sync with the registry.
+    //
+    // FNXC:McpServer 2026-07-11-15:00: FUSI-046 adds six base tools
+    // (fn_workflow_settings, fn_workflow_add_node, fn_workflow_remove_node,
+    // fn_workflow_add_edge, fn_workflow_remove_edge, fn_task_update) — base
+    // 43 → 49, destructive unchanged at 11, combined 54 → 60.
     const numberWords: Record<number, string> = {
       43: "forty-three",
+      49: "forty-nine",
       54: "fifty-four",
+      60: "sixty",
       11: "eleven",
     };
     expect(numberWords[base], `no spelled-out word mapping recorded for base count ${base} — update this test's numberWords map`).toBeTruthy();

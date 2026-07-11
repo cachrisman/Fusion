@@ -122,6 +122,13 @@ const EXPECTED_TOOL_NAMES = [
   "fn_workflow_create",
   "fn_workflow_update",
   "fn_workflow_select",
+  // FUSI-046: workflow CONFIG + granular IR edit + task-edit tool set
+  "fn_workflow_settings",
+  "fn_workflow_add_node",
+  "fn_workflow_remove_node",
+  "fn_workflow_add_edge",
+  "fn_workflow_remove_edge",
+  "fn_task_update",
   "fn_mission_list",
   "fn_mission_show",
   "fn_milestone_list",
@@ -462,6 +469,98 @@ describe("fn mcp serve — in-memory server smoke test", () => {
     }
   });
 
+  /*
+  FNXC:McpServer 2026-07-11-15:00:
+  FUSI-046: fn_task_update field coverage over the real MCP boundary —
+  edit title/description/priority, set+clear agentId, set+clear workflow_id,
+  the no-fields-provided error path, and the unknown-task error path, mirroring
+  the pi-extension fn_task_update handler exactly.
+  */
+  it("fn_task_update edits title/description/priority and reports the updated fields", async () => {
+    const { client, mcpServer } = await connectClient();
+    try {
+      const task = await store.createTask({ description: "Original description", source: { sourceType: "api" } });
+      const result = await client.callTool({
+        name: "fn_task_update",
+        arguments: { id: task.id, title: "New Title", description: "New description", priority: "high" },
+      });
+      expect(result.isError).not.toBe(true);
+      const structured = result.structuredContent as { taskId?: string; updatedFields?: string[] };
+      expect(structured.taskId).toBe(task.id);
+      expect(structured.updatedFields).toEqual(expect.arrayContaining(["title", "description", "priority"]));
+      const updated = await store.getTask(task.id);
+      expect(updated.title).toBe("New Title");
+      expect(updated.description).toBe("New description");
+      expect(updated.priority).toBe("high");
+    } finally {
+      await client.close();
+      await mcpServer.close();
+    }
+  });
+
+  it("fn_task_update sets and clears agentId and workflow_id", async () => {
+    const { client, mcpServer } = await connectClient();
+    try {
+      const task = await store.createTask({ description: "Assignable task", source: { sourceType: "api" } });
+      const agentStore = new AgentStore({ rootDir: store.getFusionDir() });
+      await agentStore.init();
+      const agent = await agentStore.createAgent({ name: "Assignee", role: "executor" } as any);
+
+      const setAgentResult = await client.callTool({
+        name: "fn_task_update",
+        arguments: { id: task.id, agentId: agent.id },
+      });
+      expect(setAgentResult.isError).not.toBe(true);
+      let afterSet = await store.getTask(task.id);
+      expect(afterSet.assignedAgentId).toBe(agent.id);
+
+      const clearAgentResult = await client.callTool({
+        name: "fn_task_update",
+        arguments: { id: task.id, agentId: null },
+      });
+      expect(clearAgentResult.isError).not.toBe(true);
+      afterSet = await store.getTask(task.id);
+      expect(afterSet.assignedAgentId).toBeFalsy();
+
+      const created = await store.createWorkflowDefinition({
+        name: "Update Target Workflow",
+        ir: workflowIr("Update Target Workflow") as any,
+      } as any);
+      const setWorkflowResult = await client.callTool({
+        name: "fn_task_update",
+        arguments: { id: task.id, workflow_id: created.id },
+      });
+      expect(setWorkflowResult.isError).not.toBe(true);
+
+      const clearWorkflowResult = await client.callTool({
+        name: "fn_task_update",
+        arguments: { id: task.id, workflow_id: null },
+      });
+      expect(clearWorkflowResult.isError).not.toBe(true);
+    } finally {
+      await client.close();
+      await mcpServer.close();
+    }
+  });
+
+  it("fn_task_update rejects a call with no fields and a call for an unknown task id", async () => {
+    const { client, mcpServer } = await connectClient();
+    try {
+      const task = await store.createTask({ description: "No-op target", source: { sourceType: "api" } });
+      const noFieldsResult = await client.callTool({ name: "fn_task_update", arguments: { id: task.id } });
+      expect(noFieldsResult.isError).toBe(true);
+
+      const unknownTaskResult = await client.callTool({
+        name: "fn_task_update",
+        arguments: { id: "FN-DOES-NOT-EXIST", title: "x" },
+      });
+      expect(unknownTaskResult.isError).toBe(true);
+    } finally {
+      await client.close();
+      await mcpServer.close();
+    }
+  });
+
   it("dispatches fn_workflow_list through the same @fusion/engine authoring tools the pi extension uses", async () => {
     const { client, mcpServer } = await connectClient();
     try {
@@ -575,6 +674,191 @@ describe("fn mcp serve — in-memory server smoke test", () => {
       const secretGet = await client.callTool({ name: "fn_workflow_get", arguments: { workflow_id: created.id } });
       const serializedSecretGet = JSON.stringify(secretGet.structuredContent);
       expect(serializedSecretGet).not.toContain("sk-should-be-redacted-1234567890");
+    } finally {
+      await client.close();
+      await mcpServer.close();
+    }
+  });
+
+  /*
+  FNXC:McpServer 2026-07-11-15:00:
+  FUSI-046: fn_workflow_settings get→set→get round-trip over the real MCP
+  boundary — proves base-tier registration dispatches to the shared
+  createWorkflowSettingsTool (stored + effective values on get, null-clears on
+  set), and that the tool is present without --allow-destructive.
+  */
+  it("fn_workflow_settings get→set→get round-trip is base-tier and dispatches through the shared factory", async () => {
+    const { client, mcpServer } = await connectClient();
+    try {
+      const { tools } = await client.listTools();
+      expect(tools.map((t) => t.name)).toContain("fn_workflow_settings");
+
+      const created = await store.createWorkflowDefinition({
+        name: "Settings Round Trip Workflow",
+        ir: {
+          ...workflowIr("Settings Round Trip Workflow"),
+          settings: [{ id: "autoMerge", name: "Auto Merge", type: "boolean", default: true }],
+        } as any,
+      } as any);
+
+      const setResult = await client.callTool({
+        name: "fn_workflow_settings",
+        arguments: { action: "set", workflow_id: created.id, values: { autoMerge: false } },
+      });
+      expect(setResult.isError).not.toBe(true);
+      const setStructured = setResult.structuredContent as { stored?: Record<string, unknown>; effective?: Record<string, unknown> };
+      expect(setStructured.stored?.autoMerge).toBe(false);
+      expect(setStructured.effective?.autoMerge).toBe(false);
+
+      const getResult = await client.callTool({
+        name: "fn_workflow_settings",
+        arguments: { action: "get", workflow_id: created.id },
+      });
+      expect(getResult.isError).not.toBe(true);
+      const getStructured = getResult.structuredContent as { stored?: Record<string, unknown>; effective?: Record<string, unknown> };
+      expect(getStructured.stored?.autoMerge).toBe(false);
+      expect(getStructured.effective?.autoMerge).toBe(false);
+
+      const clearResult = await client.callTool({
+        name: "fn_workflow_settings",
+        arguments: { action: "set", workflow_id: created.id, values: { autoMerge: null } },
+      });
+      expect(clearResult.isError).not.toBe(true);
+      const clearStructured = clearResult.structuredContent as { stored?: Record<string, unknown>; effective?: Record<string, unknown> };
+      expect(clearStructured.stored?.autoMerge).toBeUndefined();
+      expect(clearStructured.effective?.autoMerge).toBe(true);
+    } finally {
+      await client.close();
+      await mcpServer.close();
+    }
+  });
+
+  /*
+  FNXC:McpWorkflow 2026-07-11-15:00:
+  FUSI-046: granular workflow node/edge tools MCP round-trip — create a
+  workflow, add a node with connecting edges, add a bypass edge, remove that
+  bypass edge, remove the node (after removing its edges), and assert the IR
+  round-trips and stays valid (parseWorkflowIr) at each step.
+  */
+  it("fn_workflow_add_node/remove_node/add_edge/remove_edge round-trip over the MCP boundary", async () => {
+    const { client, mcpServer } = await connectClient();
+    try {
+      const created = await store.createWorkflowDefinition({
+        name: "Granular MCP Workflow",
+        ir: workflowIr("Granular MCP Workflow") as any,
+      } as any);
+
+      const addNodeResult = await client.callTool({
+        name: "fn_workflow_add_node",
+        arguments: {
+          workflow_id: created.id,
+          node: { id: "gate1", kind: "gate", column: "todo" },
+          edges: [
+            { from: "start", to: "gate1", condition: "success" },
+            { from: "gate1", to: "end", condition: "success" },
+          ],
+        },
+      });
+      expect(addNodeResult.isError).not.toBe(true);
+
+      const addEdgeResult = await client.callTool({
+        name: "fn_workflow_add_edge",
+        arguments: { workflow_id: created.id, edge: { from: "start", to: "end", condition: "success" } },
+      });
+      expect(addEdgeResult.isError).not.toBe(true);
+
+      let getResult = await client.callTool({ name: "fn_workflow_get", arguments: { workflow_id: created.id } });
+      let ir = (getResult.structuredContent as { ir?: { nodes?: any[]; edges?: any[] } }).ir;
+      expect((ir?.nodes ?? []).map((n) => n.id)).toEqual(expect.arrayContaining(["start", "end", "gate1"]));
+      expect((ir?.edges ?? [])).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ from: "start", to: "gate1" }),
+          expect.objectContaining({ from: "gate1", to: "end" }),
+          expect.objectContaining({ from: "start", to: "end" }),
+        ]),
+      );
+
+      const removeEdgeResult = await client.callTool({
+        name: "fn_workflow_remove_edge",
+        arguments: { workflow_id: created.id, from: "start", to: "end", condition: "success" },
+      });
+      expect(removeEdgeResult.isError).not.toBe(true);
+
+      // fn_workflow_remove_node CASCADES to remove gate1's own incident edges
+      // atomically (a non-cascading two-step removal would fail start-reachability
+      // on the first edge removal since gate1 sits mid-graph) — no other edge is touched.
+      const removeNodeResult = await client.callTool({
+        name: "fn_workflow_remove_node",
+        arguments: { workflow_id: created.id, node_id: "gate1" },
+      });
+      expect(removeNodeResult.isError).not.toBe(true);
+
+      getResult = await client.callTool({ name: "fn_workflow_get", arguments: { workflow_id: created.id } });
+      ir = (getResult.structuredContent as { ir?: { nodes?: any[]; edges?: any[] } }).ir;
+      expect((ir?.nodes ?? []).map((n) => n.id)).not.toContain("gate1");
+      expect((ir?.edges ?? [])).toEqual([expect.objectContaining({ from: "start", to: "end" })]);
+    } finally {
+      await client.close();
+      await mcpServer.close();
+    }
+  });
+
+  it("fn_workflow_add_node/add_edge/remove_node/remove_edge are base-tier and dispatch through the shared factory", async () => {
+    const { client, mcpServer } = await connectClient();
+    try {
+      const { tools } = await client.listTools();
+      const names = tools.map((t) => t.name);
+      for (const name of ["fn_workflow_add_node", "fn_workflow_remove_node", "fn_workflow_add_edge", "fn_workflow_remove_edge"]) {
+        expect(names).toContain(name);
+      }
+    } finally {
+      await client.close();
+      await mcpServer.close();
+    }
+  });
+
+  /*
+  FNXC:McpServer 2026-07-11-15:00:
+  FUSI-046: fn_task_list must filter AND display workflow-specific columns
+  (e.g. the Ideas backlog), not just the six defaults — seeds a task directly
+  into a non-default `ideas` column (mirrors packages/core/src/__tests__/
+  migration-workflow-columns.test.ts's raw-SQL seeding pattern for a
+  workflow-only column id no store API assigns during ordinary creation).
+  */
+  it("fn_task_list shows and filters a workflow-specific column (ideas) without rejecting it", async () => {
+    const { client, mcpServer } = await connectClient();
+    try {
+      const ideasTask = await store.createTask({ description: "Idea: better onboarding", source: { sourceType: "api" } });
+      store.getDatabase().prepare(`UPDATE tasks SET "column" = ? WHERE id = ?`).run("ideas", ideasTask.id);
+
+      // Unfiltered listing must show the ideas-column task, not silently drop it.
+      const unfiltered = await client.callTool({ name: "fn_task_list", arguments: {} });
+      expect(unfiltered.isError).not.toBe(true);
+      const unfilteredText = (unfiltered.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+      expect(unfilteredText).toContain(ideasTask.id);
+
+      // Explicit column:"ideas" filter must not be rejected by a hardcoded enum.
+      const filtered = await client.callTool({ name: "fn_task_list", arguments: { column: "ideas" } });
+      expect(filtered.isError).not.toBe(true);
+      const filteredText = (filtered.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+      expect(filteredText).toContain(ideasTask.id);
+
+      // A default-column filter still behaves as before (unchanged).
+      const defaultFiltered = await client.callTool({ name: "fn_task_list", arguments: { column: "planning" } });
+      expect(defaultFiltered.isError).not.toBe(true);
+
+      // An unknown column string returns an empty result, not a crash.
+      const unknownFiltered = await client.callTool({ name: "fn_task_list", arguments: { column: "totally-unknown-column" } });
+      expect(unknownFiltered.isError).not.toBe(true);
+      const unknownText = (unknownFiltered.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+      expect(unknownText).toMatch(/No tasks in/);
+
+      // The advertised input schema no longer rejects a workflow-specific column
+      // via a hardcoded enum.
+      const { tools } = await client.listTools();
+      const listTool = tools.find((t) => t.name === "fn_task_list");
+      const columnSchema = (listTool!.inputSchema as any).properties?.column;
+      expect(columnSchema?.enum).toBeUndefined();
     } finally {
       await client.close();
       await mcpServer.close();

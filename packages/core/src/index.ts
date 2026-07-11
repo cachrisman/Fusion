@@ -141,6 +141,11 @@ export {
   DEFAULT_WORKFLOW_COLUMN_IDS,
   WORKFLOW_SETTING_TYPES,
   SETTING_RENDER_WIDGETS,
+  addNodeToIr,
+  removeNodeFromIr,
+  addEdgeToIr,
+  removeEdgeFromIr,
+  type WorkflowIrEdgeSelector,
 } from "./workflow-ir.js";
 export {
   analyzeWorkflowLifecycle,

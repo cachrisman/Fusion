@@ -1710,3 +1710,119 @@ export function stripApprovalBypassFlags(ir: WorkflowIr): { ir: WorkflowIr; stri
   for (const node of nodes) stripNode(node);
   return { ir, stripped };
 }
+
+/*
+FNXC:WorkflowIr 2026-07-11-15:00:
+FUSI-046: granular add/remove-node and add/remove-edge helpers for the
+MCP/pi-extension `fn_workflow_add_node`/`fn_workflow_remove_node`/
+`fn_workflow_add_edge`/`fn_workflow_remove_edge` tools, the fine-grained
+complement to whole-IR `fn_workflow_update`. Each function is PURE (never
+mutates the input `ir`) and routes its result through {@link parseWorkflowIr}
+— the SOLE IR validator — before returning, so a granular edit can never
+persist a graph `fn_workflow_update`'s validator would have rejected (no
+second validation path). Contract for node removal (proven, not merely
+chosen): `removeNodeFromIr` CASCADES to also remove edges incident to the
+removed node itself, in the SAME atomic mutation — a non-cascading two-step
+"reject, caller removes edges first" contract is UNSAFE for a typical
+mid-graph node, because removing either incident edge individually already
+fails start-reachability validation before the node could ever be removed
+(see removeNodeFromIr's docstring for the concrete counterexample). No edge
+OTHER than the removed node's own incident edges is ever touched, and the
+result is still fully whole-IR-validated — a removal that leaves some OTHER
+node unreachable still fails.
+*/
+
+/**
+ * Return a NEW IR with `node` appended, optionally along with `edges` that
+ * connect it (added atomically in the SAME mutation, validated together in
+ * one {@link parseWorkflowIr} pass). Rejects a duplicate node id.
+ *
+ * `edges` exists because `parseWorkflowIr` requires every top-level node
+ * (barring a small interpreter-entry-kind exemption — merge-gate,
+ * retry-backoff, etc.) to be reachable from `start` at parse time: a freshly
+ * added node with NO connecting edge is always unreachable and would always
+ * fail whole-IR validation on its own. Passing the node's connecting edge(s)
+ * in the same call keeps the mutation atomic (one add producing one valid
+ * graph) without a second, unvalidated intermediate state.
+ */
+export function addNodeToIr(ir: WorkflowIr, node: WorkflowIrNode, edges: WorkflowIrEdge[] = []): WorkflowIr {
+  if (ir.nodes.some((n) => n.id === node.id)) {
+    throw new WorkflowIrError(`Node id '${node.id}' already exists in the workflow.`);
+  }
+  const nodeIds = new Set([...ir.nodes.map((n) => n.id), node.id]);
+  for (const edge of edges) {
+    if (!nodeIds.has(edge.from)) throw new WorkflowIrError(`Edge 'from' node '${edge.from}' does not exist.`);
+    if (!nodeIds.has(edge.to)) throw new WorkflowIrError(`Edge 'to' node '${edge.to}' does not exist.`);
+  }
+  const next = { ...ir, nodes: [...ir.nodes, node], edges: [...ir.edges, ...edges] } as WorkflowIr;
+  return parseWorkflowIr(next);
+}
+
+/**
+ * Return a NEW IR with the node `nodeId` removed, CASCADING to also remove
+ * every edge incident to it (both `from` and `to`), in ONE atomic mutation
+ * validated by a SINGLE {@link parseWorkflowIr} pass. Rejects a nonexistent
+ * node id.
+ *
+ * Contract note (proven, not merely chosen): a non-cascading two-step
+ * removal — "reject while incident edges remain, caller removes them first
+ * via {@link removeEdgeFromIr}" — is provably UNSAFE for a typical
+ * mid-graph node (e.g. `start -> gate1 -> end`), because removing either
+ * incident edge INDIVIDUALLY already leaves `gate1` unreachable from `start`
+ * and is itself rejected by {@link parseWorkflowIr}'s start-reachability
+ * check before the node can ever be removed. Only edges incident to the
+ * removed node itself are dropped here — no other edge in the graph is
+ * touched, and the result is still fully whole-IR-validated (a removal that
+ * would leave some OTHER node unreachable, e.g. a node that had no other
+ * inbound edge, still fails).
+ */
+export function removeNodeFromIr(ir: WorkflowIr, nodeId: string): WorkflowIr {
+  if (!ir.nodes.some((n) => n.id === nodeId)) {
+    throw new WorkflowIrError(`Node id '${nodeId}' not found in the workflow.`);
+  }
+  const next = {
+    ...ir,
+    nodes: ir.nodes.filter((n) => n.id !== nodeId),
+    edges: ir.edges.filter((e) => e.from !== nodeId && e.to !== nodeId),
+  } as WorkflowIr;
+  return parseWorkflowIr(next);
+}
+
+/** Return a NEW IR with `edge` appended. Rejects an edge referencing a
+ *  nonexistent `from`/`to` node id up front (a clearer error than the generic
+ *  validator would give). The result is validated via {@link parseWorkflowIr}
+ *  before being returned. */
+export function addEdgeToIr(ir: WorkflowIr, edge: WorkflowIrEdge): WorkflowIr {
+  const nodeIds = new Set(ir.nodes.map((n) => n.id));
+  if (!nodeIds.has(edge.from)) throw new WorkflowIrError(`Edge 'from' node '${edge.from}' does not exist.`);
+  if (!nodeIds.has(edge.to)) throw new WorkflowIrError(`Edge 'to' node '${edge.to}' does not exist.`);
+  const next = { ...ir, edges: [...ir.edges, edge] } as WorkflowIr;
+  return parseWorkflowIr(next);
+}
+
+/** Selector identifying a single edge to remove. `condition` narrows a match
+ *  when multiple edges share the same `from`/`to` pair with different
+ *  conditions (e.g. success/failure branches). */
+export interface WorkflowIrEdgeSelector {
+  from: string;
+  to: string;
+  condition?: string;
+}
+
+/**
+ * Return a NEW IR with the FIRST edge matching `selector` (from/to, and
+ * `condition` when provided) removed. Rejects when no matching edge exists.
+ * The result is validated via {@link parseWorkflowIr} before being returned.
+ */
+export function removeEdgeFromIr(ir: WorkflowIr, selector: WorkflowIrEdgeSelector): WorkflowIr {
+  const matchIdx = ir.edges.findIndex(
+    (e) => e.from === selector.from && e.to === selector.to && (selector.condition === undefined || e.condition === selector.condition),
+  );
+  if (matchIdx === -1) {
+    throw new WorkflowIrError(
+      `Edge from '${selector.from}' to '${selector.to}'${selector.condition ? ` (condition='${selector.condition}')` : ""} not found.`,
+    );
+  }
+  const next = { ...ir, edges: ir.edges.filter((_, i) => i !== matchIdx) } as WorkflowIr;
+  return parseWorkflowIr(next);
+}
