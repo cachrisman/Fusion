@@ -6,6 +6,8 @@ import type { ResolvedMcpServerDefinition } from "@fusion/core";
 import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { createHttpMcpTransport, describeMcpOAuthError, type McpOAuthTokenStore } from "./mcp-oauth-provider.js";
+import { buildMcpOAuthTokenStore, type McpSettingsAndSecretsStore } from "./mcp-resolution.js";
+import type { SecretScope } from "@fusion/core";
 
 export interface McpSessionToolset {
   tools: ToolDefinition[];
@@ -38,7 +40,7 @@ export interface McpToolCallResult {
 export type McpClientFactory = (server: ResolvedMcpServerDefinition) => McpSessionClient;
 export type McpTransportFactory = (
   server: ResolvedMcpServerDefinition,
-  opts: { cwd?: string; oauthTokenStore?: McpOAuthTokenStore; logger?: Pick<Console, "log" | "warn"> },
+  opts: { cwd?: string; oauthTokenStore?: McpOAuthTokenStore; scope?: SecretScope; logger?: Pick<Console, "log" | "warn"> },
 ) => Transport;
 
 export interface McpSessionToolsOptions {
@@ -50,6 +52,16 @@ export interface McpSessionToolsOptions {
   closeTimeoutMs?: number;
   /** Injected OAuth token writeback seam (secret-ref persistence); see mcp-oauth-provider.ts. */
   oauthTokenStore?: McpOAuthTokenStore;
+  /**
+   * FNXC:McpConfig 2026-07-12-00:00:
+   * FUSI-076 Step 3: when `oauthTokenStore` is not explicitly supplied, a settings/secrets-capable store here
+   * lets this path build the REAL persisted token store (`createSettingsBackedMcpOAuthTokenStore`) instead of
+   * silently falling back to the warn-only no-op. Falls back to warn-only when neither is provided (unchanged
+   * behavior — additive, no drift for existing callers).
+   */
+  mcpSettingsStore?: McpSettingsAndSecretsStore;
+  /** Owning scope (project vs global) per resolved server name; see `resolveMcpServersForRuntime`'s `scopeByServerName`. */
+  scopeByServerName?: Record<string, SecretScope>;
 }
 
 const DEFAULT_CLOSE_TIMEOUT_MS = 2_000;
@@ -86,6 +98,8 @@ export async function connectMcpSessionTools(
   };
   opts.signal?.addEventListener("abort", onAbort, { once: true });
 
+  const resolvedOauthTokenStore = opts.oauthTokenStore ?? (opts.mcpSettingsStore ? await buildMcpOAuthTokenStore(opts.mcpSettingsStore) : undefined);
+
   try {
     for (const server of servers) {
       if (server.enabled === false) {
@@ -101,7 +115,8 @@ export async function connectMcpSessionTools(
       try {
         const transport = (opts.transportFactory ?? defaultTransportFactory)(server, {
           cwd: opts.cwd,
-          oauthTokenStore: opts.oauthTokenStore,
+          oauthTokenStore: resolvedOauthTokenStore,
+          scope: opts.scopeByServerName?.[server.name],
           logger: opts.logger,
         });
         await client.connect(transport);
@@ -139,7 +154,7 @@ function defaultClientFactory(): McpSessionClient {
 
 function defaultTransportFactory(
   server: ResolvedMcpServerDefinition,
-  opts: { cwd?: string; oauthTokenStore?: McpOAuthTokenStore; logger?: Pick<Console, "log" | "warn"> },
+  opts: { cwd?: string; oauthTokenStore?: McpOAuthTokenStore; scope?: SecretScope; logger?: Pick<Console, "log" | "warn"> },
 ): Transport {
   if (server.transport === "stdio") {
     // FNXC:McpConfig 2026-07-12-00:00: stdio is a local transport and is never extended with OAuth (FUSI-073/074) —
@@ -152,7 +167,7 @@ function defaultTransportFactory(
       stderr: "pipe",
     });
   }
-  return createHttpMcpTransport(server, { tokenStore: opts.oauthTokenStore, logger: opts.logger });
+  return createHttpMcpTransport(server, { tokenStore: opts.oauthTokenStore, scope: opts.scope, logger: opts.logger });
 }
 
 function wrapMcpTool(

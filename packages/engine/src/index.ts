@@ -408,7 +408,23 @@ export {
 } from "./merger-squash-audit.js";
 export { reviewStep, type ReviewType, type ReviewVerdict, type ReviewResult, type ReviewOptions } from "./reviewer.js";
 export { createFnAgent, promptWithFallback, describeModel, setHostExtensionPaths, getHostExtensionPaths, buildExecutionModelRegistry, type AgentOptions, type AgentResult } from "./pi.js";
-export { resolveMcpServersForRuntime, resolveMcpServersForStore, type ResolvedMcpServersForRuntime } from "./mcp-resolution.js";
+export {
+  resolveMcpServersForRuntime,
+  resolveMcpServersForStore,
+  buildMcpOAuthTokenStore,
+  type ResolvedMcpServersForRuntime,
+  type McpSettingsAndSecretsStore,
+} from "./mcp-resolution.js";
+/*
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * FUSI-076 remediation: export the store-backed OAuth token store factory so real
+ * (non-test) `@fusion/dashboard` call sites can construct and inject it instead of silently falling back to the
+ * FUSI-074 warn-only no-op. `createWarnOnlyMcpOAuthTokenStore`/`McpOAuthTokenStore`/`McpOAuthTokenBundle` are
+ * already re-exported from "./mcp-oauth-provider.js" below.
+ */
+export {
+  createSettingsBackedMcpOAuthTokenStore,
+} from "./mcp-oauth-provider.js";
 export { discoverMcpServers, type DiscoverMcpServersOptions, type DiscoverMcpServersResult } from "./mcp-discovery-service.js";
 export { runtimeSupportsMcp, logMcpForwardingSkipped } from "./mcp-runtime-support.js";
 export { validateMcpServer, type McpValidationResult, type ValidateMcpServerOptions } from "./mcp-validation-service.js";

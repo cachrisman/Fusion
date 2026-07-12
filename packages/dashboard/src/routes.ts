@@ -13,7 +13,7 @@ import * as nodeFs from "node:fs";
 import os from "node:os";
 import v8 from "node:v8";
 
-import type { AnthropicProviderRegistration, TaskStore, ScheduleType, ActivityEventType, ModelPreset, RoutineTriggerType, McpServerDefinition, McpSecretRef } from "@fusion/core";
+import type { AnthropicProviderRegistration, TaskStore, ScheduleType, ActivityEventType, ModelPreset, RoutineTriggerType, McpServerDefinition, McpSecretRef, ResolvedMcpServerDefinition } from "@fusion/core";
 import { isMcpSecretRef } from "@fusion/core";
 import {
   type Task,
@@ -450,10 +450,16 @@ function stripMcpSecretDescriptor(secret: { field: "env" | "headers" | "token"; 
   };
 }
 
+/*
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * FUSI-076 remediation: the validation probe's OAuth-token writeback (see the `/mcp/validate` route below) must
+ * address the SAME scope that owns the stored server, so this resolver now also returns that scope (`undefined`
+ * for an ad-hoc, not-yet-stored `definition` probe — there is nothing to write back to).
+ */
 async function resolveMcpServerForValidation(
   scopedStore: TaskStore,
   request: { name?: string; definition?: McpServerDefinition },
-) {
+): Promise<{ server: ResolvedMcpServerDefinition; scope?: "project" | "global" }> {
   if (request.definition) {
     const secrets = await scopedStore.getSecretsStore();
     const resolved = await resolveMcpServersForRuntime({
@@ -465,7 +471,7 @@ async function resolveMcpServerForValidation(
     if (resolved.errors.length > 0 || resolved.servers.length === 0) {
       throw badRequest("Unable to resolve MCP server secrets", { errors: resolved.errors.map((error) => ({ serverName: error.serverName, path: error.path, message: error.message })) });
     }
-    return resolved.servers[0];
+    return { server: resolved.servers[0]! };
   }
 
   const resolved = await resolveMcpServersForStore(scopedStore);
@@ -473,7 +479,7 @@ async function resolveMcpServerForValidation(
   if (!server) {
     throw badRequest("MCP server was not found or could not be resolved");
   }
-  return server;
+  return { server, scope: resolved.scopeByServerName?.[server.name] };
 }
 
 /*
@@ -1576,11 +1582,21 @@ export function createApiRoutes(store: TaskStore, options?: ServerOptions): Rout
     try {
       const { store: scopedStore } = await getProjectContext(req);
       const request = parseMcpValidationBody(req.body);
-      const server = await resolveMcpServerForValidation(scopedStore, request);
+      const { server, scope } = await resolveMcpServerForValidation(scopedStore, request);
+      /*
+       * FNXC:McpConfig 2026-07-12-00:00:
+       * FUSI-076 remediation: thread the scoped `TaskStore` (already in scope one line above) plus the resolved
+       * owning scope into `validateMcpServer` so a proactive refresh performed by the probe's oauth provider is
+       * actually persisted via `createSettingsBackedMcpOAuthTokenStore` instead of falling back to the
+       * FUSI-074 warn-only no-op. `scope` is `undefined` for an ad-hoc (not-yet-stored) `definition` probe —
+       * there is nothing to write back to, and the store fails soft in that case anyway.
+       */
       // FNXC:McpConfig 2026-06-25-23:38: The validation API materializes MCP secrets only for the bounded probe and returns only status metadata, never resolved env/header values.
       const result = await validateMcpServer(server, {
         timeoutMs: request.timeoutMs,
         cwd: scopedStore.getRootDir(),
+        mcpSettingsStore: scopedStore,
+        scope,
       });
       res.json(result);
     } catch (error) {
@@ -5619,6 +5635,18 @@ export async function resolveManualAiPromptMcpServers(taskStore: TaskStore) {
   return (await resolveMcpServersForStore(taskStore)).servers;
 }
 
+/*
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * FUSI-076 remediation: `resolveManualAiPromptMcpServers` above intentionally keeps returning only `.servers`
+ * (its existing call sites/tests expect a bare array), so this sibling helper additionally exposes
+ * `scopeByServerName` for the one real call site below that needs to thread scope into `createFnAgent`'s OAuth
+ * token writeback — without changing the former helper's public shape.
+ */
+export async function resolveManualAiPromptMcpServersWithScope(taskStore: TaskStore) {
+  const resolved = await resolveMcpServersForStore(taskStore);
+  return { mcpServers: resolved.servers, scopeByServerName: resolved.scopeByServerName };
+}
+
 async function executeAiPromptStep(
   step: import("@fusion/core").AutomationStep,
   timeoutMs: number,
@@ -5665,8 +5693,15 @@ async function executeAiPromptStep(
    * FNXC:McpConfig 2026-06-26-00:00:
    * Manual AI-prompt workflow runs are operator-triggered coding-agent sessions, so they must receive the task-store resolved MCP set just like task executor lanes. Do not log resolved MCP payloads because env/header values may contain materialized secrets.
    */
-  const mcpServers = await resolveManualAiPromptMcpServers(taskStore);
+  const { mcpServers, scopeByServerName } = await resolveManualAiPromptMcpServersWithScope(taskStore);
 
+  /*
+   * FNXC:McpConfig 2026-07-12-00:00:
+   * FUSI-076 remediation: this manual-AI-prompt lane already resolves MCP servers via the task store; also
+   * thread the store itself (`mcpSettingsStore`) plus the owning scope per server (`mcpServerScopeByName`) so a
+   * proactive OAuth refresh inside this session persists through `createSettingsBackedMcpOAuthTokenStore`
+   * instead of the FUSI-074 warn-only no-op.
+   */
   const { session } = await createFnAgent({
     cwd: process.cwd(),
     systemPrompt: MANUAL_RUN_AI_SYSTEM_PROMPT,
@@ -5675,6 +5710,8 @@ async function executeAiPromptStep(
     defaultProvider: modelProvider,
     defaultModelId: modelId,
     mcpServers,
+    mcpSettingsStore: taskStore,
+    mcpServerScopeByName: scopeByServerName,
     onText: (delta: string) => {
       responseText += delta;
       liveCallbacks?.onText?.(delta);

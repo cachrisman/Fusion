@@ -89,6 +89,26 @@ Auth-state rendering (derived from the existing validate probe, which already re
 
 The headers-only/stdio server rows never render this action — it is gated on `transport !== "stdio" && Boolean(auth)`.
 
+<!-- FNXC:McpConfig 2026-07-12-00:00: FUSI-076 (the writeback follow-up FUSI-074 deferred) closes the persistence gap: a refreshed token is now written back into the SAME settings scope (project vs global) that declared the server, as secret refs (idempotent create-or-update, never a duplicate secret), so it survives an engine restart instead of only living in-memory for the current process. -->
+
+A non-interactive refresh (or DCR client-information exchange) is now **persisted**, not just held in memory for the current process: the engine's token-store adapter (`createSettingsBackedMcpOAuthTokenStore` in `packages/engine/src/mcp-oauth-provider.ts`) calls a shared, engine-free core API — `updateMcpServerOAuthTokens` / `saveMcpServerOAuthClientInformation` (`packages/core/src/mcp-oauth-persistence.ts`) — that rewrites the matching stored server's `auth.accessToken` / `auth.refreshToken` / `auth.expiresAt` (or `auth.clientId` / `auth.clientSecret`) secret refs in the scope that owns the server, reusing the existing secret id in place rather than creating a duplicate. Writeback is fail-soft: if the named server was concurrently deleted/renamed, persistence is a no-op with a coarse, content-free warning rather than crashing the already-succeeded-in-memory refresh. The same persistence API is designed to be reused by the future dashboard authorize/callback flow (Phase 3) so both callers share one writeback seam.
+
+<!--
+FNXC:McpConfig 2026-07-12-00:00:
+FUSI-076 remediation: the persistence API above was real from the start, but none of the actual (non-test) MCP
+consumer call sites originally supplied the scope/store needed to invoke it — every real session silently fell
+back to the FUSI-074 warn-only no-op. This is now wired end-to-end:
+-->
+
+All three real MCP consumer paths are wired to the store-backed persistence, not just unit-tested in isolation:
+
+- **`createFnAgent` (`packages/engine/src/pi.ts`)** accepts optional `mcpOAuthTokenStore` / `mcpSettingsStore` / `mcpServerScopeByName` options and threads them into its `connectMcpSessionTools` call. The dashboard's manual AI-prompt workflow-step lane (`executeAiPromptStep` in `packages/dashboard/src/routes.ts`) supplies `mcpSettingsStore: taskStore` plus the `scopeByServerName` map returned alongside the resolved MCP servers, so a background refresh during that session persists.
+- **`POST /api/mcp/validate` (`packages/dashboard/src/routes.ts`)** resolves the probed server's owning scope (`project`/`global`, or `undefined` for an ad-hoc not-yet-stored definition) and passes both it and the scoped `TaskStore` into `validateMcpServer`, so a proactive refresh performed by the validation probe's OAuth provider persists.
+- **`resolveMcpServersForRuntime` / `resolveMcpServersForStore` (`packages/engine/src/mcp-resolution.ts`)** compute and expose an additive `scopeByServerName` map (mirroring the project-over-global merge precedence) specifically so callers can address writeback to the correct scope without re-deriving that precedence themselves; `buildMcpOAuthTokenStore` builds the real token store from any settings/secrets-capable store (falling back to `undefined` — and therefore the warn-only default — only when the store cannot fully address writeback).
+
+Callers that resolve MCP servers via `resolveMcpServersForStore` but have no natural way to thread a per-session OAuth token store (most AI lanes: executor, merger, reviewer, triage, evaluator, etc.) still work exactly as before — they simply do not get persisted OAuth writeback yet. Threading scope through those lanes is tracked as follow-up work, not part of this task.
+
+
 ## Secret references
 
 Fusion never persists raw MCP environment values, header values, or token-like material in settings. Sensitive maps store only Fusion-managed secret references:

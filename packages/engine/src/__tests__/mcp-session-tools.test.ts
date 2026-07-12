@@ -218,3 +218,92 @@ describe("connectMcpSessionTools — OAuth wiring (default transport factory)", 
     expect((client.capturedTransport as unknown as { _authProvider?: unknown })._authProvider).toBeUndefined();
   });
 });
+
+describe("connectMcpSessionTools — real token store wiring (FUSI-076 Step 3)", () => {
+  function fullMcpSettingsStore(serverAuth: ResolvedMcpOAuthAuth) {
+    const updateCalls: unknown[] = [];
+    return {
+      updateCalls,
+      async getSettingsByScope() {
+        return {
+          global: { mcpServers: { enabled: true, servers: [] } },
+          project: {
+            mcpServers: {
+              enabled: true,
+              servers: [{ name: "sse-oauth", transport: "sse" as const, url: "https://mcp.example.test/sse", auth: serverAuth }],
+            },
+          },
+        };
+      },
+      async updateSettings(patch: unknown) {
+        updateCalls.push(patch);
+        return patch;
+      },
+      async updateGlobalSettings(patch: unknown) {
+        updateCalls.push(patch);
+        return patch;
+      },
+      async getSecretsStore() {
+        return {
+          async revealSecret() {
+            throw new Error("unused");
+          },
+          listSecrets: () => [],
+          async createSecret(input: { key: string }) {
+            return { id: `secret-${input.key}` };
+          },
+          async updateSecret() {
+            return undefined;
+          },
+        };
+      },
+    };
+  }
+
+  it("persists a refreshed token via the concrete store when mcpSettingsStore + scopeByServerName are supplied", async () => {
+    refreshAuthorizationMock.mockReset().mockResolvedValueOnce({
+      access_token: "new-access",
+      token_type: "Bearer",
+      expires_in: 3600,
+      refresh_token: "new-refresh",
+    });
+    const server: Extract<ResolvedMcpServerDefinition, { transport: "sse" }> = {
+      name: "sse-oauth",
+      transport: "sse",
+      url: "https://mcp.example.test/sse",
+      auth: oauthAuth({ expiresAt: Date.now() - 60_000 }),
+    };
+    const client = fakeOAuthAwareClient(["lookup"]);
+    const mcpSettingsStore = fullMcpSettingsStore(server.auth);
+
+    const toolset = await connectMcpSessionTools([server], {
+      clientFactory: () => client,
+      mcpSettingsStore,
+      scopeByServerName: { "sse-oauth": "project" },
+    });
+
+    expect(toolset.connected).toEqual(["sse-oauth"]);
+    expect(mcpSettingsStore.updateCalls).toHaveLength(1);
+  });
+
+  it("falls back to warn-only (no persistence call) when no mcpSettingsStore/oauthTokenStore is supplied", async () => {
+    refreshAuthorizationMock.mockReset().mockResolvedValueOnce({
+      access_token: "new-access",
+      token_type: "Bearer",
+      expires_in: 3600,
+    });
+    const server: Extract<ResolvedMcpServerDefinition, { transport: "sse" }> = {
+      name: "sse-oauth",
+      transport: "sse",
+      url: "https://mcp.example.test/sse",
+      auth: oauthAuth({ expiresAt: Date.now() - 60_000 }),
+    };
+    const client = fakeOAuthAwareClient(["lookup"]);
+    const warn = vi.fn();
+
+    const toolset = await connectMcpSessionTools([server], { clientFactory: () => client, logger: { log: vi.fn(), warn } });
+
+    expect(toolset.connected).toEqual(["sse-oauth"]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("not persisted"));
+  });
+});

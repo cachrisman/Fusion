@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ResolvedMcpOAuthAuth, ResolvedMcpServerDefinition } from "@fusion/core";
+import type { McpOAuthPersistenceStore, ResolvedMcpOAuthAuth, ResolvedMcpServerDefinition } from "@fusion/core";
 import {
   FusionMcpOAuthProvider,
   McpOAuthInteractiveRequiredError,
@@ -7,6 +7,7 @@ import {
   McpOAuthRefreshFailedError,
   createFusionMcpOAuthProvider,
   createHttpMcpTransport,
+  createSettingsBackedMcpOAuthTokenStore,
   createWarnOnlyMcpOAuthTokenStore,
   describeMcpOAuthError,
   hasMcpOAuthAuth,
@@ -224,5 +225,128 @@ describe("createHttpMcpTransport", () => {
     expect(hasMcpOAuthAuth(oauthServer)).toBe(true);
     expect(hasMcpOAuthAuth(plainServer)).toBe(false);
     expect(hasMcpOAuthAuth(stdioServer)).toBe(false);
+  });
+});
+
+describe("createSettingsBackedMcpOAuthTokenStore", () => {
+  function fakePersistenceStore(): McpOAuthPersistenceStore & { updateCalls: unknown[]; loggedMessages: string[] } {
+    const updateCalls: unknown[] = [];
+    const loggedMessages: string[] = [];
+    return {
+      updateCalls,
+      loggedMessages,
+      async getSettingsByScope() {
+        return {
+          global: { mcpServers: { enabled: true, servers: [] } },
+          project: {
+            mcpServers: {
+              enabled: true,
+              servers: [
+                {
+                  name: "srv",
+                  transport: "sse",
+                  url: "https://mcp.example/srv",
+                  auth: { type: "oauth", authorizationServerUrl: "https://auth.example.test", clientId: "client-1" },
+                },
+              ],
+            },
+          },
+        };
+      },
+      async updateSettings(patch) {
+        updateCalls.push(patch);
+        return patch;
+      },
+      async updateGlobalSettings(patch) {
+        updateCalls.push(patch);
+        return patch;
+      },
+      secrets: {
+        listSecrets: () => [],
+        async createSecret(input) {
+          return { id: `secret-${input.key}` };
+        },
+        async updateSecret() {
+          return undefined;
+        },
+      },
+      logger: { warn: (message: string) => loggedMessages.push(message) },
+    };
+  }
+
+  /*
+   * FNXC:McpConfig 2026-07-12-00:00:
+   * FUSI-076 Step 2: proves the real (non-warn-only) `McpOAuthTokenStore` adapter calls the core persistence API
+   * with the correct serverName/scope/bundle, and that the SDK's relative `expires_in` → FUSI-073's absolute
+   * `expiresAt` conversion (performed upstream by `FusionMcpOAuthProvider.saveTokens`/`tokens()`, not this
+   * adapter) round-trips through end-to-end when driven via the provider.
+   */
+  it("saveTokens persists the refreshed bundle via the core API with the correct serverName/scope", async () => {
+    const persistenceStore = fakePersistenceStore();
+    const store = createSettingsBackedMcpOAuthTokenStore(persistenceStore);
+
+    await store.saveTokens("srv", { accessToken: "new-access", refreshToken: "new-refresh", expiresAt: 12345 }, { scope: "project" });
+
+    expect(persistenceStore.updateCalls).toHaveLength(1);
+    const patch = persistenceStore.updateCalls[0] as { mcpServers: { servers: Array<{ name: string; auth?: unknown }> } };
+    const updated = patch.mcpServers.servers.find((s) => s.name === "srv");
+    expect(updated?.auth).toMatchObject({ expiresAt: 12345 });
+  });
+
+  it("saveTokens end-to-end via the provider: expires_in (relative seconds) maps to an absolute expiresAt persisted through the adapter", async () => {
+    const persistenceStore = fakePersistenceStore();
+    const store = createSettingsBackedMcpOAuthTokenStore(persistenceStore);
+    const provider = createFusionMcpOAuthProvider("srv", baseAuth(), { tokenStore: store, scope: "project" });
+
+    const before = Date.now();
+    await provider.saveTokens({ access_token: "tok", token_type: "Bearer", expires_in: 100, refresh_token: "rtok" });
+
+    expect(persistenceStore.updateCalls).toHaveLength(1);
+    const patch = persistenceStore.updateCalls[0] as { mcpServers: { servers: Array<{ name: string; auth?: { expiresAt?: number } }> } };
+    const updated = patch.mcpServers.servers.find((s) => s.name === "srv");
+    expect(updated?.auth?.expiresAt).toBeGreaterThanOrEqual(before + 100 * 1000 - 5);
+  });
+
+  it("saveClientInformation maps client_id/client_secret to the core client-information path", async () => {
+    const persistenceStore = fakePersistenceStore();
+    const store = createSettingsBackedMcpOAuthTokenStore(persistenceStore);
+
+    await store.saveClientInformation!("srv", { client_id: "dcr-1", client_secret: "dcr-secret" } as never, { scope: "project" });
+
+    expect(persistenceStore.updateCalls).toHaveLength(1);
+    const patch = persistenceStore.updateCalls[0] as { mcpServers: { servers: Array<{ name: string; auth?: { clientId?: string } }> } };
+    const updated = patch.mcpServers.servers.find((s) => s.name === "srv");
+    expect(updated?.auth?.clientId).toBe("dcr-1");
+  });
+
+  it("fail-softs to a coarse warn (never throws) when scope is unknown", async () => {
+    const persistenceStore = fakePersistenceStore();
+    const store = createSettingsBackedMcpOAuthTokenStore(persistenceStore);
+
+    await expect(store.saveTokens("srv", { accessToken: "at" })).resolves.toBeUndefined();
+    expect(persistenceStore.updateCalls).toHaveLength(0);
+    expect(persistenceStore.loggedMessages.some((m) => m.includes("owning scope unknown"))).toBe(true);
+  });
+
+  it("fail-softs (never throws) when the underlying persistence call rejects", async () => {
+    const persistenceStore = fakePersistenceStore();
+    persistenceStore.updateSettings = async () => {
+      throw new Error("db down");
+    };
+    const store = createSettingsBackedMcpOAuthTokenStore(persistenceStore);
+
+    await expect(store.saveTokens("srv", { accessToken: "at" }, { scope: "project" })).resolves.toBeUndefined();
+  });
+
+  it("never logs token/secret material — only server name, scope, and coarse outcome", async () => {
+    const persistenceStore = fakePersistenceStore();
+    const store = createSettingsBackedMcpOAuthTokenStore(persistenceStore);
+
+    await store.saveTokens("srv", { accessToken: "super-secret-value" }, { scope: "project" });
+    await store.saveClientInformation!("srv", { client_id: "c1", client_secret: "super-secret-client-secret" } as never, { scope: "project" });
+
+    const serialized = JSON.stringify(persistenceStore.loggedMessages);
+    expect(serialized).not.toContain("super-secret-value");
+    expect(serialized).not.toContain("super-secret-client-secret");
   });
 });

@@ -1,6 +1,7 @@
 import { superviseSpawn, type SupervisedChild } from "@fusion/core";
-import type { ResolvedMcpServerDefinition } from "@fusion/core";
+import type { ResolvedMcpServerDefinition, SecretScope } from "@fusion/core";
 import { createFusionMcpOAuthProvider, describeMcpOAuthError, type McpOAuthTokenStore } from "./mcp-oauth-provider.js";
+import { buildMcpOAuthTokenStore, type McpSettingsAndSecretsStore } from "./mcp-resolution.js";
 
 export type McpValidationStatus = "valid" | "unreachable" | "error";
 
@@ -28,6 +29,15 @@ export interface ValidateMcpServerOptions {
   fetchImpl?: McpFetch;
   /** Injected OAuth token writeback seam (secret-ref persistence); see mcp-oauth-provider.ts. */
   oauthTokenStore?: McpOAuthTokenStore;
+  /**
+   * FNXC:McpConfig 2026-07-12-00:00:
+   * FUSI-076 Step 3: when `oauthTokenStore` is not explicitly supplied, a settings/secrets-capable store here
+   * lets the probe build the REAL persisted token store instead of falling back to warn-only. Additive — no
+   * drift for existing callers that supply neither.
+   */
+  mcpSettingsStore?: McpSettingsAndSecretsStore;
+  /** Owning scope (project vs global) of the server being probed; needed to address writeback correctly. */
+  scope?: SecretScope;
 }
 
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -46,10 +56,13 @@ export async function validateMcpServer(
     return (options.stdioProbe ?? defaultStdioProbe)(server, { timeoutMs, cwd: options.cwd });
   }
 
+  const oauthTokenStore = options.oauthTokenStore ?? (options.mcpSettingsStore ? await buildMcpOAuthTokenStore(options.mcpSettingsStore) : undefined);
+
   return validateHttpMcpServer(server, {
     timeoutMs,
     fetchImpl: options.fetchImpl ?? globalThis.fetch?.bind(globalThis),
-    oauthTokenStore: options.oauthTokenStore,
+    oauthTokenStore,
+    scope: options.scope,
   });
 }
 
@@ -69,7 +82,7 @@ function normalizeTimeout(timeoutMs: number | undefined): number {
  */
 async function validateHttpMcpServer(
   server: Extract<ResolvedMcpServerDefinition, { transport: "sse" | "streamable-http" }>,
-  options: { timeoutMs: number; fetchImpl?: McpFetch; oauthTokenStore?: McpOAuthTokenStore },
+  options: { timeoutMs: number; fetchImpl?: McpFetch; oauthTokenStore?: McpOAuthTokenStore; scope?: SecretScope },
 ): Promise<McpValidationResult> {
   if (!options.fetchImpl) {
     return { status: "error", message: "fetch is unavailable in this runtime" };
@@ -77,7 +90,7 @@ async function validateHttpMcpServer(
 
   let headers = server.headers;
   if (server.auth) {
-    const provider = createFusionMcpOAuthProvider(server.name, server.auth, { tokenStore: options.oauthTokenStore });
+    const provider = createFusionMcpOAuthProvider(server.name, server.auth, { tokenStore: options.oauthTokenStore, scope: options.scope });
     try {
       const tokens = await provider.tokens();
       if (tokens?.access_token) {

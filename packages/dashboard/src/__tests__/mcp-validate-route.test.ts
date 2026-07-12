@@ -108,4 +108,49 @@ describe("POST /api/mcp/validate", () => {
     expect(engineMocks.resolveMcpServersForStore).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(response.body)).not.toContain("resolved-secret");
   });
+
+  // FNXC:McpConfig 2026-07-12-00:00: FUSI-076 remediation — assert the real /mcp/validate route call site
+  // actually threads the scoped store + resolved owning scope into `validateMcpServer`, so a proactive OAuth
+  // refresh performed by the probe persists via the store-backed token store instead of the warn-only no-op.
+  it("threads the scoped store and resolved owning scope into validateMcpServer for a by-name lookup", async () => {
+    const store = createMockStore();
+    engineMocks.resolveMcpServersForStore.mockResolvedValue({
+      servers: [{ name: "remote", transport: "streamable-http", url: "https://example.test/mcp" }],
+      errors: [],
+      scopeByServerName: { remote: "global" },
+    });
+
+    const app = createApp(store);
+    const response = await request(
+      app,
+      "POST",
+      "/api/mcp/validate",
+      JSON.stringify({ name: "remote" }),
+      { "content-type": "application/json" },
+    );
+
+    expect(response.status).toBe(200);
+    expect(engineMocks.validateMcpServer).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "remote" }),
+      expect.objectContaining({ mcpSettingsStore: store, scope: "global" }),
+    );
+  });
+
+  it("omits scope when validating an ad-hoc (not-yet-stored) server definition", async () => {
+    const store = createMockStore();
+    const app = createApp(store);
+    const response = await request(
+      app,
+      "POST",
+      "/api/mcp/validate",
+      JSON.stringify({ server: { name: "local", transport: "stdio", command: "node", env: { TOKEN: { secretRef: "token", scope: "project" } } } }),
+      { "content-type": "application/json" },
+    );
+
+    expect(response.status).toBe(200);
+    expect(engineMocks.validateMcpServer).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "local" }),
+      expect.objectContaining({ mcpSettingsStore: store, scope: undefined }),
+    );
+  });
 });

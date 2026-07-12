@@ -2,6 +2,21 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { describeModel, formatModelMarkerDetails, compactSessionContext, COMPACTION_FALLBACK_INSTRUCTIONS, createFnAgent, getProjectRootFromWorktree, isModelAuthTierIncompatibilityError, isRetryableModelSelectionError, promptWithFallback, type AgentOptions } from "../pi.js";
 import { createAgentSession, ModelRegistry, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { piLog } from "../logger.js";
+import { connectMcpSessionTools } from "../mcp-session-tools.js";
+import type { McpOAuthTokenStore } from "../mcp-oauth-provider.js";
+import type { McpSettingsAndSecretsStore } from "../mcp-resolution.js";
+
+// FNXC:McpConfig 2026-07-12-00:00: FUSI-076 remediation — spy (not replace) `connectMcpSessionTools` so a real
+// createFnAgent MCP-forwarding call actually exercises the new `oauthTokenStore`/`mcpSettingsStore`/
+// `scopeByServerName` wiring while every other MCP-forwarding test in this file keeps its real pass-through
+// (fail-soft skip) behavior unchanged.
+vi.mock("../mcp-session-tools.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../mcp-session-tools.js")>();
+  return {
+    ...actual,
+    connectMcpSessionTools: vi.fn(actual.connectMcpSessionTools),
+  };
+});
 
 // Mock skill resolver functions - define inside factory to avoid hoisting issues
 vi.mock("../skill-resolver.js", () => {
@@ -932,6 +947,48 @@ describe("session failure diagnostics", () => {
 
     expect(createAgentSessionMock.mock.calls[0]?.[0]).not.toHaveProperty("mcpServers");
     expect(session.prompt).toHaveBeenCalledWith("Use docs", expect.objectContaining({ mcpServers }));
+  });
+
+  it("FUSI-076: threads mcpOAuthTokenStore/mcpSettingsStore/mcpServerScopeByName into connectMcpSessionTools", async () => {
+    const createAgentSessionMock = vi.mocked(createAgentSession);
+    const session = {
+      model: { provider: "test", id: "primary-model" },
+      prompt: vi.fn(),
+      subscribe: vi.fn(),
+      dispose: vi.fn(),
+      sessionFile: undefined,
+    } as unknown as AgentSession;
+    const mcpServers = [
+      { name: "docs", transport: "stdio" as const, command: "node", args: ["server.js"], env: { API_KEY: "SECRET" } },
+    ];
+    const oauthTokenStore: McpOAuthTokenStore = { saveTokens: vi.fn() };
+    const mcpSettingsStore: McpSettingsAndSecretsStore = {};
+    const scopeByServerName = { docs: "project" as const };
+
+    createAgentSessionMock.mockReset();
+    createAgentSessionMock.mockResolvedValueOnce({ session } as any);
+    const connectMcpSessionToolsMock = vi.mocked(connectMcpSessionTools);
+    connectMcpSessionToolsMock.mockClear();
+
+    await createFnAgent({
+      cwd: "/test/project",
+      systemPrompt: "Test MCP oauth wiring",
+      defaultProvider: "anthropic",
+      defaultModelId: "primary-model",
+      mcpServers,
+      mcpOAuthTokenStore: oauthTokenStore,
+      mcpSettingsStore,
+      mcpServerScopeByName: scopeByServerName,
+    });
+
+    expect(connectMcpSessionToolsMock).toHaveBeenCalledWith(
+      mcpServers,
+      expect.objectContaining({
+        oauthTokenStore,
+        mcpSettingsStore,
+        scopeByServerName,
+      }),
+    );
   });
 
   it("skips MCP forwarding for unsupported mock provider and emits a content-free skip log", async () => {

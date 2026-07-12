@@ -7,7 +7,14 @@ import type {
   OAuthClientMetadata,
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
-import type { ResolvedMcpOAuthAuth, ResolvedMcpServerDefinition } from "@fusion/core";
+import {
+  saveMcpServerOAuthClientInformation,
+  updateMcpServerOAuthTokens,
+  type McpOAuthPersistenceStore,
+  type ResolvedMcpOAuthAuth,
+  type ResolvedMcpServerDefinition,
+  type SecretScope,
+} from "@fusion/core";
 
 /*
  * FNXC:McpConfig 2026-07-12-00:00:
@@ -75,15 +82,16 @@ export interface McpOAuthTokenBundle {
 }
 
 /**
- * Injected persistence seam for writeback of refreshed tokens / DCR client info as Fusion secret refs.
- * FUSI-073 did not provide a config field to address (update) the auth block's existing secret refs from the
- * engine, so the default no-op-with-warning store below is used until that gap is closed (see follow-up task
- * filed by this task). Callers may supply a real store once the writeback config seam exists (Phase 3 also needs
- * this same seam for the dashboard authorize flow).
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * FUSI-076 closes the FUSI-073/074 writeback gap: `saveTokens`/`saveClientInformation` now carry an optional
+ * `meta.scope` — the owning settings scope (project vs global) of the server whose stored `auth` block should be
+ * rewritten. `scope` is optional (trailing, back-compat) so existing warn-only-store call sites keep compiling
+ * unchanged; `createSettingsBackedMcpOAuthTokenStore` below is the real implementation and requires a known scope
+ * to actually persist (falls back to a coarse warn when the scope is unknown, never throws).
  */
 export interface McpOAuthTokenStore {
-  saveTokens(serverName: string, tokens: McpOAuthTokenBundle): Promise<void>;
-  saveClientInformation?(serverName: string, info: OAuthClientInformationMixed): Promise<void>;
+  saveTokens(serverName: string, tokens: McpOAuthTokenBundle, meta?: { scope?: SecretScope }): Promise<void>;
+  saveClientInformation?(serverName: string, info: OAuthClientInformationMixed, meta?: { scope?: SecretScope }): Promise<void>;
 }
 
 /**
@@ -105,6 +113,8 @@ export function createWarnOnlyMcpOAuthTokenStore(logger?: Pick<Console, "warn">)
 export interface FusionMcpOAuthProviderOptions {
   tokenStore?: McpOAuthTokenStore;
   logger?: Pick<Console, "warn">;
+  /** Owning settings scope (project vs global) of the server this provider addresses — see FUSI-076. */
+  scope?: SecretScope;
 }
 
 /**
@@ -115,6 +125,7 @@ export class FusionMcpOAuthProvider implements OAuthClientProvider {
   private bundle: McpOAuthTokenBundle;
   private readonly tokenStore: McpOAuthTokenStore;
   private readonly logger?: Pick<Console, "warn">;
+  private readonly scope?: SecretScope;
   private clientInfo: OAuthClientInformationMixed | undefined;
 
   constructor(
@@ -129,6 +140,7 @@ export class FusionMcpOAuthProvider implements OAuthClientProvider {
     };
     this.tokenStore = options.tokenStore ?? createWarnOnlyMcpOAuthTokenStore(options.logger);
     this.logger = options.logger;
+    this.scope = options.scope;
     this.clientInfo = auth.clientId ? { client_id: auth.clientId, client_secret: auth.clientSecret } : undefined;
   }
 
@@ -150,7 +162,7 @@ export class FusionMcpOAuthProvider implements OAuthClientProvider {
 
   async saveClientInformation(clientInformation: OAuthClientInformationMixed): Promise<void> {
     this.clientInfo = clientInformation;
-    await this.tokenStore.saveClientInformation?.(this.serverName, clientInformation);
+    await this.tokenStore.saveClientInformation?.(this.serverName, clientInformation, { scope: this.scope });
   }
 
   /**
@@ -168,7 +180,7 @@ export class FusionMcpOAuthProvider implements OAuthClientProvider {
       try {
         const refreshed = await this.performRefresh(this.bundle.refreshToken);
         this.bundle = refreshed;
-        await this.tokenStore.saveTokens(this.serverName, refreshed);
+        await this.tokenStore.saveTokens(this.serverName, refreshed, { scope: this.scope });
         return this.toOAuthTokens(refreshed);
       } catch (error) {
         throw new McpOAuthRefreshFailedError(this.serverName, error);
@@ -185,7 +197,7 @@ export class FusionMcpOAuthProvider implements OAuthClientProvider {
       expiresAt,
     };
     this.bundle = bundle;
-    await this.tokenStore.saveTokens(this.serverName, bundle);
+    await this.tokenStore.saveTokens(this.serverName, bundle, { scope: this.scope });
   }
 
   redirectToAuthorization(): void {
@@ -247,6 +259,8 @@ export function createFusionMcpOAuthProvider(
 export interface CreateHttpMcpTransportOptions {
   tokenStore?: McpOAuthTokenStore;
   logger?: Pick<Console, "warn">;
+  /** Owning settings scope (project vs global) of `server` — threaded to the provider for writeback addressing. */
+  scope?: SecretScope;
 }
 
 type HttpMcpServer = Extract<ResolvedMcpServerDefinition, { transport: "sse" | "streamable-http" }>;
@@ -264,7 +278,7 @@ export function createHttpMcpTransport(server: HttpMcpServer, opts: CreateHttpMc
   const headers = server.headers;
   const requestInit = headers ? { headers } : undefined;
   const authProvider = server.auth
-    ? createFusionMcpOAuthProvider(server.name, server.auth, { tokenStore: opts.tokenStore, logger: opts.logger })
+    ? createFusionMcpOAuthProvider(server.name, server.auth, { tokenStore: opts.tokenStore, logger: opts.logger, scope: opts.scope })
     : undefined;
 
   if (server.transport === "sse") {
@@ -280,4 +294,76 @@ export function createHttpMcpTransport(server: HttpMcpServer, opts: CreateHttpMc
 /** True when the resolved server carries an oauth `auth` block (HTTP-family only; stdio never does). */
 export function hasMcpOAuthAuth(server: ResolvedMcpServerDefinition): server is HttpMcpServer & { auth: ResolvedMcpOAuthAuth } {
   return server.transport !== "stdio" && Boolean((server as HttpMcpServer).auth);
+}
+
+/**
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * FUSI-076 Step 2: the real `McpOAuthTokenStore` implementation, built on `@fusion/core`'s engine-free
+ * `updateMcpServerOAuthTokens` / `saveMcpServerOAuthClientInformation` persistence API (the same seam the
+ * Phase-3 dashboard authorize/callback flow, FUSI-075, will reuse). Maps the SDK's relative `saveTokens`
+ * `OAuthTokens`/`OAuthClientInformationMixed` shapes (already normalized to `McpOAuthTokenBundle` by
+ * `FusionMcpOAuthProvider` before this store is called) onto the core API's `{ serverName, scope, ... }`
+ * addressing. `meta.scope` is REQUIRED to actually persist — without it (e.g. a caller that has not threaded
+ * scope through provider construction) this store fail-softs to a coarse, content-free warn and does not throw,
+ * mirroring `createWarnOnlyMcpOAuthTokenStore`'s contract. Never logs token/refresh-token/client-secret
+ * material — only server name / scope / coarse outcome.
+ */
+export function createSettingsBackedMcpOAuthTokenStore(persistenceStore: McpOAuthPersistenceStore): McpOAuthTokenStore {
+  return {
+    async saveTokens(serverName, tokens, meta) {
+      if (!meta?.scope) {
+        persistenceStore.logger?.warn?.(
+          `MCP OAuth token refreshed in-memory but not persisted (owning scope unknown): server=${serverName}`,
+        );
+        return;
+      }
+      try {
+        const result = await updateMcpServerOAuthTokens(
+          {
+            serverName,
+            scope: meta.scope,
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken,
+            expiresAt: tokens.expiresAt,
+          },
+          persistenceStore,
+        );
+        if (!result.persisted) {
+          persistenceStore.logger?.warn?.(
+            `MCP OAuth token persist skipped: server=${serverName} scope=${meta.scope} reason=${result.reason}`,
+          );
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        persistenceStore.logger?.warn?.(`MCP OAuth token persist failed: server=${serverName} scope=${meta.scope} error=${message}`);
+      }
+    },
+    async saveClientInformation(serverName, info, meta) {
+      if (!meta?.scope) {
+        persistenceStore.logger?.warn?.(
+          `MCP OAuth client information not persisted (owning scope unknown): server=${serverName}`,
+        );
+        return;
+      }
+      const clientId = typeof info.client_id === "string" ? info.client_id : undefined;
+      if (!clientId) {
+        persistenceStore.logger?.warn?.(`MCP OAuth client information not persisted (no client_id): server=${serverName} scope=${meta.scope}`);
+        return;
+      }
+      const clientSecret = typeof info.client_secret === "string" ? info.client_secret : undefined;
+      try {
+        const result = await saveMcpServerOAuthClientInformation({ serverName, scope: meta.scope, clientId, clientSecret }, persistenceStore);
+        if (!result.persisted) {
+          persistenceStore.logger?.warn?.(
+            `MCP OAuth client information persist skipped: server=${serverName} scope=${meta.scope} reason=${result.reason}`,
+          );
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        persistenceStore.logger?.warn?.(
+          `MCP OAuth client information persist failed: server=${serverName} scope=${meta.scope} error=${message}`,
+        );
+      }
+    },
+  };
 }

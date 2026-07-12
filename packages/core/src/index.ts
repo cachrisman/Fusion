@@ -103,6 +103,18 @@ export type {
   McpServersImportResult,
 } from "./mcp-config.js";
 export {
+  updateMcpServerOAuthTokens,
+  saveMcpServerOAuthClientInformation,
+} from "./mcp-oauth-persistence.js";
+export type {
+  McpOAuthPersistenceSecretsSeam,
+  McpOAuthPersistenceStore,
+  McpOAuthTokenPersistInput,
+  McpOAuthClientInformationPersistInput,
+  McpOAuthPersistFailureReason,
+  McpOAuthPersistResult,
+} from "./mcp-oauth-persistence.js";
+export {
   getMcpDiscoverySources,
   parseDiscoveredMcpServersFromFile,
   type McpDiscoverySource,

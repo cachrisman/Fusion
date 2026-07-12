@@ -57,7 +57,7 @@ vi.mock("../planning-board-tools.js", () => ({
 }));
 
 import { __resetPlanningState, createSession, createSessionWithAgent, planningStreamManager } from "../planning.js";
-import { resolveManualAiPromptMcpServers } from "../routes.js";
+import { resolveManualAiPromptMcpServers, resolveManualAiPromptMcpServersWithScope } from "../routes.js";
 import { createMissionInterviewAgent } from "../mission-interview.js";
 import { createTargetInterviewAgent } from "../milestone-slice-interview.js";
 
@@ -128,6 +128,24 @@ describe("dashboard MCP lane forwarding", () => {
     resolveMcpServersForStoreMock.mockResolvedValueOnce({ servers: [], errors: [] });
 
     await expect(resolveManualAiPromptMcpServers({} as never)).resolves.toEqual([]);
+  });
+
+  // FNXC:McpConfig 2026-07-12-00:00: FUSI-076 remediation — the manual AI-prompt lane's `createFnAgent` call
+  // must also thread `scopeByServerName` so a background OAuth refresh persists in the owning scope instead of
+  // falling back to the FUSI-074 warn-only no-op.
+  it("exposes scopeByServerName alongside the materialized MCP set for manual AI-prompt workflow steps", async () => {
+    const store = {} as never;
+    resolveMcpServersForStoreMock.mockResolvedValueOnce({
+      servers: [{ name: "docs", transport: "stdio", command: "node", env: { TOKEN: "materialized-secret" } }],
+      errors: [],
+      scopeByServerName: { docs: "project" },
+    });
+
+    await expect(resolveManualAiPromptMcpServersWithScope(store)).resolves.toEqual({
+      mcpServers: [expect.objectContaining({ name: "docs", env: { TOKEN: "materialized-secret" } })],
+      scopeByServerName: { docs: "project" },
+    });
+    expect(resolveMcpServersForStoreMock).toHaveBeenCalledWith(store);
   });
 
   it("forwards materialized MCP servers to mission interview agents", async () => {

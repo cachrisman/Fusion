@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { McpSecretReader } from "@fusion/core";
-import { resolveMcpServersForRuntime } from "../mcp-resolution.js";
-import { createHttpMcpTransport, FusionMcpOAuthProvider } from "../mcp-oauth-provider.js";
+import { buildMcpOAuthTokenStore, resolveMcpServersForRuntime, resolveMcpServersForStore } from "../mcp-resolution.js";
+import { createHttpMcpTransport, createWarnOnlyMcpOAuthTokenStore, FusionMcpOAuthProvider } from "../mcp-oauth-provider.js";
 
 function secrets(values: Record<string, string>): McpSecretReader {
   return {
@@ -81,6 +81,7 @@ describe("resolveMcpServersForRuntime", () => {
     expect(result).toEqual({
       servers: [{ name: "store", transport: "stdio", command: "node" }],
       errors: [],
+      scopeByServerName: { store: "global" },
     });
   });
 
@@ -151,5 +152,132 @@ describe("resolveMcpServersForRuntime", () => {
       const httpTransport = createHttpMcpTransport(resolved) as unknown as { _authProvider?: unknown };
       expect(httpTransport._authProvider).toBeInstanceOf(FusionMcpOAuthProvider);
     }
+  });
+
+  /*
+   * FNXC:McpConfig 2026-07-12-00:00:
+   * FUSI-076: `resolveEffectiveMcpServers`'s project-over-global merge collapses which scope a server came from,
+   * so `scopeByServerName` is computed alongside `servers`/`errors` as the addressing map writeback needs.
+   */
+  it("scopeByServerName tags each surviving server with its owning scope (project-over-global, disabled removal)", async () => {
+    const result = await resolveMcpServersForRuntime({
+      globalSettings: {
+        mcpServers: {
+          enabled: true,
+          servers: [
+            { name: "shared", transport: "stdio", command: "global-cmd" },
+            { name: "global-only", transport: "stdio", command: "global-cmd" },
+            { name: "removed", transport: "stdio", command: "global-cmd" },
+          ],
+        },
+      },
+      projectSettings: {
+        mcpServers: {
+          enabled: true,
+          servers: [
+            { name: "shared", transport: "stdio", command: "project-cmd" },
+            { name: "project-only", transport: "stdio", command: "project-cmd" },
+            { name: "removed", transport: "stdio", command: "project-cmd", enabled: false },
+          ],
+        },
+      },
+      secrets: secrets({}),
+    });
+
+    expect(result.scopeByServerName).toEqual({
+      shared: "project",
+      "global-only": "global",
+      "project-only": "project",
+    });
+  });
+});
+
+describe("buildMcpOAuthTokenStore", () => {
+  function fullStore() {
+    const updateCalls: unknown[] = [];
+    return {
+      updateCalls,
+      async getSettingsByScope() {
+        return {
+          global: { mcpServers: { enabled: true, servers: [] } },
+          project: {
+            mcpServers: {
+              enabled: true,
+              servers: [
+                {
+                  name: "asana",
+                  transport: "sse" as const,
+                  url: "https://mcp.example/asana",
+                  auth: { type: "oauth" as const, authorizationServerUrl: "https://auth.example.test" },
+                },
+              ],
+            },
+          },
+        };
+      },
+      async updateSettings(patch: unknown) {
+        updateCalls.push(patch);
+        return patch;
+      },
+      async updateGlobalSettings(patch: unknown) {
+        updateCalls.push(patch);
+        return patch;
+      },
+      async getSecretsStore() {
+        return {
+          async revealSecret() {
+            throw new Error("unused");
+          },
+          listSecrets: () => [],
+          async createSecret(input: { key: string }) {
+            return { id: `secret-${input.key}` };
+          },
+          async updateSecret() {
+            return undefined;
+          },
+        };
+      },
+    };
+  }
+
+  it("builds the real (non-warn-only) token store when the settings+secrets store fully supports persistence", async () => {
+    const store = fullStore();
+    const oauthTokenStore = await buildMcpOAuthTokenStore(store);
+    expect(oauthTokenStore).toBeDefined();
+
+    await oauthTokenStore!.saveTokens("asana", { accessToken: "at-1" }, { scope: "project" });
+    expect(store.updateCalls).toHaveLength(1);
+  });
+
+  it("returns undefined (caller falls back to warn-only) when settings writers are missing", async () => {
+    const oauthTokenStore = await buildMcpOAuthTokenStore({
+      async getSettingsByScope() {
+        return { global: { mcpServers: { enabled: true, servers: [] } }, project: {} };
+      },
+      async getSecretsStore() {
+        return { async revealSecret() { throw new Error("unused"); } };
+      },
+    });
+    expect(oauthTokenStore).toBeUndefined();
+  });
+
+  it("returns undefined when the secrets reader lacks the create/update/list persistence surface", async () => {
+    const store = fullStore();
+    (store as { getSecretsStore: () => Promise<unknown> }).getSecretsStore = async () => ({
+      async revealSecret() {
+        throw new Error("unused");
+      },
+    });
+    const oauthTokenStore = await buildMcpOAuthTokenStore(store);
+    expect(oauthTokenStore).toBeUndefined();
+  });
+
+  it("resolveMcpServersForStore's no-store fallback still yields undefined store material (warn-only remains the caller's fallback)", async () => {
+    const result = await resolveMcpServersForStore({});
+    expect(result).toEqual({ servers: [], errors: [], scopeByServerName: {} });
+    // Callers falling back to warn-only when no store is buildable is exercised at the consumer-path level
+    // (mcp-session-tools.test.ts / mcp-validation-service.test.ts); this just proves the empty-store contract
+    // this function relies on is unchanged (additive, no drift).
+    expect(createWarnOnlyMcpOAuthTokenStore()).toBeDefined();
   });
 });

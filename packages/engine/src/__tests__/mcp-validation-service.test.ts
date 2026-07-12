@@ -179,3 +179,85 @@ describe("mcp-validation-service", () => {
     });
   });
 });
+
+describe("validateMcpServer — real token store wiring (FUSI-076 Step 3)", () => {
+  function fullMcpSettingsStore(serverAuth: ResolvedMcpOAuthAuth) {
+    const updateCalls: unknown[] = [];
+    return {
+      updateCalls,
+      async getSettingsByScope() {
+        return {
+          global: { mcpServers: { enabled: true, servers: [] } },
+          project: {
+            mcpServers: {
+              enabled: true,
+              servers: [{ name: "probe-oauth", transport: "sse" as const, url: "https://example.test/sse", auth: serverAuth }],
+            },
+          },
+        };
+      },
+      async updateSettings(patch: unknown) {
+        updateCalls.push(patch);
+        return patch;
+      },
+      async updateGlobalSettings(patch: unknown) {
+        updateCalls.push(patch);
+        return patch;
+      },
+      async getSecretsStore() {
+        return {
+          async revealSecret() {
+            throw new Error("unused");
+          },
+          listSecrets: () => [],
+          async createSecret(input: { key: string }) {
+            return { id: `secret-${input.key}` };
+          },
+          async updateSecret() {
+            return undefined;
+          },
+        };
+      },
+    };
+  }
+
+  it("persists a refreshed token via the concrete store when mcpSettingsStore + scope are supplied", async () => {
+    refreshAuthorizationMock.mockReset().mockResolvedValueOnce({
+      access_token: "refreshed-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+      refresh_token: "refreshed-refresh",
+    });
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const server: Extract<ResolvedMcpServerDefinition, { transport: "sse" }> = {
+      name: "probe-oauth",
+      transport: "sse",
+      url: "https://example.test/sse",
+      auth: oauthAuth({ expiresAt: Date.now() - 60_000 }),
+    };
+    const mcpSettingsStore = fullMcpSettingsStore(server.auth);
+
+    const result = await validateMcpServer(server, { fetchImpl, timeoutMs: 25, mcpSettingsStore, scope: "project" });
+
+    expect(result.status).toBe("valid");
+    expect(mcpSettingsStore.updateCalls).toHaveLength(1);
+  });
+
+  it("falls back to warn-only (no persistence call) when no mcpSettingsStore/oauthTokenStore is supplied", async () => {
+    refreshAuthorizationMock.mockReset().mockResolvedValueOnce({
+      access_token: "refreshed-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+    });
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const server: Extract<ResolvedMcpServerDefinition, { transport: "sse" }> = {
+      name: "probe-oauth",
+      transport: "sse",
+      url: "https://example.test/sse",
+      auth: oauthAuth({ expiresAt: Date.now() - 60_000 }),
+    };
+
+    const result = await validateMcpServer(server, { fetchImpl, timeoutMs: 25 });
+    expect(result.status).toBe("valid");
+  });
+});

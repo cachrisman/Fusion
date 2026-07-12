@@ -55,6 +55,7 @@ import type {
   PermanentAgentActionCategory,
   PermanentAgentGatingContext,
   ResolvedMcpServerDefinition,
+  SecretScope,
 } from "@fusion/core";
 import {
   resolveSessionSkills,
@@ -84,6 +85,8 @@ import type { AgentPromptResult } from "./agent-runtime.js";
 import type { CliProviderContribution } from "@fusion/core";
 import { logMcpForwardingSkipped, runtimeSupportsMcp } from "./mcp-runtime-support.js";
 import { connectMcpSessionTools, type McpClientFactory, type McpSessionToolset } from "./mcp-session-tools.js";
+import type { McpOAuthTokenStore } from "./mcp-oauth-provider.js";
+import type { McpSettingsAndSecretsStore } from "./mcp-resolution.js";
 export { isModelAuthTierIncompatibilityError } from "./transient-error-detector.js";
 
 const RTK_ACCEPTED_REWRITE_EXIT_CODES = new Set([0, 3]);
@@ -1127,6 +1130,30 @@ export interface AgentOptions {
   allowMcpToolsInReadonly?: boolean;
   /** Test seam for MCP session tools; production uses the SDK client/transport factories. */
   mcpClientFactory?: McpClientFactory;
+  /**
+   * FNXC:McpConfig 2026-07-12-00:00:
+   * FUSI-076 remediation: real callers (dashboard manual-AI-prompt path, and any future task-store-backed lane)
+   * can inject the store-backed OAuth token writeback seam directly, or supply `mcpSettingsStore` +
+   * `mcpServerScopeByName` below so `connectMcpSessionTools` builds it itself via `buildMcpOAuthTokenStore`.
+   * Without either, MCP OAuth refresh stays in-memory-only for this session (the FUSI-074 warn-only default) —
+   * this option is what closes that gap for real (non-test) callers.
+   */
+  mcpOAuthTokenStore?: McpOAuthTokenStore;
+  /**
+   * FNXC:McpConfig 2026-07-12-00:00:
+   * FUSI-076: a settings/secrets-capable store (e.g. a `TaskStore`) used to build the real persisted
+   * `McpOAuthTokenStore` when `mcpOAuthTokenStore` is not explicitly supplied. See `mcp-resolution.ts`'s
+   * `buildMcpOAuthTokenStore` / `McpSettingsAndSecretsStore`.
+   */
+  mcpSettingsStore?: McpSettingsAndSecretsStore;
+  /**
+   * FNXC:McpConfig 2026-07-12-00:00:
+   * FUSI-076: owning scope (project vs global) per resolved MCP server name, from
+   * `resolveMcpServersForRuntime`/`resolveMcpServersForStore`'s `scopeByServerName`. Required for OAuth token
+   * writeback to address the correct settings scope; omit only when the server's scope is unknown (writeback
+   * then fails soft to a coarse warn).
+   */
+  mcpServerScopeByName?: Record<string, SecretScope>;
   /** Optional task-scoped env injected into this session's subprocess tools only. */
   taskEnv?: NodeJS.ProcessEnv;
   /** Last-chance abort hook fired immediately before `createAgentSession`.
@@ -2596,10 +2623,22 @@ export async function createFnAgent(options: AgentOptions): Promise<AgentResult>
        * FNXC:McpConfig 2026-06-29-00:00:
        * Planning and mission interviews are read-only lanes that still need operator-configured documentation/context MCP tools. They must opt in explicitly; other read-only sessions continue to skip MCP connection so unknown external tools do not bypass the read-only allowlist by default.
        */
+      /*
+       * FNXC:McpConfig 2026-07-12-00:00:
+       * FUSI-076 remediation: thread the real OAuth token writeback seam through so a non-interactive refresh
+       * performed inside this session actually persists (rather than silently falling back to the FUSI-074
+       * warn-only no-op that every real createFnAgent call site previously hit). `mcpOAuthTokenStore` wins when
+       * explicitly supplied; otherwise `mcpSettingsStore` + `mcpServerScopeByName` let `connectMcpSessionTools`
+       * build the store-backed implementation itself. Both are optional and additive — omitting them keeps the
+       * prior in-memory-only behavior unchanged.
+       */
       mcpToolset = await connectMcpSessionTools(forwardedMcpServers, {
         cwd: options.cwd,
         clientFactory: options.mcpClientFactory,
         logger: piLog,
+        oauthTokenStore: options.mcpOAuthTokenStore,
+        mcpSettingsStore: options.mcpSettingsStore,
+        scopeByServerName: options.mcpServerScopeByName,
       });
     } else if (forwardedMcpServers.length > 0 && isReadonly) {
       piLog.log(`readonly session — MCP servers (${forwardedMcpServers.length}) skipped`);
