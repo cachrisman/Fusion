@@ -746,7 +746,21 @@ export async function runMcpServe(opts: McpServeOptions = {}): Promise<void> {
     const project = ensureProject(context);
 
     const allowDestructive = opts.allowDestructive === true;
-    mcpServer = buildMcpServer({ cwd: project.projectPath, store: project.store, version: process.env.npm_package_version, allowDestructive });
+    /*
+    FNXC:McpServer 2026-07-12-00:00:
+    FUSI-083: pass the launch-bound project identity through so
+    McpProjectSession's "initial" project descriptor matches the actual
+    resolved project (not just a `cwd`/`basename(cwd)` fallback) — this is
+    also the project `fn_project_use` reuses (no reopen) when switching back.
+    */
+    mcpServer = buildMcpServer({
+      cwd: project.projectPath,
+      store: project.store,
+      version: process.env.npm_package_version,
+      allowDestructive,
+      projectId: project.projectId,
+      projectName: project.projectName,
+    });
     mcpServer.server.server.onclose = () => {
       void shutdown(0);
     };
@@ -756,7 +770,7 @@ export async function runMcpServe(opts: McpServeOptions = {}): Promise<void> {
       const transport = new StdioServerTransport();
       await mcpServer.connect(transport);
       console.error(
-        `[fn mcp serve] Fusion MCP operator server listening on stdio (project: ${project.projectName})` +
+        `[fn mcp serve] Fusion MCP operator server listening on stdio (project: ${project.projectName}, switchable via fn_project_use)` +
           (allowDestructive ? " [destructive tools ENABLED: fn_task_delete, fn_agent_delete, fn_workflow_delete]" : ""),
       );
     } else {

@@ -265,6 +265,7 @@ import {
   toResearchRunDetails,
   isResearchRunTerminal,
 } from "../extension.js";
+import type { McpProjectSession } from "./project-session.js";
 
 /** Runtime context threaded into every MCP tool handler. */
 export interface McpToolRuntimeContext {
@@ -279,6 +280,16 @@ export interface McpToolRuntimeContext {
   wherever a caller constructs a context directly (e.g. tests).
   */
   allowDestructive?: boolean;
+  /*
+  FNXC:McpProjectSession 2026-07-12-00:00:
+  FUSI-083 session-active project selector. Optional (constructed contexts
+  in tests may omit it) — when present, `fn_project_use`/`fn_project_current`
+  (see below) drive it to retarget subsequent store-backed tool calls at
+  another registered project WITHOUT relaunching `fn mcp serve`. The live
+  server (buildMcpServer in server.ts) always supplies one; handlers that
+  need it must guard for `undefined` defensively.
+  */
+  projectSession?: McpProjectSession;
 }
 
 /** MCP `content` block — mirrors the SDK's `CallToolResult.content` shape. */
@@ -3248,6 +3259,89 @@ const fnProjectShow: McpToolDefinition = {
   },
 };
 
+/*
+FNXC:McpServer 2026-07-12-00:00:
+FUSI-083 adds the write-side complement to `fn_project_list`: `fn_project_use`
+lets an operator MCP session retarget subsequent store-backed tool calls
+(`fn_task_create`, `fn_workflow_create`, ...) at ANY registered project
+without relaunching `fn mcp serve` (previously the server was bound to
+exactly one project for its whole lifetime). `fn_project_current` reports
+which project a call would land in right now. Both are BASE-tier —
+registered without `--allow-destructive` — because neither mutates task/
+workflow/agent data itself, it only selects which project's store later
+calls dispatch against. That selection still escalates the cross-project
+blast radius already called out above {@link fnProjectList} (base-tier
+store-backed mutations now target the switched-to project), which is why
+switching is deliberately explicit-only (via this tool call, never
+implicit) and every switch is audited to stderr (never stdout — stdout is
+the MCP protocol channel) so an agent can never silently write to the
+wrong project. See project-session.ts for the session/store lifecycle this
+drives.
+*/
+const fnProjectUse: McpToolDefinition = {
+  name: "fn_project_use",
+  description:
+    "Set the operator MCP session's active project for all subsequent store-backed tool calls (fn_task_create, " +
+    "fn_workflow_create, etc.) — lets a single `fn mcp serve` session target any registered project without " +
+    "relaunching. Validated against the central project registry. Base-tier — does not require --allow-destructive. " +
+    "Every switch is logged to stderr.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "Project id (e.g. proj_...) or exact project name to make active for subsequent tool calls" },
+    },
+    required: ["id"],
+  },
+  async handler(_store, args, ctx) {
+    if (!ctx.projectSession) return errorResult("project switching is not available in this context");
+
+    const idArg = String(args.id ?? "").trim();
+    if (!idArg) return errorResult("id is required.");
+
+    const central = new CentralCore();
+    await central.init();
+    let project: RegisteredProject | undefined;
+    try {
+      project = await findProjectByNameOrId(central, idArg);
+    } finally {
+      await central.close();
+    }
+    if (!project) return errorResult(`Project ${idArg} not found`);
+
+    const prev = ctx.projectSession.currentDescriptor();
+    const next = await ctx.projectSession.activate({ projectId: project.id, projectName: project.name, projectPath: project.path });
+
+    /*
+    FNXC:McpServer 2026-07-12-00:00:
+    Ids/counts/outcomes-only stderr audit line for every project switch —
+    never stdout (protocol channel), never prose, never a raw secret value.
+    */
+    console.error(`[fn mcp serve] PROJECT SWITCH from=${prev.projectId} to=${next.projectId} name=${next.projectName}`);
+
+    return textResult(`Active project is now ${next.projectId}: ${next.projectName} (${next.projectPath})`, {
+      structuredContent: redactSecretsDeep({
+        activeProject: { id: next.projectId, name: next.projectName, path: next.projectPath },
+        previousProject: { id: prev.projectId, name: prev.projectName },
+      }),
+    });
+  },
+};
+
+const fnProjectCurrent: McpToolDefinition = {
+  name: "fn_project_current",
+  description:
+    "Report the operator MCP session's currently-active project (id / name / path) — the project the next " +
+    "store-backed tool call will target. Base-tier — does not require --allow-destructive.",
+  inputSchema: { type: "object", properties: {} },
+  async handler(_store, _args, ctx) {
+    if (!ctx.projectSession) return errorResult("project switching is not available in this context");
+    const d = ctx.projectSession.currentDescriptor();
+    return textResult(`Active project: ${d.projectId}: ${d.projectName} (${d.projectPath})`, {
+      structuredContent: redactSecretsDeep({ activeProject: { id: d.projectId, name: d.projectName, path: d.projectPath } }),
+    });
+  },
+};
+
 export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnTaskCreate,
   fnTaskList,
@@ -3313,6 +3407,8 @@ export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnSettingsGet,
   fnProjectList,
   fnProjectShow,
+  fnProjectUse,
+  fnProjectCurrent,
   fnTokenUsage,
   fnUsageWindows,
 ];

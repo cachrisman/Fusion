@@ -209,6 +209,9 @@ const EXPECTED_TOOL_NAMES = [
   // FUSI-020: project registry reads
   "fn_project_list",
   "fn_project_show",
+  // FUSI-083: session-active project selector
+  "fn_project_use",
+  "fn_project_current",
   // FUSI-052: task lifecycle, agent edit, model read, research, trait discovery
   "fn_task_pause",
   "fn_task_unpause",
@@ -362,8 +365,15 @@ describe("fn mcp serve — in-memory server smoke test", () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  async function connectClient(options: { allowDestructive?: boolean } = {}) {
-    const mcpServer = buildMcpServer({ cwd: tmpDir, store, version: "test", allowDestructive: options.allowDestructive });
+  async function connectClient(options: { allowDestructive?: boolean; projectId?: string; projectName?: string } = {}) {
+    const mcpServer = buildMcpServer({
+      cwd: tmpDir,
+      store,
+      version: "test",
+      allowDestructive: options.allowDestructive,
+      projectId: options.projectId,
+      projectName: options.projectName,
+    });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "test-client", version: "1.0.0" });
     await Promise.all([client.connect(clientTransport), mcpServer.connect(serverTransport)]);
@@ -2021,6 +2031,179 @@ describe("fn mcp serve — in-memory server smoke test", () => {
         await destructive.client.close();
         await destructive.mcpServer.close();
       }
+    });
+  });
+
+  /*
+  FNXC:McpProjectSession 2026-07-12-00:00:
+  FUSI-083 acceptance coverage: from a single running server (initial store =
+  project A), create in A with no switch, call fn_project_use to retarget at
+  project B (a SEPARATE real temp TaskStore, seeded into fakeCentralRegistry
+  the same way the FUSI-020 project tests do), then prove subsequent
+  store-backed creates land in B's store (correct id prefix) while A's store
+  does NOT receive them. Also covers fn_project_current, unknown-target
+  rejection (active project unchanged), switch-back-to-initial (store reuse,
+  no reopen), the stderr-only PROJECT SWITCH audit line, and close()
+  cleaning up the switched-to store without double-closing the initial one.
+  */
+  describe("session-active project selector (FUSI-083: fn_project_use / fn_project_current)", () => {
+    let projectBDir: string;
+    let projectBStore: TaskStore;
+
+    beforeEach(async () => {
+      projectBDir = await mkdtemp(join(tmpdir(), "fn-fusi-083-project-b-"));
+      await mkdir(join(projectBDir, ".fusion"), { recursive: true });
+      projectBStore = new TaskStore(projectBDir);
+      await projectBStore.init();
+
+      fakeCentralRegistry.set("proj_a", {
+        id: "proj_a",
+        name: "Project A",
+        path: tmpDir,
+        status: "active",
+        isolationMode: "in-process",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      });
+      fakeCentralRegistry.set("proj_b", {
+        id: "proj_b",
+        name: "Project B",
+        path: projectBDir,
+        status: "active",
+        isolationMode: "in-process",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      });
+    });
+
+    afterEach(async () => {
+      await projectBStore.close();
+      await rm(projectBDir, { recursive: true, force: true });
+    });
+
+    it("creates in A with no switch, switches to B via fn_project_use, then creates land in B (not A) with B's task prefix", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        const createInA = await client.callTool({ name: "fn_task_create", arguments: { description: "Task created in project A" } });
+        expect(createInA.isError).not.toBe(true);
+        const aTasks = await store.listTasks({ slim: true });
+        expect(aTasks.some((t) => t.description === "Task created in project A")).toBe(true);
+
+        const useResult = await client.callTool({ name: "fn_project_use", arguments: { id: "proj_b" } });
+        expect(useResult.isError).not.toBe(true);
+        const useStructured = useResult.structuredContent as { activeProject?: { id?: string; name?: string } };
+        expect(useStructured.activeProject?.id).toBe("proj_b");
+        expect(useStructured.activeProject?.name).toBe("Project B");
+
+        const createInB = await client.callTool({ name: "fn_task_create", arguments: { description: "Task created in project B" } });
+        expect(createInB.isError).not.toBe(true);
+
+        const bTasks = await projectBStore.listTasks({ slim: true });
+        expect(bTasks.some((t) => t.description === "Task created in project B")).toBe(true);
+
+        const aTasksAfter = await store.listTasks({ slim: true });
+        expect(aTasksAfter.some((t) => t.description === "Task created in project B")).toBe(false);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_project_current reports the active project before and after a switch", async () => {
+      const { client, mcpServer } = await connectClient({ projectId: "proj_a", projectName: "Project A" });
+      try {
+        const before = await client.callTool({ name: "fn_project_current", arguments: {} });
+        expect(before.isError).not.toBe(true);
+        expect((before.structuredContent as { activeProject?: { id?: string } }).activeProject?.id).toBe("proj_a");
+
+        const useResult = await client.callTool({ name: "fn_project_use", arguments: { id: "proj_b" } });
+        expect(useResult.isError).not.toBe(true);
+
+        const after = await client.callTool({ name: "fn_project_current", arguments: {} });
+        expect(after.isError).not.toBe(true);
+        expect((after.structuredContent as { activeProject?: { id?: string } }).activeProject?.id).toBe("proj_b");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_project_use with an unknown id/name is an error result and leaves the active project unchanged", async () => {
+      const { client, mcpServer } = await connectClient({ projectId: "proj_a", projectName: "Project A" });
+      try {
+        const badUse = await client.callTool({ name: "fn_project_use", arguments: { id: "proj_does_not_exist" } });
+        expect(badUse.isError).toBe(true);
+
+        const current = await client.callTool({ name: "fn_project_current", arguments: {} });
+        expect((current.structuredContent as { activeProject?: { id?: string } }).activeProject?.id).toBe("proj_a");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("switching back to the initial project's id reuses the initial store without error", async () => {
+      const { client, mcpServer } = await connectClient({ projectId: "proj_a", projectName: "Project A" });
+      try {
+        const toB = await client.callTool({ name: "fn_project_use", arguments: { id: "proj_b" } });
+        expect(toB.isError).not.toBe(true);
+
+        const backToA = await client.callTool({ name: "fn_project_use", arguments: { id: "proj_a" } });
+        expect(backToA.isError).not.toBe(true);
+        expect((backToA.structuredContent as { activeProject?: { id?: string } }).activeProject?.id).toBe("proj_a");
+
+        const createInA = await client.callTool({ name: "fn_task_create", arguments: { description: "Task created after switch-back to A" } });
+        expect(createInA.isError).not.toBe(true);
+        const aTasks = await store.listTasks({ slim: true });
+        expect(aTasks.some((t) => t.description === "Task created after switch-back to A")).toBe(true);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("writes a PROJECT SWITCH audit line to stderr (never stdout) on every switch", async () => {
+      const stderrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const stdoutSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const { client, mcpServer } = await connectClient({ projectId: "proj_a", projectName: "Project A" });
+      try {
+        const result = await client.callTool({ name: "fn_project_use", arguments: { id: "proj_b" } });
+        expect(result.isError).not.toBe(true);
+
+        const auditLine = stderrSpy.mock.calls.map((c) => String(c[0])).find((line) => line.includes("PROJECT SWITCH"));
+        expect(auditLine).toBeTruthy();
+        expect(auditLine).toContain("from=proj_a");
+        expect(auditLine).toContain("to=proj_b");
+        expect(auditLine).toContain("name=Project B");
+
+        expect(stdoutSpy.mock.calls.some((c) => String(c[0]).includes("PROJECT SWITCH"))).toBe(false);
+      } finally {
+        stderrSpy.mockRestore();
+        stdoutSpy.mockRestore();
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_project_use/fn_project_current are base-tier (present without --allow-destructive)", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        const { tools } = await client.listTools();
+        const names = (tools ?? []).map((t) => t.name);
+        expect(names).toContain("fn_project_use");
+        expect(names).toContain("fn_project_current");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("mcpServer.close() closes the switched-to store without throwing (session-owned lifecycle)", async () => {
+      const { client, mcpServer } = await connectClient({ projectId: "proj_a", projectName: "Project A" });
+      const useResult = await client.callTool({ name: "fn_project_use", arguments: { id: "proj_b" } });
+      expect(useResult.isError).not.toBe(true);
+      await client.close();
+      await expect(mcpServer.close()).resolves.not.toThrow();
     });
   });
 

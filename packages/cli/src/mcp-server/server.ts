@@ -15,9 +15,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z, type ZodTypeAny } from "zod";
+import { basename } from "node:path";
 import type { TaskStore } from "@fusion/core";
 import { buildMcpToolRegistry, type McpJsonSchema, type McpToolRuntimeContext } from "./tools.js";
 import { buildServedMcpSkillMarkdown, FUSION_SKILL_RESOURCE_URI } from "./served-skill.js";
+import { McpProjectSession } from "./project-session.js";
 
 /**
  * Converts one of this registry's plain JSON-Schema tool inputs into the raw
@@ -109,14 +111,33 @@ export interface BuildMcpServerOptions {
   FUSI-001 delete-free tool set.
   */
   allowDestructive?: boolean;
+  /*
+  FNXC:McpServer 2026-07-12-00:00:
+  FUSI-083 optional launch-bound project identity, used to seed the session's
+  "initial" project descriptor (see McpProjectSession). Kept OPTIONAL (never
+  required) so existing test callers that only pass `{ cwd, store, version,
+  allowDestructive }` keep compiling unchanged — falls back to `cwd`/
+  `basename(cwd)` when omitted.
+  */
+  projectId?: string;
+  projectName?: string;
 }
 
 export interface FusionMcpServer {
   server: McpServer;
   /** Connect the server to a transport (stdio in `fn mcp serve`, in-memory in tests). */
   connect: (transport: Transport) => Promise<void>;
-  /** Close the underlying MCP server. Does NOT close the TaskStore — callers own that lifecycle. */
+  /*
+  FNXC:McpServer 2026-07-12-00:00:
+  FUSI-083: `close()` still does NOT close the INITIAL/launch-bound
+  TaskStore — the caller (runMcpServe / a test) owns that lifecycle exactly
+  as before. It DOES close any stores opened for a SWITCHED-TO project via
+  `fn_project_use` (session/server-owned — see project-session.ts) so a
+  session that visited other projects never leaks their SQLite handles.
+  */
   close: () => Promise<void>;
+  /** The session driving `fn_project_use`/`fn_project_current` for this server instance. */
+  projectSession: McpProjectSession;
 }
 
 /**
@@ -127,7 +148,20 @@ export interface FusionMcpServer {
  * non-stdio transport without touching tool registration.
  */
 export function buildMcpServer(options: BuildMcpServerOptions): FusionMcpServer {
-  const { cwd, store, version, allowDestructive = false } = options;
+  const { cwd, store, version, allowDestructive = false, projectId, projectName } = options;
+  /*
+  FNXC:McpProjectSession 2026-07-12-00:00:
+  FUSI-083: one McpProjectSession per `buildMcpServer(...)` call, seeded
+  with the launch-bound ("initial") project. Its store is CALLER-owned —
+  this session never closes it (see the FNXC block on FusionMcpServer.close
+  above and project-session.ts).
+  */
+  const projectSession = new McpProjectSession({
+    projectId: projectId ?? cwd,
+    projectName: projectName ?? basename(cwd),
+    projectPath: cwd,
+    store,
+  });
   /*
   FNXC:McpServer 2026-07-11-12:00:
   FUSI-045 discoverability pointer: appended (not replacing) the existing
@@ -149,7 +183,7 @@ export function buildMcpServer(options: BuildMcpServerOptions): FusionMcpServer 
     },
   );
 
-  const runtimeCtx: McpToolRuntimeContext = { cwd, allowDestructive };
+  const runtimeCtx: McpToolRuntimeContext = { cwd, allowDestructive, projectSession };
   const registry = buildMcpToolRegistry(runtimeCtx);
 
   for (const tool of registry) {
@@ -158,7 +192,20 @@ export function buildMcpServer(options: BuildMcpServerOptions): FusionMcpServer 
       tool.name,
       { description: tool.description, inputSchema: inputShape },
       async (args) => {
-        const result = await tool.handler(store, (args ?? {}) as Record<string, unknown>, runtimeCtx);
+        /*
+        FNXC:McpServer 2026-07-12-00:00:
+        FUSI-083 per-call active-project resolution seam. Every tool call
+        re-reads `projectSession.current()` (rather than closing over the
+        launch-bound `store`/`cwd` once) so a call made after `fn_project_use`
+        dispatches against the SWITCHED-TO project's store/cwd, while a call
+        made before any switch (or on a tool that ignores ctx.cwd, e.g. the
+        fn_project_* CentralCore-driven tools) is unaffected. This is the
+        single seam shared by both stdio and streamable-HTTP transports —
+        neither owns transport-specific switch logic.
+        */
+        const active = projectSession.current();
+        const callCtx: McpToolRuntimeContext = { ...runtimeCtx, cwd: active.projectPath };
+        const result = await tool.handler(active.store, (args ?? {}) as Record<string, unknown>, callCtx);
         return result as never;
       },
     );
@@ -198,6 +245,10 @@ export function buildMcpServer(options: BuildMcpServerOptions): FusionMcpServer 
   return {
     server,
     connect: (transport: Transport) => server.connect(transport),
-    close: () => server.close(),
+    close: async () => {
+      await server.close();
+      await projectSession.close();
+    },
+    projectSession,
   };
 }
