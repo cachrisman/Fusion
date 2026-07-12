@@ -1,5 +1,6 @@
 import type {
   GlobalSettings,
+  McpOAuthAuth,
   McpSecretRef,
   McpServerDefinition,
   McpServersSettings,
@@ -41,12 +42,24 @@ export interface ResolvedMcpStdioTransport extends Omit<McpStdioTransport, "env"
   env?: Record<string, string>;
 }
 
-export interface ResolvedMcpSseTransport extends Omit<McpSseTransport, "headers"> {
-  headers?: Record<string, string>;
+/**
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * Resolved (materialized) oauth auth shape mirrors McpOAuthAuth but with credential-bearing fields (clientSecret/accessToken/refreshToken) resolved to plain runtime strings. Non-secret fields (authorizationServerUrl/clientId/scopes/redirectUrl/expiresAt) pass through unchanged. This shape only ever exists transiently at the use seam — never persisted.
+ */
+export interface ResolvedMcpOAuthAuth extends Omit<McpOAuthAuth, "clientSecret" | "accessToken" | "refreshToken"> {
+  clientSecret?: string;
+  accessToken?: string;
+  refreshToken?: string;
 }
 
-export interface ResolvedMcpStreamableHttpTransport extends Omit<McpStreamableHttpTransport, "headers"> {
+export interface ResolvedMcpSseTransport extends Omit<McpSseTransport, "headers" | "auth"> {
   headers?: Record<string, string>;
+  auth?: ResolvedMcpOAuthAuth;
+}
+
+export interface ResolvedMcpStreamableHttpTransport extends Omit<McpStreamableHttpTransport, "headers" | "auth"> {
+  headers?: Record<string, string>;
+  auth?: ResolvedMcpOAuthAuth;
 }
 
 export type ResolvedMcpServerDefinition = {
@@ -150,6 +163,99 @@ async function materializeSensitiveMap(params: {
 }
 
 /**
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * Materializes a single sensitive oauth field (clientSecret/accessToken/refreshToken) via the injected revealSecret reader, mirroring materializeSensitiveMap's per-entry resolution but for a scalar field. Reuses the same fail-soft contract: a resolution failure is reported as a McpSecretResolutionError and the field is omitted, never logged or returned unresolved.
+ */
+async function materializeSensitiveValue(params: {
+  serverName: string;
+  path: string;
+  value?: McpSecretRef | string;
+  secrets: McpSecretReader;
+  reader: McpSecretReaderIdentity;
+}): Promise<McpSecretResolutionResult<string | undefined>> {
+  const { value, secrets, reader, serverName, path } = params;
+  if (value === undefined) return { value: undefined, errors: [] };
+  if (!isMcpSecretRef(value)) {
+    return {
+      errors: [
+        {
+          serverName,
+          path,
+          secretRef: { secretRef: "", scope: "project" },
+          message: "MCP sensitive values must be secret references; plaintext was not materialized",
+        },
+      ],
+    };
+  }
+  try {
+    const revealed = await secrets.revealSecret(value.secretRef, value.scope, reader);
+    return { value: revealed.plaintextValue, errors: [] };
+  } catch (error) {
+    return {
+      value: undefined,
+      errors: [
+        {
+          serverName,
+          path,
+          secretRef: value,
+          message: error instanceof Error ? error.message : String(error),
+        },
+      ],
+    };
+  }
+}
+
+/**
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * Materializes the optional oauth auth variant on HTTP-family transports: clientSecret/accessToken/refreshToken are resolved through the injected secret reader (same fail-soft contract as materializeSensitiveMap), while authorizationServerUrl/clientId/scopes/redirectUrl/expiresAt pass through unchanged. Returns undefined when the server has no auth block (no-auth path unaffected).
+ */
+async function materializeMcpOAuthAuth(params: {
+  serverName: string;
+  auth?: McpOAuthAuth;
+  secrets: McpSecretReader;
+  reader: McpSecretReaderIdentity;
+}): Promise<McpSecretResolutionResult<ResolvedMcpOAuthAuth | undefined>> {
+  const { serverName, auth, secrets, reader } = params;
+  if (!auth) return { value: undefined, errors: [] };
+  const clientSecret = await materializeSensitiveValue({
+    serverName,
+    path: "auth.clientSecret",
+    value: auth.clientSecret,
+    secrets,
+    reader,
+  });
+  const accessToken = await materializeSensitiveValue({
+    serverName,
+    path: "auth.accessToken",
+    value: auth.accessToken,
+    secrets,
+    reader,
+  });
+  const refreshToken = await materializeSensitiveValue({
+    serverName,
+    path: "auth.refreshToken",
+    value: auth.refreshToken,
+    secrets,
+    reader,
+  });
+  const errors = [...clientSecret.errors, ...accessToken.errors, ...refreshToken.errors];
+  return {
+    value: {
+      type: "oauth",
+      authorizationServerUrl: auth.authorizationServerUrl,
+      ...(auth.clientId !== undefined ? { clientId: auth.clientId } : {}),
+      ...(clientSecret.value !== undefined ? { clientSecret: clientSecret.value } : {}),
+      ...(auth.scopes ? { scopes: auth.scopes } : {}),
+      ...(auth.redirectUrl !== undefined ? { redirectUrl: auth.redirectUrl } : {}),
+      ...(accessToken.value !== undefined ? { accessToken: accessToken.value } : {}),
+      ...(refreshToken.value !== undefined ? { refreshToken: refreshToken.value } : {}),
+      ...(auth.expiresAt !== undefined ? { expiresAt: auth.expiresAt } : {}),
+    },
+    errors,
+  };
+}
+
+/**
  * FNXC:McpConfig 2026-06-25-00:00:
  * MCP secret materialization happens only at the use seam by calling the injected SecretsStore-compatible revealSecret method. Failed references are reported and omitted; the function never logs or returns unresolved secret material as plaintext.
  */
@@ -186,6 +292,12 @@ export async function materializeMcpServerSecrets(
     secrets,
     reader,
   });
+  const auth = await materializeMcpOAuthAuth({
+    serverName: server.name,
+    auth: server.auth,
+    secrets,
+    reader,
+  });
   return {
     value: {
       name: server.name,
@@ -193,8 +305,9 @@ export async function materializeMcpServerSecrets(
       transport: server.transport,
       url: server.url,
       ...(headers.value ? { headers: headers.value } : {}),
+      ...(auth.value ? { auth: auth.value } : {}),
     },
-    errors: headers.errors,
+    errors: [...headers.errors, ...auth.errors],
   };
 }
 
@@ -312,6 +425,9 @@ export function importMcpServersJson(json: string | unknown, options: { scope?: 
         transport,
         url: raw.url,
         headers: importSensitiveMap({ value: raw.headers, serverName: base.name, field: "headers", scope, secretsToCreate, errors }),
+        // FNXC:McpConfig 2026-07-12-00:00: Phase 1 import passes an already-secret-ref `auth` block straight through validation
+        // (round-trip preservation). Authorize-time plaintext token/DCR handling is Phase 3 scope, not implemented here.
+        ...(raw.auth !== undefined ? { auth: raw.auth } : {}),
       });
     } else {
       errors.push(`${name}.transport must be stdio, sse, or streamable-http`);
@@ -352,6 +468,16 @@ export function exportMcpServersJson(definitions: McpServerDefinition[]): { mcpS
         command: server.command,
         ...(server.args ? { args: server.args } : {}),
         ...(server.env ? { env: exportSensitiveMap(server.env) } : {}),
+      };
+      continue;
+    }
+    if (server.auth) {
+      mcpServers[server.name] = {
+        transport: server.transport,
+        ...(server.enabled !== undefined ? { enabled: server.enabled } : {}),
+        url: server.url,
+        ...(server.headers ? { headers: exportSensitiveMap(server.headers) } : {}),
+        auth: server.auth,
       };
       continue;
     }

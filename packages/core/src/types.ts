@@ -3129,6 +3129,9 @@ export interface WorktrunkSettings {
 /**
  * FNXC:McpConfig 2026-06-25-00:00:
  * MCP servers are trusted once enabled because downstream runtime slices may launch local commands or connect to operator-provided URLs. Store only declarations here; sensitive env, header, and token material MUST be represented as Fusion-managed secret references, never inline plaintext.
+ *
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * FUSI-072/FUSI-073 add outbound MCP OAuth support for OAuth-only hosted connectors (Asana/Atlassian/Linear/Notion/Slack/claude.ai-class), which cannot be represented with the `headers`-only static-secret model above. The two HTTP-family transports (`sse`, `streamable-http`) carry an OPTIONAL `auth: McpOAuthAuth` variant alongside `headers`; `stdio` is explicitly NOT extended (local transport, no OAuth). Every credential-bearing oauth field (`clientSecret`, `accessToken`, `refreshToken`) is a `McpSensitiveValue` (Fusion secret reference) and MUST NEVER be stored inline as plaintext — the same invariant as `headers`/`env` above. `clientId` is optional to support authorization servers that rely on RFC 7591 Dynamic Client Registration instead of pre-registration. This is a 3-phase rollout: Phase 1 (THIS task, FUSI-073) is the pure config/type foundation — types, validation, materialization, schema sanitize/redact round-trip, no engine or dashboard wiring. Phase 2 wires the resolved oauth shape into the engine's `OAuthClientProvider` (token refresh, session/probe integration). Phase 3 adds the dashboard authorize/callback UI plus RFC 7591 DCR and RFC 8414 discovery. Do not conflate this with the separate AI-model-provider OAuth subsystem (`openai-models.ts`/`provider-auth.ts`).
  */
 export interface McpSecretRef {
   secretRef: string;
@@ -3147,6 +3150,39 @@ export function isMcpSecretRef(value: unknown): value is McpSecretRef {
 
 export type McpSensitiveValue = McpSecretRef | string;
 
+/**
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * OAuth auth variant for HTTP-family MCP transports (Phase 1 of FUSI-072). Carries exactly what the SDK's `OAuthClientProvider` needs in later phases. All credential material is a `McpSensitiveValue` (secret reference), never inline plaintext; `expiresAt` is non-secret metadata and may be a plain number.
+ */
+export interface McpOAuthAuth {
+  type: "oauth";
+  /** Authorization server / issuer URL, or discovery base for RFC 8414 metadata. Required. */
+  authorizationServerUrl: string;
+  /** Optional pre-registered client id. Absent when the server relies on RFC 7591 DCR (performed in Phase 3). */
+  clientId?: string;
+  /** Optional pre-registered client secret, stored as a secret ref (never inline). */
+  clientSecret?: McpSensitiveValue;
+  /** Requested OAuth scopes. */
+  scopes?: string[];
+  /** Redirect URL the dashboard callback (Phase 3) will use. */
+  redirectUrl?: string;
+  /** Issued token bundle — all secret refs. Absent until the interactive authorize (Phase 3) completes. */
+  accessToken?: McpSensitiveValue;
+  refreshToken?: McpSensitiveValue;
+  /** Absolute expiry as epoch milliseconds; NOT secret, may be inline. */
+  expiresAt?: number;
+}
+
+export function isMcpOAuthAuth(value: unknown): value is McpOAuthAuth {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    candidate.type === "oauth" &&
+    typeof candidate.authorizationServerUrl === "string" &&
+    candidate.authorizationServerUrl.trim().length > 0
+  );
+}
+
 export interface McpStdioTransport {
   transport: "stdio";
   command: string;
@@ -3158,12 +3194,14 @@ export interface McpSseTransport {
   transport: "sse";
   url: string;
   headers?: Record<string, McpSensitiveValue>;
+  auth?: McpOAuthAuth;
 }
 
 export interface McpStreamableHttpTransport {
   transport: "streamable-http";
   url: string;
   headers?: Record<string, McpSensitiveValue>;
+  auth?: McpOAuthAuth;
 }
 
 export type McpTransport = McpStdioTransport | McpSseTransport | McpStreamableHttpTransport;

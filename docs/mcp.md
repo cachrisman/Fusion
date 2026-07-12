@@ -42,6 +42,32 @@ Definitions use these shapes:
 
 Expected outcome: settings validation accepts only the required fields for the selected transport, rejects duplicate server names within one stored settings array, and rejects plaintext sensitive values.
 
+<!-- FNXC:McpConfig 2026-07-12-00:00: FUSI-073 (Phase 1 of 3, parent epic FUSI-072) adds an optional `auth` variant to the two HTTP-family transports for OAuth-only hosted connectors (Asana/Atlassian/Linear/Notion/Slack/claude.ai-class). This is config-foundation only — no engine OAuthClientProvider wiring and no dashboard authorize UI yet; those land in Phases 2 and 3. -->
+### OAuth auth (sse / streamable-http only, foundation)
+
+`sse` and `streamable-http` servers may additionally declare an `auth: { type: "oauth", ... }` block for authorization-server-protected MCP endpoints:
+
+```json
+{
+  "name": "asana",
+  "transport": "sse",
+  "url": "https://mcp.asana.test/sse",
+  "auth": {
+    "type": "oauth",
+    "authorizationServerUrl": "https://auth.asana.test",
+    "clientId": "fusion-client",
+    "clientSecret": { "secretRef": "sec_...", "scope": "project" },
+    "scopes": ["projects:read"],
+    "redirectUrl": "https://dashboard.example.test/oauth/callback",
+    "accessToken": { "secretRef": "sec_...", "scope": "project" },
+    "refreshToken": { "secretRef": "sec_...", "scope": "project" },
+    "expiresAt": 1800000000000
+  }
+}
+```
+
+`authorizationServerUrl` is required; `clientId` is optional (servers that rely on RFC 7591 Dynamic Client Registration can omit it). `clientSecret`, `accessToken`, and `refreshToken` are Fusion secret references only, following the same never-inline-plaintext rule as `headers`/`env`. `stdio` transports do not support `auth` (local, no OAuth). This is currently config-only: no interactive authorize flow or DCR exists yet.
+
 ## Secret references
 
 Fusion never persists raw MCP environment values, header values, or token-like material in settings. Sensitive maps store only Fusion-managed secret references:

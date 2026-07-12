@@ -1,5 +1,5 @@
 import { DEFAULT_MAX_AUTO_MERGE_RETRIES } from "./in-review-stall.js";
-import type { CliAgentSettings, GlobalSettings, McpSecretRef, McpServerDefinition, ProjectSettings, Settings } from "./types.js";
+import type { CliAgentSettings, GlobalSettings, McpOAuthAuth, McpSecretRef, McpServerDefinition, ProjectSettings, Settings } from "./types.js";
 
 export interface MergeRequestContractShadowSettingsSource {
   mergeRequestContractShadowEnabled?: boolean;
@@ -871,6 +871,35 @@ function sanitizeMcpSensitiveMap(value: unknown): Record<string, McpSecretRef> |
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/**
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * Sanitizes the optional oauth `auth` variant at the write boundary (FUSI-073 Phase 1). Malformed oauth (missing/blank authorizationServerUrl) drops the whole `auth` field — lenient drop-bad-parts, matching sanitizeMcpServerDefinition's existing behavior — while the server declaration itself survives. Credential-bearing fields (clientSecret/accessToken/refreshToken) reuse sanitizeMcpSecretRef so they can only ever come out as { secretRef, scope }, never plaintext.
+ */
+function sanitizeMcpOAuthAuth(value: unknown): McpOAuthAuth | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  if (input.type !== "oauth") return undefined;
+  if (typeof input.authorizationServerUrl !== "string" || input.authorizationServerUrl.trim().length === 0) return undefined;
+  const clientId = typeof input.clientId === "string" && input.clientId.trim() ? input.clientId.trim() : undefined;
+  const clientSecret = sanitizeMcpSecretRef(input.clientSecret);
+  const scopes = sanitizeStringArray(input.scopes);
+  const redirectUrl = typeof input.redirectUrl === "string" && input.redirectUrl.trim() ? input.redirectUrl.trim() : undefined;
+  const accessToken = sanitizeMcpSecretRef(input.accessToken);
+  const refreshToken = sanitizeMcpSecretRef(input.refreshToken);
+  const expiresAt = typeof input.expiresAt === "number" ? input.expiresAt : undefined;
+  return {
+    type: "oauth",
+    authorizationServerUrl: input.authorizationServerUrl.trim(),
+    ...(clientId ? { clientId } : {}),
+    ...(clientSecret ? { clientSecret } : {}),
+    ...(scopes ? { scopes } : {}),
+    ...(redirectUrl ? { redirectUrl } : {}),
+    ...(accessToken ? { accessToken } : {}),
+    ...(refreshToken ? { refreshToken } : {}),
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
+  };
+}
+
 function sanitizeMcpServerDefinition(value: unknown): McpServerDefinition | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const input = value as Record<string, unknown>;
@@ -896,11 +925,13 @@ function sanitizeMcpServerDefinition(value: unknown): McpServerDefinition | unde
   if (input.transport === "sse" || input.transport === "streamable-http") {
     if (typeof input.url !== "string" || input.url.trim().length === 0) return undefined;
     const headers = sanitizeMcpSensitiveMap(input.headers);
+    const auth = input.auth !== undefined ? sanitizeMcpOAuthAuth(input.auth) : undefined;
     return {
       ...base,
       transport: input.transport,
       url: input.url.trim(),
       ...(headers ? { headers } : {}),
+      ...(auth ? { auth } : {}),
     };
   }
 

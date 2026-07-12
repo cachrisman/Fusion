@@ -4,6 +4,7 @@ import type {
   HeartbeatPromptTemplate,
   HeartbeatScopeDisciplineMode,
   Locale,
+  McpOAuthAuth,
   McpSensitiveValue,
   McpServerDefinition,
   McpServersSettings,
@@ -219,7 +220,8 @@ export interface McpValidationError {
     | "missing-url"
     | "invalid-args"
     | "invalid-sensitive-map"
-    | "plaintext-secret";
+    | "plaintext-secret"
+    | "invalid-oauth-auth";
   message: string;
 }
 
@@ -238,6 +240,69 @@ function validateMcpStringArray(value: unknown, path: string): McpValidationResu
     return { errors: [mcpError(path, "invalid-args", "Expected an array of non-empty strings")] };
   }
   return { value: value.map((entry) => entry.trim()), errors: [] };
+}
+
+/**
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * Validates a single oauth credential field (clientSecret/accessToken/refreshToken) using the same secret-ref-only rule as validateMcpSensitiveMap's per-entry check, but for a scalar field rather than a map.
+ */
+function validateMcpSensitiveValue(value: unknown, path: string): McpValidationResult<McpSensitiveValue | undefined> {
+  if (value === undefined) return { value: undefined, errors: [] };
+  if (typeof value === "string") {
+    return { errors: [mcpError(path, "plaintext-secret", "Sensitive MCP values must be Fusion secret references, never plaintext strings")] };
+  }
+  if (!isMcpSecretRef(value)) {
+    return { errors: [mcpError(path, "invalid-sensitive-map", "Sensitive MCP values must be { secretRef, scope } objects")] };
+  }
+  return { value: { secretRef: value.secretRef.trim(), scope: value.scope }, errors: [] };
+}
+
+/**
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * Validates the optional oauth `auth` variant on HTTP-family MCP transports (FUSI-073 Phase 1). Absent auth is valid (no-auth path unchanged). `authorizationServerUrl` is required; `clientId` is optional (DCR-later); credential-bearing fields reject inline plaintext exactly like validateMcpSensitiveMap.
+ */
+function validateMcpOAuthAuth(value: unknown, path: string): McpValidationResult<McpOAuthAuth | undefined> {
+  if (value === undefined) return { value: undefined, errors: [] };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { errors: [mcpError(path, "invalid-oauth-auth", "MCP oauth auth must be an object")] };
+  }
+  const input = value as Record<string, unknown>;
+  const errors: McpValidationError[] = [];
+  if (input.type !== "oauth") {
+    errors.push(mcpError(`${path}.type`, "invalid-oauth-auth", 'MCP oauth auth requires type "oauth"'));
+  }
+  if (typeof input.authorizationServerUrl !== "string" || input.authorizationServerUrl.trim().length === 0) {
+    errors.push(mcpError(`${path}.authorizationServerUrl`, "invalid-oauth-auth", "MCP oauth auth requires a non-empty authorizationServerUrl"));
+  }
+  if (input.clientId !== undefined && typeof input.clientId !== "string") {
+    errors.push(mcpError(`${path}.clientId`, "invalid-oauth-auth", "clientId must be a string when present"));
+  }
+  if (input.redirectUrl !== undefined && typeof input.redirectUrl !== "string") {
+    errors.push(mcpError(`${path}.redirectUrl`, "invalid-oauth-auth", "redirectUrl must be a string when present"));
+  }
+  if (input.expiresAt !== undefined && typeof input.expiresAt !== "number") {
+    errors.push(mcpError(`${path}.expiresAt`, "invalid-oauth-auth", "expiresAt must be a number when present"));
+  }
+  const scopes = validateMcpStringArray(input.scopes, `${path}.scopes`);
+  const clientSecret = validateMcpSensitiveValue(input.clientSecret, `${path}.clientSecret`);
+  const accessToken = validateMcpSensitiveValue(input.accessToken, `${path}.accessToken`);
+  const refreshToken = validateMcpSensitiveValue(input.refreshToken, `${path}.refreshToken`);
+  errors.push(...scopes.errors, ...clientSecret.errors, ...accessToken.errors, ...refreshToken.errors);
+  if (errors.length > 0) return { errors };
+  return {
+    value: {
+      type: "oauth",
+      authorizationServerUrl: (input.authorizationServerUrl as string).trim(),
+      ...(input.clientId !== undefined ? { clientId: (input.clientId as string).trim() } : {}),
+      ...(clientSecret.value ? { clientSecret: clientSecret.value } : {}),
+      ...(scopes.value ? { scopes: scopes.value } : {}),
+      ...(input.redirectUrl !== undefined ? { redirectUrl: (input.redirectUrl as string).trim() } : {}),
+      ...(accessToken.value ? { accessToken: accessToken.value } : {}),
+      ...(refreshToken.value ? { refreshToken: refreshToken.value } : {}),
+      ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt as number } : {}),
+    },
+    errors: [],
+  };
 }
 
 function validateMcpSensitiveMap(
@@ -305,7 +370,8 @@ export function validateMcpServerDefinitionDetailed(value: unknown, path = "serv
       errors.push(mcpError(`${path}.url`, "missing-url", `${input.transport} MCP servers require a url`));
     }
     const headers = validateMcpSensitiveMap(input.headers, `${path}.headers`);
-    errors.push(...headers.errors);
+    const auth = validateMcpOAuthAuth(input.auth, `${path}.auth`);
+    errors.push(...headers.errors, ...auth.errors);
     if (errors.length > 0) return { errors };
     return {
       value: {
@@ -314,6 +380,7 @@ export function validateMcpServerDefinitionDetailed(value: unknown, path = "serv
         transport: input.transport,
         url: (input.url as string).trim(),
         ...(headers.value ? { headers: headers.value } : {}),
+        ...(auth.value ? { auth: auth.value } : {}),
       },
       errors: [],
     };
