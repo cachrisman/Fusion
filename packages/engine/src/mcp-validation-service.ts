@@ -1,5 +1,6 @@
 import { superviseSpawn, type SupervisedChild } from "@fusion/core";
 import type { ResolvedMcpServerDefinition } from "@fusion/core";
+import { createFusionMcpOAuthProvider, describeMcpOAuthError, type McpOAuthTokenStore } from "./mcp-oauth-provider.js";
 
 export type McpValidationStatus = "valid" | "unreachable" | "error";
 
@@ -25,6 +26,8 @@ export interface ValidateMcpServerOptions {
   cwd?: string;
   stdioProbe?: McpStdioProbe;
   fetchImpl?: McpFetch;
+  /** Injected OAuth token writeback seam (secret-ref persistence); see mcp-oauth-provider.ts. */
+  oauthTokenStore?: McpOAuthTokenStore;
 }
 
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -46,6 +49,7 @@ export async function validateMcpServer(
   return validateHttpMcpServer(server, {
     timeoutMs,
     fetchImpl: options.fetchImpl ?? globalThis.fetch?.bind(globalThis),
+    oauthTokenStore: options.oauthTokenStore,
   });
 }
 
@@ -55,12 +59,34 @@ function normalizeTimeout(timeoutMs: number | undefined): number {
     : DEFAULT_TIMEOUT_MS;
 }
 
+/*
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * FUSI-074 Step 5: the bounded HTTP probe stays a plain GET (not a full MCP handshake), but when the resolved
+ * server carries an oauth `auth` block we obtain a bearer token from the same `FusionMcpOAuthProvider` used by
+ * the other two consumer paths — including its non-interactive proactive refresh — before probing. A no-token /
+ * refresh-failed / interactive-required condition is content-free-mapped to an actionable `status: "error"`
+ * message rather than crashing or ever opening a browser; the AbortController timeout budget is unchanged.
+ */
 async function validateHttpMcpServer(
   server: Extract<ResolvedMcpServerDefinition, { transport: "sse" | "streamable-http" }>,
-  options: { timeoutMs: number; fetchImpl?: McpFetch },
+  options: { timeoutMs: number; fetchImpl?: McpFetch; oauthTokenStore?: McpOAuthTokenStore },
 ): Promise<McpValidationResult> {
   if (!options.fetchImpl) {
     return { status: "error", message: "fetch is unavailable in this runtime" };
+  }
+
+  let headers = server.headers;
+  if (server.auth) {
+    const provider = createFusionMcpOAuthProvider(server.name, server.auth, { tokenStore: options.oauthTokenStore });
+    try {
+      const tokens = await provider.tokens();
+      if (tokens?.access_token) {
+        headers = { ...headers, Authorization: `Bearer ${tokens.access_token}` };
+      }
+    } catch (error) {
+      const reason = describeMcpOAuthError(error);
+      return { status: "error", message: reason ?? "oauth: needs re-authorize" };
+    }
   }
 
   const controller = new AbortController();
@@ -68,7 +94,7 @@ async function validateHttpMcpServer(
   try {
     const response = await options.fetchImpl(server.url, {
       method: "GET",
-      headers: server.headers,
+      headers,
       signal: controller.signal,
     });
 

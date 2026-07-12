@@ -42,8 +42,8 @@ Definitions use these shapes:
 
 Expected outcome: settings validation accepts only the required fields for the selected transport, rejects duplicate server names within one stored settings array, and rejects plaintext sensitive values.
 
-<!-- FNXC:McpConfig 2026-07-12-00:00: FUSI-073 (Phase 1 of 3, parent epic FUSI-072) adds an optional `auth` variant to the two HTTP-family transports for OAuth-only hosted connectors (Asana/Atlassian/Linear/Notion/Slack/claude.ai-class). This is config-foundation only — no engine OAuthClientProvider wiring and no dashboard authorize UI yet; those land in Phases 2 and 3. -->
-### OAuth auth (sse / streamable-http only, foundation)
+<!-- FNXC:McpConfig 2026-07-12-00:00: FUSI-073 (Phase 1 of 3, parent epic FUSI-072) adds an optional `auth` variant to the two HTTP-family transports for OAuth-only hosted connectors (Asana/Atlassian/Linear/Notion/Slack/claude.ai-class). FUSI-074 (Phase 2) wires this into the engine: a headless `OAuthClientProvider` (`packages/engine/src/mcp-oauth-provider.ts`) attaches to every HTTP-family MCP transport across all three consumer paths (session tools, runtime forwarding, validation probe), performing non-interactive token refresh when a stored token is expired but has a refresh token. The engine never opens a browser or performs interactive authorize — a server with no valid/refreshable token is skipped fail-soft with an actionable "needs re-authorize" reason. Dashboard authorize/callback UI + RFC 7591 DCR + RFC 8414 discovery remain Phase 3. -->
+### OAuth auth (sse / streamable-http only)
 
 `sse` and `streamable-http` servers may additionally declare an `auth: { type: "oauth", ... }` block for authorization-server-protected MCP endpoints:
 
@@ -66,7 +66,7 @@ Expected outcome: settings validation accepts only the required fields for the s
 }
 ```
 
-`authorizationServerUrl` is required; `clientId` is optional (servers that rely on RFC 7591 Dynamic Client Registration can omit it). `clientSecret`, `accessToken`, and `refreshToken` are Fusion secret references only, following the same never-inline-plaintext rule as `headers`/`env`. `stdio` transports do not support `auth` (local, no OAuth). This is currently config-only: no interactive authorize flow or DCR exists yet.
+`authorizationServerUrl` is required; `clientId` is optional (servers that rely on RFC 7591 Dynamic Client Registration can omit it). `clientSecret`, `accessToken`, and `refreshToken` are Fusion secret references only, following the same never-inline-plaintext rule as `headers`/`env`. `stdio` transports do not support `auth` (local, no OAuth). The engine connects using these tokens and refreshes them non-interactively when expired; there is no interactive authorize flow or DCR yet — those are dashboard-side Phase 3 work.
 
 ## Secret references
 

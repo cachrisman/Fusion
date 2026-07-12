@@ -95,6 +95,7 @@ export type {
   ResolvedMcpStdioTransport,
   ResolvedMcpSseTransport,
   ResolvedMcpStreamableHttpTransport,
+  ResolvedMcpOAuthAuth,
   ResolvedMcpServerDefinition,
   McpSecretResolutionError,
   McpSecretResolutionResult,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { McpSecretReader } from "@fusion/core";
 import { resolveMcpServersForRuntime } from "../mcp-resolution.js";
+import { createHttpMcpTransport, FusionMcpOAuthProvider } from "../mcp-oauth-provider.js";
 
 function secrets(values: Record<string, string>): McpSecretReader {
   return {
@@ -100,5 +101,55 @@ describe("resolveMcpServersForRuntime", () => {
     expect(result.servers).toEqual([{ name: "broken", transport: "streamable-http", url: "https://mcp.example" }]);
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]?.serverName).toBe("broken");
+  });
+
+  /*
+   * FNXC:McpConfig 2026-07-12-00:00:
+   * FUSI-074 Step 4 (resolution/runtime path): resolveMcpServersForRuntime already threads FUSI-073's oauth `auth`
+   * block through materialization unchanged (secret-bearing fields resolved to plain strings). This test proves
+   * the resolved oauth material reaches the shared HTTP-family transport helper end-to-end — the same helper
+   * used by every MCP consumer path — rather than only asserting the intermediate resolved-server shape.
+   */
+  it("resolves oauth secret refs and the runtime transport-construction seam attaches an authProvider for both HTTP transports", async () => {
+    const oauthSecrets = secrets({
+      "oauth-client-secret": "cs-value",
+      "oauth-access-token": "access-value",
+      "oauth-refresh-token": "refresh-value",
+    });
+
+    for (const transport of ["sse", "streamable-http"] as const) {
+      const result = await resolveMcpServersForRuntime({
+        globalSettings: {
+          mcpServers: {
+            enabled: true,
+            servers: [
+              {
+                name: `oauth-${transport}`,
+                transport,
+                url: "https://mcp.example/oauth",
+                auth: {
+                  type: "oauth",
+                  authorizationServerUrl: "https://auth.example.test",
+                  clientId: "client-1",
+                  clientSecret: { secretRef: "oauth-client-secret", scope: "global" },
+                  accessToken: { secretRef: "oauth-access-token", scope: "global" },
+                  refreshToken: { secretRef: "oauth-refresh-token", scope: "global" },
+                  expiresAt: Date.now() + 60_000,
+                },
+              },
+            ],
+          },
+        },
+        projectSettings: null,
+        secrets: oauthSecrets,
+      });
+
+      expect(result.errors).toEqual([]);
+      const resolved = result.servers[0] as Extract<typeof result.servers[number], { transport: "sse" | "streamable-http" }>;
+      expect(resolved.auth).toMatchObject({ accessToken: "access-value", refreshToken: "refresh-value", clientSecret: "cs-value" });
+
+      const httpTransport = createHttpMcpTransport(resolved) as unknown as { _authProvider?: unknown };
+      expect(httpTransport._authProvider).toBeInstanceOf(FusionMcpOAuthProvider);
+    }
   });
 });

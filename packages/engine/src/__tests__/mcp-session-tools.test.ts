@@ -1,10 +1,47 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { ResolvedMcpServerDefinition } from "@fusion/core";
+import type { ResolvedMcpOAuthAuth, ResolvedMcpServerDefinition } from "@fusion/core";
 import { connectMcpSessionTools, uniqueMcpToolName, type McpSessionClient } from "../mcp-session-tools.js";
+import { FusionMcpOAuthProvider } from "../mcp-oauth-provider.js";
+
+const refreshAuthorizationMock = vi.fn();
+vi.mock("@modelcontextprotocol/sdk/client/auth.js", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return { ...actual, refreshAuthorization: (...args: unknown[]) => refreshAuthorizationMock(...args) };
+});
 
 function stdioServer(name: string, enabled = true): ResolvedMcpServerDefinition {
   return { name, transport: "stdio", command: "fake", enabled };
+}
+
+function oauthAuth(overrides: Partial<ResolvedMcpOAuthAuth> = {}): ResolvedMcpOAuthAuth {
+  return {
+    type: "oauth",
+    authorizationServerUrl: "https://auth.example.test",
+    clientId: "client-1",
+    accessToken: "access-token-value",
+    refreshToken: "refresh-token-value",
+    expiresAt: Date.now() + 60_000,
+    ...overrides,
+  };
+}
+
+/** A fake session client that simulates the SDK's internal `authProvider.tokens()` call before the first request. */
+function fakeOAuthAwareClient(toolNames: string[] = []): McpSessionClient & { capturedTransport?: Transport } {
+  const client = {
+    capturedTransport: undefined as Transport | undefined,
+    connect: vi.fn(async (transport: Transport) => {
+      client.capturedTransport = transport;
+      const authProvider = (transport as unknown as { _authProvider?: { tokens(): Promise<unknown> } })._authProvider;
+      if (authProvider) {
+        await authProvider.tokens();
+      }
+    }),
+    listTools: vi.fn(async () => ({ tools: toolNames.map((name) => ({ name })) })),
+    callTool: vi.fn(async () => ({ content: [] })),
+    close: vi.fn(async () => undefined),
+  };
+  return client;
 }
 
 function fakeClient(toolNames: string[], calls: string[] = []): McpSessionClient {
@@ -101,5 +138,83 @@ describe("connectMcpSessionTools", () => {
     expect(uniqueMcpToolName("a.b", "bash", used)).toBe("mcp__a_b__bash");
     expect(uniqueMcpToolName("a_b", "bash", used)).toBe("mcp__a_b__bash__2");
     expect(uniqueMcpToolName("a_b", "read", used)).toBe("mcp__a_b__read");
+  });
+});
+
+describe("connectMcpSessionTools — OAuth wiring (default transport factory)", () => {
+  it("attaches an authProvider for sse servers with a resolved oauth auth block and connects when the token is valid", async () => {
+    const client = fakeOAuthAwareClient(["lookup"]);
+    const server: Extract<ResolvedMcpServerDefinition, { transport: "sse" }> = {
+      name: "sse-oauth",
+      transport: "sse",
+      url: "https://mcp.example.test/sse",
+      auth: oauthAuth(),
+    };
+
+    const toolset = await connectMcpSessionTools([server], { clientFactory: () => client });
+
+    expect(toolset.connected).toEqual(["sse-oauth"]);
+    expect(toolset.skipped).toEqual([]);
+    expect((client.capturedTransport as unknown as { _authProvider?: unknown })._authProvider).toBeInstanceOf(FusionMcpOAuthProvider);
+  });
+
+  it("attaches an authProvider for streamable-http servers with a resolved oauth auth block and connects when the token is valid", async () => {
+    const client = fakeOAuthAwareClient(["lookup"]);
+    const server: Extract<ResolvedMcpServerDefinition, { transport: "streamable-http" }> = {
+      name: "http-oauth",
+      transport: "streamable-http",
+      url: "https://mcp.example.test/mcp",
+      auth: oauthAuth(),
+    };
+
+    const toolset = await connectMcpSessionTools([server], { clientFactory: () => client });
+
+    expect(toolset.connected).toEqual(["http-oauth"]);
+    expect(toolset.skipped).toEqual([]);
+    expect((client.capturedTransport as unknown as { _authProvider?: unknown })._authProvider).toBeInstanceOf(FusionMcpOAuthProvider);
+  });
+
+  it("skips a server with no valid/refreshable oauth token with an actionable reason, without dropping other tools or crashing", async () => {
+    const badClient = fakeOAuthAwareClient([]);
+    const goodClient = fakeOAuthAwareClient(["read"]);
+    const badServer: Extract<ResolvedMcpServerDefinition, { transport: "streamable-http" }> = {
+      name: "no-token",
+      transport: "streamable-http",
+      url: "https://mcp.example.test/mcp",
+      auth: oauthAuth({ accessToken: undefined, refreshToken: undefined }),
+    };
+    const goodServer = stdioServer("good");
+
+    const toolset = await connectMcpSessionTools([badServer, goodServer], {
+      clientFactory: (server) => (server.name === "no-token" ? badClient : goodClient),
+    });
+
+    expect(toolset.skipped).toEqual([{ name: "no-token", reason: "oauth: needs re-authorize (no stored token)" }]);
+    expect(toolset.connected).toEqual(["good"]);
+    expect(toolset.tools.map((tool) => tool.name)).toEqual(["mcp__good__read"]);
+  });
+
+  it("skips a server with a failed non-interactive refresh with an actionable reason, without crashing", async () => {
+    refreshAuthorizationMock.mockReset().mockRejectedValueOnce(new Error("invalid_grant"));
+    const client = fakeOAuthAwareClient([]);
+    const server: Extract<ResolvedMcpServerDefinition, { transport: "sse" }> = {
+      name: "refresh-failed",
+      transport: "sse",
+      url: "https://mcp.example.test/sse",
+      auth: oauthAuth({ expiresAt: Date.now() - 60_000 }),
+    };
+
+    const toolset = await connectMcpSessionTools([server], { clientFactory: () => client });
+
+    expect(toolset.skipped).toEqual([{ name: "refresh-failed", reason: "oauth: needs re-authorize (refresh failed)" }]);
+    expect(toolset.connected).toEqual([]);
+  });
+
+  it("leaves stdio transports untouched (no authProvider ever attached)", async () => {
+    const client = fakeOAuthAwareClient(["read"]);
+    const toolset = await connectMcpSessionTools([stdioServer("local")], { clientFactory: () => client });
+
+    expect(toolset.connected).toEqual(["local"]);
+    expect((client.capturedTransport as unknown as { _authProvider?: unknown })._authProvider).toBeUndefined();
   });
 });

@@ -1,12 +1,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { ResolvedMcpServerDefinition } from "@fusion/core";
 import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { createHttpMcpTransport, describeMcpOAuthError, type McpOAuthTokenStore } from "./mcp-oauth-provider.js";
 
 export interface McpSessionToolset {
   tools: ToolDefinition[];
@@ -37,7 +36,10 @@ export interface McpToolCallResult {
 }
 
 export type McpClientFactory = (server: ResolvedMcpServerDefinition) => McpSessionClient;
-export type McpTransportFactory = (server: ResolvedMcpServerDefinition, opts: { cwd?: string }) => Transport;
+export type McpTransportFactory = (
+  server: ResolvedMcpServerDefinition,
+  opts: { cwd?: string; oauthTokenStore?: McpOAuthTokenStore; logger?: Pick<Console, "log" | "warn"> },
+) => Transport;
 
 export interface McpSessionToolsOptions {
   cwd?: string;
@@ -46,6 +48,8 @@ export interface McpSessionToolsOptions {
   transportFactory?: McpTransportFactory;
   logger?: Pick<Console, "log" | "warn">;
   closeTimeoutMs?: number;
+  /** Injected OAuth token writeback seam (secret-ref persistence); see mcp-oauth-provider.ts. */
+  oauthTokenStore?: McpOAuthTokenStore;
 }
 
 const DEFAULT_CLOSE_TIMEOUT_MS = 2_000;
@@ -95,7 +99,11 @@ export async function connectMcpSessionTools(
       const client = (opts.clientFactory ?? defaultClientFactory)(server);
       let didConnect = false;
       try {
-        const transport = (opts.transportFactory ?? defaultTransportFactory)(server, { cwd: opts.cwd });
+        const transport = (opts.transportFactory ?? defaultTransportFactory)(server, {
+          cwd: opts.cwd,
+          oauthTokenStore: opts.oauthTokenStore,
+          logger: opts.logger,
+        });
         await client.connect(transport);
         didConnect = true;
         clients.push(client);
@@ -107,7 +115,7 @@ export async function connectMcpSessionTools(
           tools.push(wrapMcpTool(server.name, tool, client, usedToolNames));
         }
       } catch (error) {
-        const reason = safeErrorReason(error);
+        const reason = describeMcpOAuthError(error) ?? safeErrorReason(error);
         skipped.push({ name: server.name, reason });
         opts.logger?.warn?.(`Skipping MCP server for pi session: name=${server.name} transport=${server.transport} reason=${reason}`);
         if (didConnect) {
@@ -129,8 +137,13 @@ function defaultClientFactory(): McpSessionClient {
   return new Client({ name: "fusion-pi-mcp-session", version: "0.1.0" }, { capabilities: {} }) as unknown as McpSessionClient;
 }
 
-function defaultTransportFactory(server: ResolvedMcpServerDefinition, opts: { cwd?: string }): Transport {
+function defaultTransportFactory(
+  server: ResolvedMcpServerDefinition,
+  opts: { cwd?: string; oauthTokenStore?: McpOAuthTokenStore; logger?: Pick<Console, "log" | "warn"> },
+): Transport {
   if (server.transport === "stdio") {
+    // FNXC:McpConfig 2026-07-12-00:00: stdio is a local transport and is never extended with OAuth (FUSI-073/074) —
+    // no authProvider wiring applies here, only the HTTP-family transports below go through the shared helper.
     return new StdioClientTransport({
       command: server.command,
       args: server.args,
@@ -139,15 +152,7 @@ function defaultTransportFactory(server: ResolvedMcpServerDefinition, opts: { cw
       stderr: "pipe",
     });
   }
-  const headers = "headers" in server ? server.headers : undefined;
-  const requestInit = headers ? { headers } : undefined;
-  if (server.transport === "sse") {
-    return new SSEClientTransport(new URL(server.url), {
-      eventSourceInit: requestInit ? { fetch: (input, init) => fetch(input, { ...init, ...requestInit }) } : undefined,
-      requestInit,
-    });
-  }
-  return new StreamableHTTPClientTransport(new URL(server.url), { requestInit });
+  return createHttpMcpTransport(server, { tokenStore: opts.oauthTokenStore, logger: opts.logger });
 }
 
 function wrapMcpTool(
