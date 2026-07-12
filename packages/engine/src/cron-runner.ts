@@ -1040,7 +1040,14 @@ export async function createAiPromptExecutor(cwd: string, store?: TaskStore): Pr
     FNXC:McpConfig 2026-06-26-00:00:
     Scheduled AI automations are coding-agent work surfaces. ProjectEngine passes the TaskStore so configured MCP servers are forwarded; lightweight in-process runtime callers may omit the store and keep the pre-existing empty-MCP behavior.
     */
-    const mcpServers = store ? (await resolveMcpServersForStore(store)).servers : undefined;
+    /*
+     * FNXC:McpConfig 2026-07-12-01:00:
+     * FUSI-077: resolve once and forward BOTH `.servers` and `.scopeByServerName` so a non-interactive OAuth
+     * refresh performed inside this scheduled-automation session persists via the settings-backed
+     * McpOAuthTokenStore (FUSI-076) instead of falling back to the warn-only in-memory default.
+     */
+    const resolvedCronMcp = store ? await resolveMcpServersForStore(store) : undefined;
+    const mcpServers = resolvedCronMcp?.servers;
     const { session } = await createFnAgent({
       cwd,
       systemPrompt: AI_AUTOMATION_SYSTEM_PROMPT,
@@ -1050,6 +1057,8 @@ export async function createAiPromptExecutor(cwd: string, store?: TaskStore): Pr
       defaultProvider: modelProvider,
       defaultModelId: modelId,
       mcpServers,
+      mcpSettingsStore: store,
+      mcpServerScopeByName: resolvedCronMcp?.scopeByServerName,
       onText: (delta: string) => {
         responseText += delta;
         liveCallbacks?.onText?.(delta);

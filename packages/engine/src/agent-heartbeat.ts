@@ -83,11 +83,18 @@ interface SelfImproveServiceLike {
   recordSelfImprove(agentId: string): Promise<void>;
 }
 
+/*
+ * FNXC:McpConfig 2026-07-12-01:00:
+ * FUSI-077: return the FULL resolved object (`servers` + `scopeByServerName` + `errors`), not just `.servers`,
+ * so the caller can forward the owning-scope map into `createResolvedAgentSession` and let a non-interactive
+ * OAuth refresh performed during a heartbeat session persist via the settings-backed McpOAuthTokenStore
+ * (FUSI-076) instead of falling back to the warn-only in-memory default.
+ */
 export async function resolveHeartbeatMcpForAgent(
   taskStore: TaskStore | undefined,
   agentId: string,
 ) {
-  if (!taskStore) return { servers: [], errors: [] };
+  if (!taskStore) return { servers: [], errors: [], scopeByServerName: {} };
   return resolveMcpServersForStore(taskStore, { agentId });
 }
 
@@ -2833,6 +2840,9 @@ export class HeartbeatMonitor {
           runAuditor: audit,
           settings: heartbeatModelSettings,
           mcpServers: heartbeatMcp.servers,
+          // FNXC:McpConfig 2026-07-12-01:00: FUSI-077 — forward the owning store + scope map so OAuth refreshes persist via the settings-backed token store instead of the warn-only default.
+          mcpSettingsStore: taskStore,
+          mcpServerScopeByName: heartbeatMcp.scopeByServerName,
           onText: (delta) => {
             outputLength += delta.length;
             appendStdoutExcerpt(delta);

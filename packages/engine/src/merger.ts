@@ -160,10 +160,21 @@ import { isReloadOnShipEnabled, runReloadOnShip } from "./merger-reload-on-ship.
 export { DiffVolumeRegressionError } from "./merger-diff-volume-gate.js";
 export { IntegrationBranchConcurrentAdvanceError } from "./merger-ref-update-advance.js";
 
+/*
+ * FNXC:McpConfig 2026-06-25-22:27:
+ * Merger-owned sessions resolve enabled MCP servers at session creation for conflict resolution, verification fixes, autostash recovery, and post-merge workflow nodes. Secret material stays in memory and is forwarded only through the shared runtime guard.
+ *
+ * FNXC:McpConfig 2026-07-12-01:00:
+ * FUSI-077: return a spreadable options fragment (`mcpServers` + `mcpSettingsStore` + `mcpServerScopeByName`),
+ * not just the resolved server array, so every call site below forwards the owning store + scope map into
+ * `createResolvedAgentSession`/`createFnAgent` and a non-interactive OAuth refresh persists via the
+ * settings-backed McpOAuthTokenStore (FUSI-076) instead of falling back to the warn-only in-memory default.
+ * Fail-soft when `store` is undefined — keeps the prior no-MCP behavior unchanged.
+ */
 async function resolveMergerMcpServers(store?: TaskStore, agentId?: string | null) {
-  // FNXC:McpConfig 2026-06-25-22:27:
-  // Merger-owned sessions resolve enabled MCP servers at session creation for conflict resolution, verification fixes, autostash recovery, and post-merge workflow nodes. Secret material stays in memory and is forwarded only through the shared runtime guard.
-  return store ? (await resolveMcpServersForStore(store, { agentId: agentId ?? undefined })).servers : undefined;
+  if (!store) return { mcpServers: undefined, mcpSettingsStore: undefined as TaskStore | undefined, mcpServerScopeByName: undefined };
+  const resolved = await resolveMcpServersForStore(store, { agentId: agentId ?? undefined });
+  return { mcpServers: resolved.servers, mcpSettingsStore: store as TaskStore | undefined, mcpServerScopeByName: resolved.scopeByServerName };
 }
 
 /**
@@ -1981,7 +1992,7 @@ Do not refactor, rename broadly, or make opportunistic improvements.
         source: "merger",
       }),
       settings,
-      mcpServers: await resolveMergerMcpServers(store, assignedAgent?.id),
+      ...(await resolveMergerMcpServers(store, assignedAgent?.id)),
       // Skill selection: use assigned agent skills if available, otherwise role fallback
       ...(skillContext?.skillSelectionContext ? { skillSelection: skillContext.skillSelectionContext } : {}),
       taskId,
@@ -3267,7 +3278,7 @@ ${fileList}
       source: "merger",
     }),
     settings,
-    mcpServers: await resolveMergerMcpServers(store, assignedAgent?.id),
+    ...(await resolveMergerMcpServers(store, assignedAgent?.id)),
     ...(skillContext?.skillSelectionContext ? { skillSelection: skillContext.skillSelectionContext } : {}),
     taskId,
     taskTitle: taskForSkillContext?.title,
@@ -3685,7 +3696,7 @@ ${fileList}
       source: "merger",
     }),
     settings,
-    mcpServers: await resolveMergerMcpServers(store, assignedAgent?.id),
+    ...(await resolveMergerMcpServers(store, assignedAgent?.id)),
     ...(skillContext?.skillSelectionContext ? { skillSelection: skillContext.skillSelectionContext } : {}),
     taskId,
     taskTitle: taskForSkillContext?.title,
@@ -7204,7 +7215,7 @@ You are assisting with a paused \`git pull --rebase\`.
       source: "merger",
     }),
     settings,
-    mcpServers: await resolveMergerMcpServers(store),
+    ...(await resolveMergerMcpServers(store)),
     taskId,
     onFallbackModelUsed: createFallbackModelObserver({
       agent: "merger",
@@ -12316,7 +12327,7 @@ async function runAiAgentForCommit(params: AiAgentParams): Promise<{ success: bo
     }),
     settings,
     // FNXC:McpConfig 2026-06-25-23:04: The primary merge-authoring agent is part of the merger lane and receives the resolved MCP set under the shared runtime-support guard, matching conflict/verification merge sessions without exposing secret material.
-    mcpServers: await resolveMergerMcpServers(store, assignedAgent?.id),
+    ...(await resolveMergerMcpServers(store, assignedAgent?.id)),
     // Skill selection: use assigned agent skills if available, otherwise role fallback
     ...(skillContext?.skillSelectionContext ? { skillSelection: skillContext.skillSelectionContext } : {}),
     taskId,

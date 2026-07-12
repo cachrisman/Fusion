@@ -659,6 +659,14 @@ export class MissionExecutionLoop extends EventEmitter {
         phase: "mission",
         source: "mission-execution-loop",
       });
+      /*
+       * FNXC:McpConfig 2026-07-12-01:00:
+       * FUSI-077: resolve once and forward BOTH `.servers` and `.scopeByServerName` so a non-interactive OAuth
+       * refresh performed inside this mission validation session persists via the settings-backed
+       * McpOAuthTokenStore (FUSI-076) instead of falling back to the warn-only in-memory default.
+       */
+      const resolvedMissionMcp = await resolveMcpServersForStore(this.taskStore);
+
       const sessionResult = await createResolvedAgentSession({
         sessionPurpose: "validation",
         runtimeHint: validationRuntimeHint,
@@ -674,7 +682,10 @@ export class MissionExecutionLoop extends EventEmitter {
         runAuditor,
         settings,
         // FNXC:McpConfig 2026-06-25-23:19: Mission validation is a validator lane and receives the store-resolved MCP set at session creation; runtime gating and content-free skip logging remain centralized in pi.
-        mcpServers: (await resolveMcpServersForStore(this.taskStore)).servers,
+        mcpServers: resolvedMissionMcp.servers,
+        // FNXC:McpConfig 2026-07-12-01:00: FUSI-077 — forward the owning store + scope map so OAuth refreshes persist via the settings-backed token store instead of the warn-only default.
+        mcpSettingsStore: this.taskStore,
+        mcpServerScopeByName: resolvedMissionMcp.scopeByServerName,
         onText: (_delta) => {
           // Could stream this to a log entry if needed
         },

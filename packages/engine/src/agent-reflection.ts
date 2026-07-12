@@ -117,13 +117,22 @@ export class AgentReflectionService {
 
       let responseText = "";
       // FNXC:McpConfig 2026-06-25-23:05: Agent-reflection sessions receive the resolved MCP set for the reflected agent identity while preserving the no-secret-logging contract at the runtime forwarding seam.
+      /*
+       * FNXC:McpConfig 2026-07-12-01:00:
+       * FUSI-077: resolve once and forward BOTH `.servers` and `.scopeByServerName` so a non-interactive OAuth
+       * refresh performed inside this reflection session persists via the settings-backed McpOAuthTokenStore
+       * (FUSI-076) instead of falling back to the warn-only in-memory default.
+       */
+      const resolvedReflectionMcp = await resolveMcpServersForStore(this.taskStore, { agentId });
       const { session } = await createFnAgent({
         cwd: this.rootDir,
         systemPrompt: REFLECTION_SYSTEM_PROMPT,
         tools: "readonly",
         defaultProvider: this.modelProvider,
         defaultModelId: this.modelId,
-        mcpServers: (await resolveMcpServersForStore(this.taskStore, { agentId })).servers,
+        mcpServers: resolvedReflectionMcp.servers,
+        mcpSettingsStore: this.taskStore,
+        mcpServerScopeByName: resolvedReflectionMcp.scopeByServerName,
         onText: (delta: string) => {
           responseText += delta;
         },

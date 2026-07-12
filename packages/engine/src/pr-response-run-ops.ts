@@ -101,7 +101,14 @@ export function makePrResponseAgentRunner(
      * FNXC:McpConfig 2026-06-26-00:00:
      * PR-response review threads are resolved by a merger-purpose coding agent, so this helper must forward the same store-resolved MCP set as the primary merger lane. Only counts/errors may be logged by callers; the server payload can contain materialized secrets.
      */
-    const mcpServers = store ? (await resolveMcpServersForStore(store)).servers : undefined;
+    /*
+     * FNXC:McpConfig 2026-07-12-01:00:
+     * FUSI-077: resolve once and forward BOTH `.servers` and `.scopeByServerName` so a non-interactive OAuth
+     * refresh performed inside this PR-response session persists via the settings-backed McpOAuthTokenStore
+     * (FUSI-076) instead of falling back to the warn-only in-memory default.
+     */
+    const resolvedPrResponseMcp = store ? await resolveMcpServersForStore(store) : undefined;
+    const mcpServers = resolvedPrResponseMcp?.servers;
     // Append the strict verdict-output contract to the (untrusted-declaring)
     // system prompt so the agent emits parseable per-thread decisions.
     const fullSystem = [
@@ -129,6 +136,8 @@ export function makePrResponseAgentRunner(
       settings,
       taskId,
       mcpServers,
+      mcpSettingsStore: store,
+      mcpServerScopeByName: resolvedPrResponseMcp?.scopeByServerName,
     });
     try {
       await withRateLimitRetry(async () => {

@@ -151,13 +151,22 @@ export class HybridEvaluatorService {
 
     let text = "";
     // FNXC:McpConfig 2026-06-25-23:05: Evaluator sessions are an AI lane and receive the store-resolved MCP set at session creation; createFnAgent applies runtime support gating without logging plaintext env/header secrets.
+    /*
+     * FNXC:McpConfig 2026-07-12-01:00:
+     * FUSI-077: resolve once and forward BOTH `.servers` and `.scopeByServerName` so a non-interactive OAuth
+     * refresh performed inside this evaluator session persists via the settings-backed McpOAuthTokenStore
+     * (FUSI-076) instead of falling back to the warn-only in-memory default.
+     */
+    const resolvedEvaluatorMcp = this.deps.store ? await resolveMcpServersForStore(this.deps.store) : undefined;
     const { session } = await createFnAgent({
       cwd: this.deps.cwd,
       systemPrompt: "You are a strict evaluator. Reply with JSON only.",
       tools: "readonly",
       defaultProvider: provider,
       defaultModelId: modelId,
-      mcpServers: this.deps.store ? (await resolveMcpServersForStore(this.deps.store)).servers : undefined,
+      mcpServers: resolvedEvaluatorMcp?.servers,
+      mcpSettingsStore: this.deps.store,
+      mcpServerScopeByName: resolvedEvaluatorMcp?.scopeByServerName,
       onText: (delta) => {
         text += delta;
       },

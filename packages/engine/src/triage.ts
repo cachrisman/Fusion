@@ -1141,6 +1141,14 @@ export class TriageProcessor {
           )
           : { provider: undefined, modelId: undefined };
 
+        /*
+         * FNXC:McpConfig 2026-07-12-01:00:
+         * FUSI-077: resolve once and forward BOTH `.servers` and `.scopeByServerName` so a non-interactive
+         * OAuth refresh performed inside this triage session persists via the settings-backed McpOAuthTokenStore
+         * (FUSI-076) instead of falling back to the warn-only in-memory default.
+         */
+        const resolvedTriageMcp = await resolveMcpServersForStore(this.store);
+
         const { session } = await createResolvedAgentSession({
           sessionPurpose: "triage",
           runtimeHint: triageRuntimeHint,
@@ -1169,7 +1177,10 @@ export class TriageProcessor {
           runAuditor,
           settings,
           // FNXC:McpConfig 2026-06-25-23:17: Primary triage planning is an AI lane, so it receives the store-resolved MCP set while the pi runtime-support guard decides whether to forward it without logging secret material.
-          mcpServers: (await resolveMcpServersForStore(this.store)).servers,
+          mcpServers: resolvedTriageMcp.servers,
+          // FNXC:McpConfig 2026-07-12-01:00: FUSI-077 — forward the owning store + scope map so OAuth refreshes persist via the settings-backed token store instead of the warn-only default.
+          mcpSettingsStore: this.store,
+          mcpServerScopeByName: resolvedTriageMcp.scopeByServerName,
           // Skill selection: use assigned agent skills if available, otherwise role fallback
           ...(skillContext.skillSelectionContext ? { skillSelection: skillContext.skillSelectionContext } : {}),
           taskId: task.id,

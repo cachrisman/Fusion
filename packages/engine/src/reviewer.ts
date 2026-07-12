@@ -403,6 +403,16 @@ export async function reviewStep(
       ...(memoryTools ?? []),
     ];
 
+    /*
+     * FNXC:McpConfig 2026-07-12-01:00:
+     * FUSI-077: resolve once and forward BOTH `.servers` and `.scopeByServerName` (not just `.servers`) so a
+     * non-interactive OAuth refresh performed inside this reviewer/validator session persists via the
+     * settings-backed McpOAuthTokenStore (FUSI-076) instead of falling back to the warn-only in-memory default.
+     */
+    const resolvedReviewerMcp = options.store
+      ? await resolveMcpServersForStore(options.store, { agentId: options.agentId })
+      : undefined;
+
     const { session } = await createResolvedAgentSession({
       sessionPurpose: "reviewer",
       runtimeHint: extractRuntimeHint(memoryAgent?.runtimeConfig),
@@ -428,7 +438,10 @@ export async function reviewStep(
       taskId: options.taskId,
       taskTitle: options.taskTitle,
       // FNXC:McpConfig 2026-06-25-22:45: Reviewer and validator sessions resolve the same trusted MCP server set as executor lanes at session creation; secret values are passed only in memory to the runtime guard.
-      mcpServers: options.store ? (await resolveMcpServersForStore(options.store, { agentId: options.agentId })).servers : undefined,
+      mcpServers: resolvedReviewerMcp?.servers,
+      // FNXC:McpConfig 2026-07-12-01:00: FUSI-077 — forward the owning store + scope map so OAuth refreshes persist via the settings-backed token store instead of the warn-only default.
+      mcpSettingsStore: options.store,
+      mcpServerScopeByName: resolvedReviewerMcp?.scopeByServerName,
       onFallbackModelUsed: createFallbackModelObserver({
         agent: "reviewer",
         label: "reviewer",
