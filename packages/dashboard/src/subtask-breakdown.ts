@@ -408,12 +408,23 @@ export async function decomposeForTriage(
     return generateFallbackSubtasks(description);
   }
 
-  const mcpServers = (await resolveMcpServersForStore(store ?? {})).servers;
+  const resolvedMcp = await resolveMcpServersForStore(store ?? {});
   /*
    * FNXC:McpConfig 2026-06-26-16:45:
    * Triage subtask decomposition is a readonly planning helper; when the dashboard triage hook provides a scoped store, resolve MCP at session creation and forward only the in-memory server set. Keep no-store callers on an empty MCP set and never log materialized secrets.
+   *
+   * FNXC:McpConfig 2026-07-12-18:20:
+   * FUSI-080: forward mcpSettingsStore + mcpServerScopeByName so a real store enables the settings-backed
+   * McpOAuthTokenStore; the no-store `{}` placeholder keeps the warn-only default.
    */
-  const agent: SubtaskAgent = await createFnAgent({ cwd, systemPrompt, tools: "readonly", mcpServers });
+  const agent: SubtaskAgent = await createFnAgent({
+    cwd,
+    systemPrompt,
+    tools: "readonly",
+    mcpServers: resolvedMcp.servers,
+    mcpSettingsStore: store ?? {},
+    mcpServerScopeByName: resolvedMcp.scopeByServerName,
+  });
   try {
     await agent.session.prompt(description);
     const messages = agent.session.state.messages as Array<{
@@ -536,16 +547,22 @@ async function generateSubtasks(
         FNXC:SubtaskBreakdown 2026-06-16-20:15:
         FN-6511 requires the full subtask generation lifecycle to be timeout-bounded, including createFnAgent construction before prompt() starts. Keep construction and prompt inside one GenerationGuard entry so a model-registry or extension-discovery stall cannot pin the SSE session in generating forever.
         */
-        const mcpServers = (await resolveMcpServersForStore(store ?? {})).servers;
+        const resolvedMcp = await resolveMcpServersForStore(store ?? {});
         /*
         FNXC:McpConfig 2026-06-26-16:45:
         Streaming subtask generation is a readonly planning helper that now carries the dashboard-scoped TaskStore into the timeout-bounded worker. Resolve MCP inside the GenerationGuard window and forward only counts/errors if diagnostics are added; never expose plaintext env/header secrets.
+
+        FNXC:McpConfig 2026-07-12-18:20:
+        FUSI-080: forward mcpSettingsStore + mcpServerScopeByName so a real store enables the settings-backed
+        McpOAuthTokenStore; the no-store `{}` placeholder keeps the warn-only default.
         */
         const agentPromise = createFnAgent({
           cwd,
           systemPrompt,
           tools: "readonly",
-          mcpServers,
+          mcpServers: resolvedMcp.servers,
+          mcpSettingsStore: store ?? {},
+          mcpServerScopeByName: resolvedMcp.scopeByServerName,
           onThinking: (delta: string) => {
             const current = sessions.get(sessionId);
             if (!current) return;

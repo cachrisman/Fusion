@@ -159,15 +159,21 @@ async function executeInsightAttempt(params: {
   const fallbackModelId = hasCustomModel ? settingsModelId : undefined;
 
   const existingInsights = await readInsightsMemory(params.rootDir);
-  const mcpServers = (await resolveMcpServersForStore(params.taskStore ?? {})).servers;
+  const resolvedMcp = await resolveMcpServersForStore(params.taskStore ?? {});
   let responseText = "";
   const { session } = await createFnAgent({
     cwd: params.rootDir,
     /*
      * FNXC:McpConfig 2026-06-26-16:58:
      * Insight extraction runs as a readonly dashboard helper under AsyncLocalStorage request scope. Resolve configured MCP servers from that scoped TaskStore at session creation; lightweight/no-store attempts get an empty set and diagnostics must never include materialized secret values.
+     *
+     * FNXC:McpConfig 2026-07-12-18:20:
+     * FUSI-080: forward mcpSettingsStore + mcpServerScopeByName so a real taskStore enables the
+     * settings-backed McpOAuthTokenStore; the no-store `{}` placeholder keeps the warn-only default.
      */
-    mcpServers,
+    mcpServers: resolvedMcp.servers,
+    mcpSettingsStore: params.taskStore ?? {},
+    mcpServerScopeByName: resolvedMcp.scopeByServerName,
     defaultProvider: finalProvider,
     defaultModelId: finalModelId,
     fallbackProvider,

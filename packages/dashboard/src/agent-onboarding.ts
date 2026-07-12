@@ -324,19 +324,25 @@ export async function startAgentOnboardingSession(
 async function createAgentOnboardingAgent(session: Session, store?: TaskStore): Promise<OnboardingAgent> {
   const systemPrompt = resolvePrompt("agent-onboarding-system", session.promptOverrides) || AGENT_ONBOARDING_SYSTEM_PROMPT;
   const skillContext = buildSessionSkillContextSync(null, "executor", session.rootDir, session.pluginRunner);
-  const mcpServers = (await resolveMcpServersForStore(store ?? {})).servers;
+  const resolvedMcp = await resolveMcpServersForStore(store ?? {});
   /*
    * FNXC:McpConfig 2026-06-26-17:26:
    * Agent onboarding interviews are dashboard readonly planning helpers. Resolve MCP from the request-scoped TaskStore when routes can provide it; no-store callers stay empty and this seam must not log secret material.
    *
    * FNXC:McpConfig 2026-06-26-18:10:
    * Retry can recover a session whose agent was not initialized, so the retry route must pass its scoped TaskStore into this same createFnAgent seam instead of continuing with secret-less defaults.
+   *
+   * FNXC:McpConfig 2026-07-12-18:20:
+   * FUSI-080: forward mcpSettingsStore + mcpServerScopeByName so a real store enables the settings-backed
+   * McpOAuthTokenStore; the no-store `{}` placeholder keeps the warn-only default.
    */
   return createFnAgent({
     cwd: session.rootDir,
     systemPrompt,
     tools: "readonly",
-    mcpServers,
+    mcpServers: resolvedMcp.servers,
+    mcpSettingsStore: store ?? {},
+    mcpServerScopeByName: resolvedMcp.scopeByServerName,
     ...(session.modelProvider && session.modelId ? { defaultProvider: session.modelProvider, defaultModelId: session.modelId } : {}),
     /*
     FNXC:InterviewSkills 2026-06-17-21:53:

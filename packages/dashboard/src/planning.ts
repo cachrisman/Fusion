@@ -62,10 +62,20 @@ type SkillPluginRunner = Parameters<typeof buildSessionSkillContextSync>[3];
 
 const PLANNING_BUILTIN_WEB_TOOLS = ["WebSearch", "WebFetch"] as const;
 type PlanningMcpServers = Awaited<ReturnType<typeof resolveMcpServersForStore>>["servers"];
+type PlanningMcpScopeByServerName = Awaited<ReturnType<typeof resolveMcpServersForStore>>["scopeByServerName"];
+/**
+ * FNXC:McpConfig 2026-07-12-18:20:
+ * FUSI-080 widens the planning helper shell to carry `scopeByServerName` alongside `servers` so no caller
+ * silently drops the map that `mcpSettingsStore`/`mcpServerScopeByName` threading needs downstream.
+ */
+interface ResolvedPlanningMcp {
+  servers: PlanningMcpServers;
+  scopeByServerName: PlanningMcpScopeByServerName;
+}
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let createFnAgent: any = engineCreateFnAgent;
 
-async function resolvePlanningMcpServers(store: TaskStore): Promise<PlanningMcpServers> {
+async function resolvePlanningMcpServers(store: TaskStore): Promise<ResolvedPlanningMcp> {
   const resolved = await resolveMcpServersForStore(store);
   /*
   FNXC:McpConfig 2026-07-02-13:45:
@@ -73,9 +83,9 @@ async function resolvePlanningMcpServers(store: TaskStore): Promise<PlanningMcpS
   Default only malformed test-seam output to an empty in-memory set so configured servers and secret-bearing materialized fields are never logged or persisted here.
   */
   if (!resolved || !Array.isArray(resolved.servers)) {
-    return [];
+    return { servers: [], scopeByServerName: {} };
   }
-  return resolved.servers;
+  return { servers: resolved.servers, scopeByServerName: resolved.scopeByServerName ?? {} };
 }
 
 // ── Notification Integration ────────────────────────────────────────────
@@ -1164,6 +1174,7 @@ export async function createSession(
   FNXC:PlanningSkills 2026-06-17-19:33:
   Planning sessions are agent-acting lanes with planning and workflow tools, so they must request the same executor role fallback plus enabled plugin skills (for example ce-debug) as task execution sessions.
   */
+  const planningMcp = await resolvePlanningMcpServers(store);
   const agentResult = await createFnAgent({
     cwd: rootDir,
     systemPrompt,
@@ -1172,7 +1183,10 @@ export async function createSession(
     builtinToolsAllowlist: [...PLANNING_BUILTIN_WEB_TOOLS],
     // FNXC:McpConfig 2026-06-25-22:31: Planning/chat session creation resolves trusted MCP servers through the dashboard-scoped store and forwards only the materialized in-memory set to the engine runtime guard.
     // FNXC:McpConfig 2026-06-29-00:00: Planning sessions are intentionally read-only but still need configured MCP documentation/context tools; opt in at the session boundary while preserving engine-side namespacing, filtering, wrappers, and disposal.
-    mcpServers: await resolvePlanningMcpServers(store),
+    // FNXC:McpConfig 2026-07-12-18:20: FUSI-080: forward mcpSettingsStore + mcpServerScopeByName alongside mcpServers so a non-interactive OAuth refresh during a planning session persists via the settings-backed McpOAuthTokenStore.
+    mcpServers: planningMcp.servers,
+    mcpSettingsStore: store,
+    mcpServerScopeByName: planningMcp.scopeByServerName,
     allowMcpToolsInReadonly: true,
     customTools: [
       ...createPlanningBoardTools(store),
@@ -1758,6 +1772,7 @@ async function createPlanningAgent(
   FNXC:PlanningSkills 2026-06-17-19:33:
   Streaming planning sessions share the executor skill contract because custom planning/workflow tools can benefit from agent-declared skills and enabled plugin skills exactly like task execution.
   */
+  const streamingPlanningMcp = await resolvePlanningMcpServers(store);
   return createFnAgent({
     cwd: rootDir,
     systemPrompt,
@@ -1766,7 +1781,10 @@ async function createPlanningAgent(
     builtinToolsAllowlist: [...PLANNING_BUILTIN_WEB_TOOLS],
     // FNXC:McpConfig 2026-06-25-22:31: Streaming planning uses the same dashboard-scoped MCP resolution seam as non-streaming planning so no planning lane silently drops enabled servers.
     // FNXC:McpConfig 2026-06-29-00:00: Streaming planning uses the explicit read-only MCP opt-in; non-planning read-only lanes remain denied unless they set the same reviewed policy flag.
-    mcpServers: await resolvePlanningMcpServers(store),
+    // FNXC:McpConfig 2026-07-12-18:20: FUSI-080: forward mcpSettingsStore + mcpServerScopeByName alongside mcpServers (same rationale as non-streaming createSession above).
+    mcpServers: streamingPlanningMcp.servers,
+    mcpSettingsStore: store,
+    mcpServerScopeByName: streamingPlanningMcp.scopeByServerName,
     allowMcpToolsInReadonly: true,
     customTools: [
       ...createPlanningBoardTools(store),

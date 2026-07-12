@@ -30,6 +30,10 @@ vi.mock("@fusion/engine", () => ({
   createFnAgent: mockCreateFnAgent,
   promptWithFallback: mockPromptWithFallback,
   resolveMcpServersForStore: mockResolveMcpServersForStore,
+  // FNXC:McpConfig 2026-07-12-18:20: FUSI-080's planning.ts coverage below also exercises
+  // createSession, which additionally imports these two engine helpers; stub them minimally.
+  createWorkflowAuthoringTools: () => [],
+  createChatTaskDocumentTools: () => [],
 }));
 
 const resolvedMcpServers = [
@@ -80,7 +84,9 @@ async function createInsightTaskStore(mode: boolean | "no-settings-scope"): Prom
 beforeEach(() => {
   vi.clearAllMocks();
   mockResolveMcpServersForStore.mockImplementation(async (store: { mcpEnabledForTest?: boolean }) => (
-    store?.mcpEnabledForTest ? { servers: resolvedMcpServers, errors: [] } : { servers: [], errors: [] }
+    store?.mcpEnabledForTest
+      ? { servers: resolvedMcpServers, errors: [], scopeByServerName: { docs: "project" } }
+      : { servers: [], errors: [], scopeByServerName: {} }
   ));
   mockPromptWithFallback.mockResolvedValue(undefined);
   mockCreateFnAgent.mockImplementation(async (options?: { onText?: (delta: string) => void; systemPrompt?: string }) => {
@@ -251,6 +257,77 @@ describe("MCP forwarding for readonly dashboard helper seams", () => {
       expect(mockCreateFnAgent).toHaveBeenCalledWith(expect.objectContaining({ tools: "readonly", mcpServers: expectedServers }));
     } finally {
       router.__disposeSweeper?.();
+      await store.close();
+      await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+    }
+  });
+});
+
+/*
+ * FNXC:McpConfig 2026-07-12-18:20:
+ * FUSI-080 adds explicit forwarding assertions for `mcpSettingsStore` + `mcpServerScopeByName`
+ * (the FUSI-076 seams) across a representative sample of the remaining helper lanes: a plain
+ * createFnAgent lane (agent generation), and the planning.ts helper-wrapped lane
+ * (resolvePlanningMcpServers -> createSession). chat.ts / pr-conflict-resolver.ts's
+ * createResolvedAgentSession lane is covered separately in mcp-lane-forwarding.test.ts (engine)
+ * and pr-conflict-resolver.test.ts (dashboard).
+ */
+describe("FUSI-080: mcpSettingsStore + mcpServerScopeByName forwarding (not just .servers)", () => {
+  it("agent generation forwards mcpSettingsStore + mcpServerScopeByName for a real store", async () => {
+    const { startAgentGeneration, generateAgentSpec } = await import("../agent-generation.js");
+    const session = await startAgentGeneration(`127.0.0.${Math.floor(Math.random() * 200) + 1}`, "Create a docs helper");
+    const store = createMcpEnabledStore();
+
+    await generateAgentSpec(session.id, "/tmp/project", undefined, store as never);
+
+    expect(mockCreateFnAgent).toHaveBeenCalledWith(expect.objectContaining({
+      mcpServers: resolvedMcpServers,
+      mcpSettingsStore: store,
+      mcpServerScopeByName: { docs: "project" },
+    }));
+  });
+
+  it("agent generation forwards the `{}` placeholder (not undefined) as mcpSettingsStore for the no-store path, preserving the warn-only default", async () => {
+    const { startAgentGeneration, generateAgentSpec } = await import("../agent-generation.js");
+    const session = await startAgentGeneration(`127.0.0.${Math.floor(Math.random() * 200) + 1}`, "Create a docs helper");
+
+    await generateAgentSpec(session.id, "/tmp/project", undefined, undefined);
+
+    const forwarded = mockCreateFnAgent.mock.calls.at(-1)?.[0] as { mcpSettingsStore?: unknown; mcpServerScopeByName?: unknown };
+    expect(forwarded.mcpSettingsStore).toEqual({});
+    expect(forwarded.mcpServerScopeByName).toEqual({});
+  });
+
+  it("planning's resolvePlanningMcpServers helper carries scopeByServerName through createSession, not just .servers", async () => {
+    const { __resetPlanningState, __setCreateFnAgent, createSession } = await import("../planning.js");
+    __resetPlanningState();
+    const { root, store } = await createInsightTaskStore(true);
+
+    let capturedOptions: Record<string, unknown> | undefined;
+    __setCreateFnAgent(async (options: Record<string, unknown>) => {
+      capturedOptions = options;
+      return {
+        session: {
+          state: { messages: [] },
+          prompt: vi.fn(async () => {
+            (capturedOptions!.onText as undefined | ((delta: string) => void));
+          }),
+          dispose: vi.fn(),
+        },
+      };
+    });
+
+    try {
+      await createSession("127.0.0.210", "Plan MCP forwarding coverage", store, root).catch(() => {
+        // The stub agent never produces a parseable first question; only the forwarded
+        // createFnAgent options (captured above) matter for this assertion.
+      });
+
+      expect(capturedOptions).toBeDefined();
+      expect(capturedOptions).toHaveProperty("mcpSettingsStore", store);
+      expect(capturedOptions).toHaveProperty("mcpServerScopeByName");
+    } finally {
+      __resetPlanningState();
       await store.close();
       await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     }

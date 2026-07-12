@@ -299,7 +299,7 @@ export async function generatePrMetadata(input: {
     if (descriptionGuidance) {
       systemPrompt.push(`Description guidance: ${descriptionGuidance}`);
     }
-    const mcpServers = (await raceWithAbort(resolveMcpServersForStore(store ?? {}), combinedSignal)).servers;
+    const resolvedMcp = await raceWithAbort(resolveMcpServersForStore(store ?? {}), combinedSignal);
     let aiText = "";
     const { session } = await raceWithAbort(createFnAgent({
       cwd: repoRoot,
@@ -307,8 +307,14 @@ export async function generatePrMetadata(input: {
       /*
        * FNXC:McpConfig 2026-06-26-16:58:
        * PR metadata generation is a readonly dashboard helper with a strict modal timeout. Resolve MCP through the request-scoped TaskStore inside the abort budget and forward only the materialized in-memory server set; no-store fallbacks stay empty and secret values must not be logged.
+       *
+       * FNXC:McpConfig 2026-07-12-18:20:
+       * FUSI-080: forward mcpSettingsStore + mcpServerScopeByName so a real store enables the settings-backed
+       * McpOAuthTokenStore; the no-store `{}` placeholder keeps the warn-only default.
        */
-      mcpServers,
+      mcpServers: resolvedMcp.servers,
+      mcpSettingsStore: store ?? {},
+      mcpServerScopeByName: resolvedMcp.scopeByServerName,
       defaultProvider: model.provider,
       defaultModelId: model.modelId,
       systemPrompt: systemPrompt.join("\n"),

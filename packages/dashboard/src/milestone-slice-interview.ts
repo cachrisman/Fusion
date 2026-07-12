@@ -759,13 +759,20 @@ export async function createTargetInterviewAgent(
   FNXC:McpConfig 2026-06-29-00:00:
   Milestone and slice interviews opt into MCP tools explicitly because they are planning-context lanes; other read-only sessions still skip MCP unless they make the same reviewed policy choice.
   */
-  const mcpServers = (await resolveMcpServersForStore(store)).servers;
+  const resolvedMcp = await resolveMcpServersForStore(store);
 
+  /*
+  FNXC:McpConfig 2026-07-12-18:20:
+  FUSI-080: forward mcpSettingsStore + mcpServerScopeByName alongside mcpServers so a non-interactive
+  OAuth refresh during a milestone/slice interview session persists via the settings-backed McpOAuthTokenStore.
+  */
   return createFnAgent({
     cwd: rootDir,
     systemPrompt: getSystemPrompt(session.targetType),
     tools: "readonly",
-    mcpServers,
+    mcpServers: resolvedMcp.servers,
+    mcpSettingsStore: store,
+    mcpServerScopeByName: resolvedMcp.scopeByServerName,
     allowMcpToolsInReadonly: true,
     customTools: [...createPlanningBoardTools(store)],
     /*

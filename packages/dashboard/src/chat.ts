@@ -2377,7 +2377,21 @@ export class ChatManager {
         */
         ...(mergedChatSkillSelection ? { skillSelection: mergedChatSkillSelection } : {}),
         // FNXC:McpConfig 2026-06-25-22:36: Dashboard chat/QuickChat reuses the scoped task store when available to resolve trusted MCP servers at session creation without persisting materialized secrets.
-        ...(this.taskStore ? { mcpServers: (await resolveMcpServersForStore(this.taskStore, { agentId: agent?.id })).servers } : {}),
+        // FNXC:McpConfig 2026-07-12-18:20:
+        // FUSI-080: forward mcpSettingsStore + mcpServerScopeByName alongside mcpServers so a non-interactive OAuth
+        // refresh during a chat/QuickChat session persists via the settings-backed McpOAuthTokenStore. Requires
+        // AgentRuntimeOptions.mcpSettingsStore/mcpServerScopeByName (added in agent-runtime.ts) since
+        // createResolvedAgentSession forwards all AgentRuntimeOptions fields verbatim to createFnAgent.
+        ...(this.taskStore
+          ? await (async () => {
+              const resolvedChatMcp = await resolveMcpServersForStore(this.taskStore!, { agentId: agent?.id });
+              return {
+                mcpServers: resolvedChatMcp.servers,
+                mcpSettingsStore: this.taskStore,
+                mcpServerScopeByName: resolvedChatMcp.scopeByServerName,
+              };
+            })()
+          : {}),
         ...sessionOptions,
       });
       this.activeGenerations.set(sessionId, { abortController, agentResult, generationId });

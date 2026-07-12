@@ -384,6 +384,10 @@ function makeMutatingAgent(store: TaskStore, settings: Settings, taskId: string,
         ? (_id: string, name: string) => options.onAgentTool?.(name)
         : undefined,
     });
+    // FNXC:McpConfig 2026-07-12-18:20:
+    // FUSI-080: capture the full { servers, scopeByServerName } result (not just .servers) so the
+    // owning scope map is available to forward alongside mcpSettingsStore below.
+    const mutatingMcp = await resolveMcpServersForStore(store);
     const { session } = await createResolvedAgentSession({
       sessionPurpose: "merger",
       pluginRunner: options.pluginRunner,
@@ -402,7 +406,14 @@ function makeMutatingAgent(store: TaskStore, settings: Settings, taskId: string,
       runAuditor: audit,
       settings,
       // FNXC:McpConfig 2026-06-25-22:48: merger-ai is the production merge path, so the mutating agent resolves enabled MCP servers at session creation and relies on the shared runtime guard for unsupported providers.
-      mcpServers: (await resolveMcpServersForStore(store)).servers,
+      // FNXC:McpConfig 2026-07-12-18:20:
+      // FUSI-080: forward the resolved store + scopeByServerName map (not just .servers) so
+      // createResolvedAgentSession -> DefaultPiRuntime -> createFnAgent builds the settings-backed
+      // McpOAuthTokenStore (buildMcpOAuthTokenStore) instead of falling back to the warn-only default.
+      // A non-interactive OAuth refresh during the mutating merge agent's session now persists.
+      mcpServers: mutatingMcp.servers,
+      mcpSettingsStore: store,
+      mcpServerScopeByName: mutatingMcp.scopeByServerName,
       taskId,
     });
     options.onSession?.(session);
@@ -446,6 +457,10 @@ function makeReviewAgent(store: TaskStore, settings: Settings, taskId: string, o
         ? (_id: string, name: string) => options.onAgentTool?.(name)
         : undefined,
     });
+    // FNXC:McpConfig 2026-07-12-18:20:
+    // FUSI-080: capture the full { servers, scopeByServerName } result (not just .servers) so the
+    // owning scope map is available to forward alongside mcpSettingsStore below.
+    const reviewMcp = await resolveMcpServersForStore(store);
     const { session } = await createResolvedAgentSession({
       sessionPurpose: "merger",
       pluginRunner: options.pluginRunner,
@@ -467,7 +482,12 @@ function makeReviewAgent(store: TaskStore, settings: Settings, taskId: string, o
       runAuditor: audit,
       settings,
       // FNXC:McpConfig 2026-06-25-22:48: The production merge reviewer receives the same materialized MCP set as the mutating merge agent, preserving all-lane forwarding without logging server contents.
-      mcpServers: (await resolveMcpServersForStore(store)).servers,
+      // FNXC:McpConfig 2026-07-12-18:20:
+      // FUSI-080: forward store + scopeByServerName so the review agent's session also gets the
+      // settings-backed McpOAuthTokenStore, not the warn-only default.
+      mcpServers: reviewMcp.servers,
+      mcpSettingsStore: store,
+      mcpServerScopeByName: reviewMcp.scopeByServerName,
       taskId,
     });
     options.onSession?.(session);

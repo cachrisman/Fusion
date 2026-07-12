@@ -78,7 +78,8 @@ export function createEngineMock(overrides: AnyModule = {}): AnyModule {
         || task.error.includes("Refusing to start coding agent in unregistered git worktree:"))
     )),
     // FNXC:McpConfig 2026-07-02-13:45: Planning/mission route tests share this engine mock; MCP resolution must return the full shaped empty result so readonly session creation can proceed without importing real engine stores.
-    resolveMcpServersForStore: vi.fn(async () => ({ servers: [], errors: [] })),
+    // FNXC:McpConfig 2026-07-12-18:20: FUSI-080 widens the shaped empty result to also carry `scopeByServerName: {}` so callers that now forward `mcpServerScopeByName` (not just `.servers`) do not silently receive `undefined` from this shared test double.
+    resolveMcpServersForStore: vi.fn(async () => ({ servers: [], errors: [], scopeByServerName: {} })),
     ...overrides,
   });
 }

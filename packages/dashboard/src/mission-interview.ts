@@ -878,12 +878,19 @@ export async function createMissionInterviewAgent(
   FNXC:McpConfig 2026-06-29-00:00:
   Mission interviews are read-only planning lanes that intentionally expose configured MCP context tools; the engine opt-in preserves the read-only default for unrelated validator sessions.
   */
-  const mcpServers = (await resolveMcpServersForStore(store)).servers;
+  const resolvedMcp = await resolveMcpServersForStore(store);
+  /*
+  FNXC:McpConfig 2026-07-12-18:20:
+  FUSI-080: forward mcpSettingsStore + mcpServerScopeByName alongside mcpServers so a non-interactive
+  OAuth refresh during a mission interview session persists via the settings-backed McpOAuthTokenStore.
+  */
   return createFnAgent({
     cwd: rootDir,
     systemPrompt: effectivePrompt,
     tools: "readonly",
-    mcpServers,
+    mcpServers: resolvedMcp.servers,
+    mcpSettingsStore: store,
+    mcpServerScopeByName: resolvedMcp.scopeByServerName,
     allowMcpToolsInReadonly: true,
     ...(skillContext.skillSelectionContext ? { skillSelection: skillContext.skillSelectionContext } : {}),
     builtinToolsAllowlist: [...MISSION_INTERVIEW_BUILTIN_WEB_TOOLS],

@@ -151,7 +151,13 @@ async function runResolutionAgent(params: {
    * FNXC:McpConfig 2026-06-26-00:00:
    * Create-PR conflict resolution is a merger-purpose coding-agent lane; forward configured MCP servers from the scoped task store so PR conflict work sees the same operator-approved tools as other merger surfaces.
    */
-  const mcpServers = (await resolveMcpServersForStore(store)).servers;
+  const resolvedMcp = await resolveMcpServersForStore(store);
+  /*
+   * FNXC:McpConfig 2026-07-12-18:20:
+   * FUSI-080: forward mcpSettingsStore + mcpServerScopeByName alongside mcpServers so a non-interactive OAuth
+   * refresh during PR conflict resolution persists via the settings-backed McpOAuthTokenStore, not the warn-only
+   * default. Requires AgentRuntimeOptions.mcpSettingsStore/mcpServerScopeByName (agent-runtime.ts).
+   */
   const { session } = await createResolvedAgentSession({
     cwd,
     systemPrompt: SESSION_PROMPT,
@@ -162,7 +168,9 @@ async function runResolutionAgent(params: {
     fallbackProvider: settings.fallbackProvider,
     fallbackModelId: settings.fallbackModelId,
     settings,
-    mcpServers,
+    mcpServers: resolvedMcp.servers,
+    mcpSettingsStore: store,
+    mcpServerScopeByName: resolvedMcp.scopeByServerName,
   });
 
   try {

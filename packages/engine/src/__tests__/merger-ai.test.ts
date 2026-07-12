@@ -406,6 +406,47 @@ describe("runAiMerge", () => {
     createResolvedAgentSessionMock.mockReset();
   });
 
+  it("forwards mcpSettingsStore + mcpServerScopeByName for BOTH the mutating merge agent and the review agent (FUSI-080)", async () => {
+    const { dir } = initRepoWithBranch({ branch: "fusion/fn-1" });
+    const { store } = makeStore(dir);
+
+    const calls: Array<Record<string, unknown>> = [];
+    createResolvedAgentSessionMock.mockImplementation(async (opts: any) => {
+      calls.push(opts);
+      const isReview = String(opts.systemPrompt ?? "").includes(REVIEW_VERDICT_MARKER);
+      const session = {
+        async prompt() {
+          opts.onText?.(isReview ? "REVIEW_VERDICT: approve" : "merge-agent-output");
+          if (!isReview) {
+            execSync("git merge --squash fusion/fn-1", { cwd: opts.cwd, stdio: "pipe" });
+            execSync("git add -A", { cwd: opts.cwd, stdio: "pipe" });
+            execSync('git commit -q -m "squash: feature"', { cwd: opts.cwd, stdio: "pipe" });
+          }
+        },
+        dispose: vi.fn(),
+        getSessionStats: vi.fn(() => ({ tokens: { input: 1, output: 1 } })),
+      };
+      return { session };
+    });
+
+    await runAiMerge(store, dir, "FN-1", { manual: true });
+
+    // Both the mutating merge agent and the review agent must have gone through createResolvedAgentSession.
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    for (const call of calls) {
+      // The lightweight test double lacks getSettingsByScope, so the real (unmocked)
+      // resolveMcpServersForStore resolves an empty scopeByServerName map — but the
+      // FUSI-080 wiring must still forward BOTH options rather than silently dropping
+      // them (the invariant this task is enforcing), never falling back to only `.servers`.
+      expect(call).toHaveProperty("mcpSettingsStore", store);
+      expect(call).toHaveProperty("mcpServerScopeByName");
+      expect(call.mcpServerScopeByName).toEqual({});
+      expect(Array.isArray(call.mcpServers)).toBe(true);
+    }
+
+    createResolvedAgentSessionMock.mockReset();
+  });
+
   it("includes the lineage trailer when the task has a lineageId", async () => {
     const { dir } = initRepoWithBranch({ branch: "fusion/fn-1" });
     const { store } = makeStore(dir, { lineageId: "lin-abc123" });

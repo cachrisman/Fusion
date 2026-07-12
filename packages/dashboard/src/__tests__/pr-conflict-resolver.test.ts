@@ -1,14 +1,17 @@
 // @vitest-environment node
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Settings, Task, TaskStore } from "@fusion/core";
 
-const { mockRunGitCommand, mockCreateResolvedAgentSession } = vi.hoisted(() => ({
+const { mockRunGitCommand, mockCreateResolvedAgentSession, mockResolveMcpServersForStore } = vi.hoisted(() => ({
   mockRunGitCommand: vi.fn(),
   mockCreateResolvedAgentSession: vi.fn(),
+  // FNXC:McpConfig 2026-07-12-18:20: FUSI-080 adds a mock for resolveMcpServersForStore so the
+  // conflict-resolution-agent path (which now forwards mcpSettingsStore/mcpServerScopeByName) is testable.
+  mockResolveMcpServersForStore: vi.fn(),
 }));
 
 vi.mock("../routes/resolve-diff-base.js", () => ({
@@ -17,6 +20,7 @@ vi.mock("../routes/resolve-diff-base.js", () => ({
 
 vi.mock("@fusion/engine", () => ({
   createResolvedAgentSession: mockCreateResolvedAgentSession,
+  resolveMcpServersForStore: mockResolveMcpServersForStore,
 }));
 
 import { resolvePrConflicts } from "../pr-conflict-resolver.js";
@@ -126,5 +130,57 @@ describe("resolvePrConflicts", () => {
     ], expect.stringContaining("conflict-fn-001"), 60000);
     expect(mockRunGitCommand).toHaveBeenCalledWith(["push", "-u", "origin", "fusion/fn-001"], expect.stringContaining("conflict-fn-001"), 60000);
     expect(store.logEntry).toHaveBeenCalledWith("FN-001", "Pushed PR branch after conflict-free merge", "fusion/fn-001");
+  });
+
+  it("forwards mcpSettingsStore + mcpServerScopeByName to createResolvedAgentSession during AI conflict resolution (FUSI-080)", async () => {
+    const rootDir = await createRootDir();
+    rootDirs.push(rootDir);
+    const store = createStore(createTask());
+    const scopeByServerName = { docs: "project" as const };
+    mockResolveMcpServersForStore.mockResolvedValue({ servers: [{ name: "docs" }], errors: [], scopeByServerName });
+
+    const tempWorktree = join(rootDir, ".fusion", "worktrees", "conflict-fn-001");
+
+    mockCreateResolvedAgentSession.mockImplementation(async () => ({
+      session: {
+        prompt: vi.fn(async () => {
+          await writeFile(join(tempWorktree, "conflicted.txt"), "resolved\n");
+        }),
+      },
+    }));
+
+    mockRunGitCommand
+      // FUSI-080: `runGitCommand` is fully mocked here so the real `git worktree add` never runs;
+      // resolvePrConflicts unconditionally `rm`s the temp worktree dir just before this call, so
+      // create the conflicted file's directory/content as a side effect of the mocked "worktree add"
+      // instead of before invoking resolvePrConflicts (which would be deleted by that rm).
+      .mockImplementationOnce(async () => {
+        await mkdir(tempWorktree, { recursive: true });
+        await writeFile(join(tempWorktree, "conflicted.txt"), "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> main\n");
+        return "";
+      }) // worktree add
+      .mockResolvedValueOnce("") // checkout task branch
+      .mockRejectedValueOnce(new Error("merge conflict")) // merge --no-commit --no-ff base
+      .mockResolvedValueOnce("conflicted.txt\n") // diff --name-only --diff-filter=U (listConflictedFiles)
+      .mockResolvedValueOnce("") // add -A (stageAndCommitIfNeeded)
+      .mockRejectedValueOnce(Object.assign(new Error("diff has changes"), { code: 1 })) // hasStagedChanges => true
+      .mockResolvedValueOnce("") // commit
+      .mockResolvedValueOnce("") // push
+      .mockResolvedValueOnce(""); // worktree remove
+
+    const result = await resolvePrConflicts({
+      taskId: "FN-001",
+      baseRef: "main",
+      rootDir,
+      store,
+      settings,
+    });
+
+    expect(result.resolved).toBe(true);
+    expect(mockCreateResolvedAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      mcpServers: [{ name: "docs" }],
+      mcpSettingsStore: store,
+      mcpServerScopeByName: scopeByServerName,
+    }));
   });
 });

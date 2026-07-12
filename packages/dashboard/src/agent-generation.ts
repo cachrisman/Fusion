@@ -500,16 +500,22 @@ async function generateSpecWithAI(
   // Resolve the system prompt using prompt overrides (with fallback to default)
   const effectiveSystemPrompt = resolvePrompt("agent-generation-system", promptOverrides) || AGENT_GENERATION_SYSTEM_PROMPT;
 
-  const mcpServers = (await resolveMcpServersForStore(store ?? {})).servers;
+  const resolvedMcp = await resolveMcpServersForStore(store ?? {});
   /*
    * FNXC:McpConfig 2026-06-26-16:58:
    * Agent onboarding generation is a tools:none readonly helper, but routes can provide a dashboard-scoped TaskStore. Forward the resolved in-memory MCP server set consistently without changing tool semantics; no-store callers remain empty and secrets are never logged.
+   *
+   * FNXC:McpConfig 2026-07-12-18:20:
+   * FUSI-080: forward mcpSettingsStore + mcpServerScopeByName so a real store enables the settings-backed
+   * McpOAuthTokenStore; the no-store `{}` placeholder keeps the warn-only default.
    */
   const agent = await createFnAgent({
     cwd: rootDir,
     systemPrompt: effectiveSystemPrompt,
     tools: "none",
-    mcpServers,
+    mcpServers: resolvedMcp.servers,
+    mcpSettingsStore: store ?? {},
+    mcpServerScopeByName: resolvedMcp.scopeByServerName,
   });
 
   try {

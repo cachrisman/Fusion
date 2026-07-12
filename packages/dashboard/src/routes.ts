@@ -14,8 +14,7 @@ import os from "node:os";
 import v8 from "node:v8";
 
 import type { AnthropicProviderRegistration, TaskStore, ScheduleType, ActivityEventType, ModelPreset, RoutineTriggerType, McpServerDefinition, McpSecretRef, ResolvedMcpServerDefinition } from "@fusion/core";
-import { isMcpSecretRef } from "@fusion/core";
-import {
+import { isMcpSecretRef } from "@fusion/core";import {
   type Task,
   type PiExtensionEntry,
   type PiExtensionSettings,

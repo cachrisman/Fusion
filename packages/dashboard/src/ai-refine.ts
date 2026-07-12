@@ -333,16 +333,23 @@ export async function refineText(
 
   const effectivePrompt = resolvePrompt("ai-refine-system", promptOverrides);
 
-  const mcpServers = (await resolveMcpServersForStore(store ?? {})).servers;
+  const resolvedMcp = await resolveMcpServersForStore(store ?? {});
   /*
    * FNXC:McpConfig 2026-06-26-16:55:
    * Text refinement is a readonly dashboard helper that receives the request-scoped TaskStore from routes. Resolve configured MCP servers at session creation and forward only the in-memory server set; keep no-store callers on an empty set and never log materialized secrets.
+   *
+   * FNXC:McpConfig 2026-07-12-18:20:
+   * FUSI-080: also forward mcpSettingsStore (the store, or the no-store `{}` placeholder) + mcpServerScopeByName
+   * so createFnAgent builds the settings-backed McpOAuthTokenStore when a real store is present; the `{}`
+   * placeholder path keeps the existing warn-only default (buildMcpOAuthTokenStore returns undefined for it).
    */
   const agentResult = await createFnAgent({
     cwd: rootDir,
     systemPrompt: effectivePrompt,
     tools: "readonly",
-    mcpServers,
+    mcpServers: resolvedMcp.servers,
+    mcpSettingsStore: store ?? {},
+    mcpServerScopeByName: resolvedMcp.scopeByServerName,
   });
 
   if (!agentResult?.session) {
@@ -406,16 +413,21 @@ export async function draftGoalDescription(
     throw new AiServiceError("AI engine not available");
   }
 
-  const mcpServers = (await resolveMcpServersForStore(store ?? {})).servers;
+  const resolvedMcp = await resolveMcpServersForStore(store ?? {});
   /*
    * FNXC:McpConfig 2026-06-26-16:55:
    * Goal description drafting shares the text-refine readonly helper seam and now resolves MCP from the dashboard-scoped TaskStore when routes can provide it. No-store callers intentionally receive an empty server set; do not log env/header secret values.
+   *
+   * FNXC:McpConfig 2026-07-12-18:20:
+   * FUSI-080: forward mcpSettingsStore + mcpServerScopeByName alongside mcpServers (same rationale as refineText above).
    */
   const agentResult = await createFnAgent({
     cwd: rootDir,
     systemPrompt: GOAL_DRAFT_SYSTEM_PROMPT,
     tools: "readonly",
-    mcpServers,
+    mcpServers: resolvedMcp.servers,
+    mcpSettingsStore: store ?? {},
+    mcpServerScopeByName: resolvedMcp.scopeByServerName,
   });
 
   if (!agentResult?.session) {

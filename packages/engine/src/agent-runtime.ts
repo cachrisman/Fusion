@@ -15,12 +15,13 @@
  */
 
 import type { AgentSession, SessionManager, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { PermanentAgentGatingContext, ResolvedMcpServerDefinition } from "@fusion/core";
+import type { PermanentAgentGatingContext, ResolvedMcpServerDefinition, SecretScope } from "@fusion/core";
 import type { SkillSelectionContext } from "./skill-resolver.js";
 import type { FallbackModelUsedPayload } from "./pi.js";
 import type { AgentActionGateContext } from "./agent-action-gate.js";
 import type { SystemPromptLayers } from "./prompt-layers.js";
 import type { PluginRunner } from "./plugin-runner.js";
+import type { McpSettingsAndSecretsStore } from "./mcp-resolution.js";
 
 /**
  * Options for creating an agent session.
@@ -133,6 +134,20 @@ export interface AgentRuntimeOptions {
    * logging server contents.
    */
   mcpServers?: AgentRuntimeMcpServerConfig[];
+  /**
+   * FNXC:McpConfig 2026-07-12-18:20:
+   * FUSI-080 — optional store-backed MCP OAuth token-store writeback seam.
+   * `createResolvedAgentSession` callers (chat.ts, pr-conflict-resolver.ts)
+   * that resolve MCP servers via `resolveMcpServersForStore` forward both of
+   * these through here so `DefaultPiRuntime.createSession` passes them into
+   * `createFnAgent`, which builds the settings-backed `McpOAuthTokenStore` via
+   * `buildMcpOAuthTokenStore` instead of falling back to
+   * `createWarnOnlyMcpOAuthTokenStore`. Mirrors `AgentOptions.mcpSettingsStore`
+   * / `AgentOptions.mcpServerScopeByName` in pi.ts.
+   */
+  mcpSettingsStore?: McpSettingsAndSecretsStore;
+  /** Scope (project/global) each named MCP server was resolved from; forwarded alongside `mcpSettingsStore` (see above). */
+  mcpServerScopeByName?: Record<string, SecretScope>;
   /** Optional task-scoped environment variables for session-local subprocesses. */
   taskEnv?: NodeJS.ProcessEnv;
   /**
