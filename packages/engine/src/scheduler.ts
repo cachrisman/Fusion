@@ -38,6 +38,8 @@ import { createRunAuditor, generateSyntheticRunId } from "./run-audit.js";
 import { isWorkflowColumnsEnabled, DEFAULT_WORKFLOW_POOL_ID, resolveWorkflowIrForTask } from "@fusion/core";
 import { runHoldReleaseSweep, isUnplannedForExecution, type SlotReservation } from "./hold-release.js";
 import { evaluateParkedAgentTaskLink } from "./task-agent-sync.js";
+import { computeEffectiveMaxConcurrent } from "./adaptive-concurrency.js";
+import type { UsageControlSnapshot } from "./self-healing.js";
 
 function shouldRunWorkflowColumnScheduler(_settings: Settings): boolean {
   /*
@@ -526,6 +528,15 @@ export interface SchedulerOptions {
   localNodeId?: string;
   /** Optional shared auto-claim snapshot manager for invalidation on task mutations. */
   snapshotManager?: AutoClaimSnapshotManager;
+  /**
+   * FUSI-057/FUSI-059: dashboard-injected live-usage-snapshot provider (the same
+   * seam consumed by SelfHealingManager for FUSI-058's proactive pause). Honors
+   * the existing 30s `fetchAllProviderUsage` cache — the scheduler does not poll a
+   * second time. Returns `null` when usage is unknown/unavailable. Used to compute
+   * an adaptive effective maxConcurrent cap (see `computeEffectiveMaxConcurrent`);
+   * never touches the hard-429 `UsageLimitPauser` path.
+   */
+  getUsageControlSnapshot?: () => Promise<UsageControlSnapshot | null>;
 }
 
 /**
@@ -1243,6 +1254,23 @@ export class Scheduler {
    * both could start tasks whose file scopes overlap — defeating the
    * overlap detection that relies on `inProgressScopes` being accurate.
    */
+  /**
+   * FNXC:UsageControl 2026-07-11-14:30 (FUSI-059): wraps the FUSI-057 DI callback so a
+   * rejected promise or an absent provider never throws out of the scheduler tick —
+   * usage-unknown is treated identically to "no snapshot" (null), which
+   * `computeEffectiveMaxConcurrent` already handles as feature-off/full-cap.
+   */
+  private async fetchUsageControlSnapshotSafe(): Promise<UsageControlSnapshot | null> {
+    const provider = this.options.getUsageControlSnapshot;
+    if (!provider) return null;
+    try {
+      return (await provider()) ?? null;
+    } catch (error) {
+      schedulerLog.warn("getUsageControlSnapshot provider failed (continuing with static cap)", error);
+      return null;
+    }
+  }
+
   async schedule(): Promise<void> {
     if (!this.running) return;
     if (this.scheduling) return;
@@ -1342,7 +1370,24 @@ export class Scheduler {
         return;
       }
 
-      const maxConcurrent = settings.maxConcurrent ?? this.options.maxConcurrent ?? 2;
+      /*
+      FNXC:UsageControl 2026-07-11-14:30 (FUSI-059):
+      Fetch the FUSI-057 usage snapshot ONCE per schedule() tick (the dashboard-injected
+      provider already honors fetchAllProviderUsage's 30s cache, so this is not a new
+      poller). A rejected/undefined provider yields null and never throws out of the
+      scheduler tick. The effective cap GLIDES down from the static maxConcurrent as
+      usage rises from usageThrottleThresholdPercent toward usagePauseThresholdPercent —
+      see computeEffectiveMaxConcurrent for the full contract. Feature-off
+      (usageThrottleThresholdPercent undefined) yields the exact static cap, unchanged.
+      */
+      const usageControlSnapshot = await this.fetchUsageControlSnapshotSafe();
+      const baseMaxConcurrent = settings.maxConcurrent ?? this.options.maxConcurrent ?? 2;
+      const maxConcurrent = computeEffectiveMaxConcurrent({
+        snapshot: usageControlSnapshot,
+        baseMaxConcurrent,
+        throttleThresholdPercent: settings.usageThrottleThresholdPercent,
+        pauseThresholdPercent: settings.usagePauseThresholdPercent,
+      });
       const maxWorktrees = settings.maxWorktrees ?? this.options.maxWorktrees ?? 4;
 
       // Count only in-progress tasks toward the worktree limit.
@@ -2175,7 +2220,23 @@ export class Scheduler {
   private async runHoldReleaseSweepPass(tasks: Task[], settings: Settings): Promise<void> {
     try {
       const maxWorktrees = settings.maxWorktrees ?? this.options.maxWorktrees ?? 4;
-      const maxConcurrent = settings.maxConcurrent ?? this.options.maxConcurrent ?? 2;
+      /*
+      FNXC:UsageControl 2026-07-11-14:30 (FUSI-059):
+      The hold/release sweep runs BEFORE the primary schedule() maxConcurrent read (this
+      pass owns todo\u2192in-progress dispatch when workflow columns are the active scheduler),
+      so it fetches its own usage snapshot rather than receiving one from the caller. This is
+      a second `getUsageControlSnapshot()` call within the same tick, but the FUSI-057
+      provider already reuses `fetchAllProviderUsage`'s 30s cache \u2014 no new provider API
+      pressure. Same effective-cap contract as the primary read.
+      */
+      const usageControlSnapshot = await this.fetchUsageControlSnapshotSafe();
+      const baseMaxConcurrent = settings.maxConcurrent ?? this.options.maxConcurrent ?? 2;
+      const maxConcurrent = computeEffectiveMaxConcurrent({
+        snapshot: usageControlSnapshot,
+        baseMaxConcurrent,
+        throttleThresholdPercent: settings.usageThrottleThresholdPercent,
+        pauseThresholdPercent: settings.usagePauseThresholdPercent,
+      });
       let reservedWorktreeSlots = tasks.filter((task) => task.column === "in-progress").length;
       let reservedConcurrentSlots = reservedWorktreeSlots;
       const inProgressTaskIds = tasks.filter((task) => task.column === "in-progress").map((task) => task.id);

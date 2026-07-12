@@ -514,6 +514,15 @@ export class InProcessRuntime
           return validateProjectNodeMapping({ nodeId, mappedPath });
         },
         snapshotManager: autoClaimSnapshotManager,
+        /*
+        FNXC:UsageControl 2026-07-11-14:30 (FUSI-059):
+        A STABLE closure that reads `this.usageControlSnapshotProvider` at CALL time (not
+        captured by value here), so a dashboard rewire via `setUsageControlSnapshotProvider`
+        AFTER this Scheduler is constructed is still honored — mirrors the same late-injection
+        pattern already used for `setUsageLimitPauser`. The scheduler and self-healing
+        (FUSI-058) share this single dashboard-injected usage source.
+        */
+        getUsageControlSnapshot: () => this.usageControlSnapshotProvider?.() ?? Promise.resolve(null),
 
       });
 
@@ -1654,6 +1663,10 @@ export class InProcessRuntime
    * if the manager already exists, it is also pushed there immediately so a post-start
    * rewire (the dashboard's actual timing, once `authStorage` becomes available) takes
    * effect without a restart. Consuming this for pause/throttle behavior is FUSI-058/FUSI-059.
+   *
+   * FUSI-059 (this task): this same provider reference is also read by the Scheduler
+   * (via a stable closure passed at `new Scheduler(...)` construction time), so the
+   * scheduler dispatch gate and self-healing share one dashboard-injected usage source.
    */
   setUsageControlSnapshotProvider(provider: (() => Promise<UsageControlSnapshot | null>) | undefined): void {
     this.usageControlSnapshotProvider = provider;

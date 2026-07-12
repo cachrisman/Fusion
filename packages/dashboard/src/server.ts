@@ -886,9 +886,10 @@ export function createServer(store: TaskStore, options?: ServerOptions): ReturnT
     `authStorage` (resolved above, explicit-or-engine-derived) and `engine` are both in
     scope — the only place both are guaranteed available together. The provider re-fetches
     through `fetchAllProviderUsage`, which already carries its own 30s cache, so this does
-    NOT add a second poller or new provider API pressure. This is DI-only in this task: the
-    callback is stored on `SelfHealingOptions` but not consumed for pause/throttle behavior
-    (that's FUSI-058/FUSI-059).
+    NOT add a second poller or new provider API pressure. Consumed for adaptive-concurrency
+    dispatch shaping by FUSI-059 (scheduler) and for proactive-threshold pause by FUSI-058
+    (self-healing) via the shared `SelfHealingManager.setUsageControlSnapshotProvider` /
+    `InProcessRuntime.setUsageControlSnapshotProvider` seam.
     */
     if (options!.authStorage) {
       const authStorageForUsage = options!.authStorage;

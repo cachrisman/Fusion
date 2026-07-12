@@ -1780,6 +1780,43 @@ Within `Scheduler.schedule()` dispatch for `todo` tasks now runs node gates in t
 
 This preserves a clear separation between configuration correctness (mapping exists) and runtime health/failover policy.
 
+### Adaptive effective concurrency (usage-aware dispatch pacing, FUSI-059)
+
+Both `maxConcurrent` reads in `scheduler.ts` — the primary `schedule()` pass and the
+hold/release reservation sweep (`runHoldReleaseSweepPass`, the sole todo\u2192in-progress
+dispatcher in this codebase) — no longer use the STATIC `settings.maxConcurrent ?? options.maxConcurrent ?? 2`
+cap directly. Instead they compute an EFFECTIVE cap via the pure helper
+`computeEffectiveMaxConcurrent` (`packages/engine/src/adaptive-concurrency.ts`):
+
+- **Feature OFF** (`usageThrottleThresholdPercent` undefined, or no live usage snapshot):
+  the effective cap equals the static cap exactly \u2014 byte-for-byte identical to
+  pre-FUSI-059 behavior.
+- **Below `usageThrottleThresholdPercent`**: full static cap.
+- **Between `usageThrottleThresholdPercent` and `usagePauseThresholdPercent`**: the cap
+  linearly interpolates from the full static cap down to a floor of `1` (rounded with
+  `Math.round`). When `usagePauseThresholdPercent` is undefined the ramp ceiling defaults
+  to 100.
+- **At/over `usagePauseThresholdPercent`**: floor of `1` while unpaused. This helper never
+  decides the hard pause itself \u2014 the actual global pause at/above this threshold is
+  FUSI-058's proactive-threshold pause, and the pre-existing hard-429 `UsageLimitPauser`
+  path is untouched by this change.
+- **Pace-aware step-down**: when the live snapshot's weekly `pace === "ahead"` (burning
+  quota faster than the even-pace budget), the interpolated cap is reduced by one
+  additional step once usage is at/above the throttle threshold, clamped to the floor of
+  `1`. Pace never throttles a board whose usage is still below the throttle threshold.
+
+The live usage snapshot is read once per `schedule()` tick (and independently, but
+cache-cheaply, once per `runHoldReleaseSweepPass` call) via the FUSI-057-injected
+`SchedulerOptions.getUsageControlSnapshot` callback, which is wired from
+`InProcessRuntime.setUsageControlSnapshotProvider` \u2014 the same dashboard-injected
+provider consumed by `SelfHealingManager` for FUSI-058. The provider reuses the existing
+30s `fetchAllProviderUsage` cache, so this adds no new provider API pressure. A
+rejected/undefined provider is treated as "no snapshot" (`null`), which resolves to the
+feature-off/full-cap behavior — a usage-fetch failure never blocks dispatch.
+
+See `docs/settings-reference.md` for the `usageThrottleThresholdPercent` /
+`usagePauseThresholdPercent` settings themselves.
+
 ### Unavailable-node policy
 
 `unavailableNodePolicy` is a validated/stored project setting (`block` default, `fallback-local` allowed) and is enforced during scheduler dispatch when both conditions are true:

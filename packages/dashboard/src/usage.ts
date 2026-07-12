@@ -2127,10 +2127,7 @@ on `SelfHealingOptions`, see `packages/engine/src/self-healing.ts`) that calls
 snapshot without ever importing this file. This generalizes FUSI-053's `resolveRateLimitResetAt`
 / `getRateLimitResetAt` seam: `soonestResetAt`/`soonestResetMs` here subsume that reset time, so
 a future refactor could derive `getRateLimitResetAt`'s return from this snapshot instead of
-maintaining a parallel reducer. As of this task, FUSI-053 had NOT landed on this branch's base
-(its commits exist in git history but are not an ancestor of HEAD), so this seam was added
-alongside rather than by extending FUSI-053's code directly; FUSI-053's `getRateLimitResetAt`
-path is untouched by this change.
+maintaining a parallel reducer. FUSI-053's `getRateLimitResetAt` path is untouched by this change.
 */
 
 /**
