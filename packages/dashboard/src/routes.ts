@@ -13,7 +13,8 @@ import * as nodeFs from "node:fs";
 import os from "node:os";
 import v8 from "node:v8";
 
-import type { AnthropicProviderRegistration, TaskStore, ScheduleType, ActivityEventType, ModelPreset, RoutineTriggerType, McpServerDefinition } from "@fusion/core";
+import type { AnthropicProviderRegistration, TaskStore, ScheduleType, ActivityEventType, ModelPreset, RoutineTriggerType, McpServerDefinition, McpSecretRef } from "@fusion/core";
+import { isMcpSecretRef } from "@fusion/core";
 import {
   type Task,
   type PiExtensionEntry,
@@ -381,6 +382,14 @@ import {
   isInProcessBackupCommand,
   isInProcessMemoryBackupCommand,
   formatInProcessBackupError,
+  startMcpOAuthAuthorize,
+  completeMcpOAuthCallback,
+  hasMcpOAuthAuth,
+  McpOAuthNotConfiguredError,
+  McpOAuthStateRequiredError,
+  McpOAuthVerifierMissingError,
+  type McpOAuthAuthorizeStore,
+  type McpOAuthTokenBundle,
 } from "@fusion/engine";
 
 interface McpValidateRequestBody {
@@ -465,6 +474,181 @@ async function resolveMcpServerForValidation(
     throw badRequest("MCP server was not found or could not be resolved");
   }
   return server;
+}
+
+/*
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * Phase 3 (this block) is the ONLY place the dashboard hosts the interactive, one-time MCP OAuth authorize.
+ * Two bounded in-memory maps back the flow for the lifetime of this process:
+ *   - `mcpOAuthPendingStates`: CSRF `state` -> which (scope, serverName) minted it, with a short TTL. The
+ *     callback route consumes (reads-and-deletes) the entry, so a replayed callback with the same `state`
+ *     finds nothing and is rejected — this is the AUTHORITATIVE CSRF check (the engine helper's own `state`
+ *     requirement is a defense-in-depth non-empty-value guard only, not a comparison).
+ *   - the `McpOAuthAuthorizeStore` adapter's per-server PKCE verifier cache: saved at authorize-start,
+ *     consumed exactly once by the engine's `completeMcpOAuthCallback` during token exchange, so a second
+ *     exchange attempt for the same authorize round trip fails with `McpOAuthVerifierMissingError`.
+ * Token bundles and DCR-issued client credentials are NEVER held as plaintext beyond the single call that
+ * needs them — they are persisted as Fusion secret refs into the server's `mcpServers.servers[]` entry in the
+ * scope ("global" or "project") the caller specifies, mirroring the existing FUSI-073 secret-ref-only
+ * convention. Only server name / transport / coarse status are ever logged — never code/token/url material.
+ */
+const MCP_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+interface McpOAuthPendingState {
+  scope: "global" | "project";
+  serverName: string;
+  expiresAt: number;
+}
+
+const mcpOAuthPendingStates = new Map<string, McpOAuthPendingState>();
+
+function generateMcpOAuthId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `mcp-oauth-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+}
+
+function mintMcpOAuthState(scope: "global" | "project", serverName: string): string {
+  const now = Date.now();
+  for (const [key, entry] of mcpOAuthPendingStates) {
+    if (entry.expiresAt <= now) mcpOAuthPendingStates.delete(key);
+  }
+  const state = generateMcpOAuthId();
+  mcpOAuthPendingStates.set(state, { scope, serverName, expiresAt: now + MCP_OAUTH_STATE_TTL_MS });
+  return state;
+}
+
+/** Reads-and-deletes the pending state entry; a second call for the same `state` returns `undefined` (replay-proof). */
+function consumeMcpOAuthState(state: string): McpOAuthPendingState | undefined {
+  const entry = mcpOAuthPendingStates.get(state);
+  mcpOAuthPendingStates.delete(state);
+  if (!entry || entry.expiresAt <= Date.now()) return undefined;
+  return entry;
+}
+
+interface McpOAuthRouteRequestBody {
+  scope?: unknown;
+  name?: unknown;
+}
+
+function parseMcpOAuthRouteBody(body: unknown): { scope: "global" | "project"; name: string } {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw badRequest("Request body must be an object");
+  }
+  const input = body as McpOAuthRouteRequestBody;
+  if (input.scope !== "global" && input.scope !== "project") {
+    throw badRequest("scope must be either global or project");
+  }
+  if (typeof input.name !== "string" || !input.name.trim()) {
+    throw badRequest("name must be a non-empty string");
+  }
+  return { scope: input.scope, name: input.name.trim() };
+}
+
+/** Finds the raw (unresolved) server definition + its containing settings scope for oauth read/writeback. */
+async function findRawMcpServerDefinition(
+  scopedStore: TaskStore,
+  scope: "global" | "project",
+  serverName: string,
+): Promise<{ enabled: boolean; servers: McpServerDefinition[]; index: number; server: McpServerDefinition }> {
+  const settingsByScope = await scopedStore.getSettingsByScopeFast();
+  const settings = scope === "global" ? settingsByScope.global.mcpServers : settingsByScope.project.mcpServers;
+  const servers = settings?.servers ?? [];
+  const index = servers.findIndex((candidate) => candidate.name === serverName);
+  if (index < 0) {
+    throw badRequest("MCP server was not found in the given scope");
+  }
+  return { enabled: settings?.enabled ?? true, servers, index, server: servers[index]! };
+}
+
+async function upsertMcpOAuthSecret(
+  scopedStore: TaskStore,
+  scope: "global" | "project",
+  key: string,
+  plaintextValue: string,
+): Promise<McpSecretRef> {
+  const secretsStore = await scopedStore.getSecretsStore();
+  const existing = secretsStore.listSecrets(scope).find((candidate) => candidate.key === key);
+  if (existing) {
+    await secretsStore.updateSecret(existing.id, scope, { plaintextValue });
+    return { secretRef: existing.id, scope };
+  }
+  const created = await secretsStore.createSecret({ scope, key, plaintextValue });
+  return { secretRef: created.id, scope };
+}
+
+/**
+ * Builds the `McpOAuthAuthorizeStore` adapter that persists tokens/DCR client info as Fusion secret refs into
+ * the given scope's `mcpServers.servers[]` entry, and backs the PKCE code-verifier round trip with a bounded
+ * in-memory cache scoped to this process (short-lived — the interactive flow completes within one browser
+ * round trip). Never logs plaintext token/secret values.
+ */
+function createDashboardMcpOAuthAuthorizeStore(scopedStore: TaskStore, scope: "global" | "project"): McpOAuthAuthorizeStore {
+  const verifiers = new Map<string, string>();
+
+  async function writeAuthPatch(serverName: string, patch: Record<string, unknown>): Promise<void> {
+    const { enabled, servers, index, server } = await findRawMcpServerDefinition(scopedStore, scope, serverName);
+    if (server.transport === "stdio" || !server.auth) return;
+    const nextServers = servers.slice();
+    nextServers[index] = { ...server, auth: { ...server.auth, ...patch } } as McpServerDefinition;
+    if (scope === "global") {
+      await scopedStore.updateGlobalSettings({ mcpServers: { enabled, servers: nextServers } });
+    } else {
+      await scopedStore.updateSettings({ mcpServers: { enabled, servers: nextServers } });
+    }
+  }
+
+  return {
+    async saveTokens(serverName: string, tokens: McpOAuthTokenBundle) {
+      const patch: Record<string, unknown> = { expiresAt: tokens.expiresAt };
+      if (tokens.accessToken !== undefined) {
+        patch.accessToken = await upsertMcpOAuthSecret(scopedStore, scope, `mcp-oauth:${serverName}:access-token`, tokens.accessToken);
+      }
+      if (tokens.refreshToken !== undefined) {
+        patch.refreshToken = await upsertMcpOAuthSecret(scopedStore, scope, `mcp-oauth:${serverName}:refresh-token`, tokens.refreshToken);
+      }
+      await writeAuthPatch(serverName, patch);
+    },
+    async saveClientInformation(serverName: string, info: { client_id: string; client_secret?: string }) {
+      const patch: Record<string, unknown> = { clientId: info.client_id };
+      if (info.client_secret !== undefined) {
+        patch.clientSecret = await upsertMcpOAuthSecret(scopedStore, scope, `mcp-oauth:${serverName}:client-secret`, info.client_secret);
+      }
+      await writeAuthPatch(serverName, patch);
+    },
+    async loadClientInformation(serverName: string) {
+      const { server } = await findRawMcpServerDefinition(scopedStore, scope, serverName);
+      if (server.transport === "stdio" || !server.auth?.clientId) return undefined;
+      let clientSecret: string | undefined;
+      if (server.auth.clientSecret !== undefined) {
+        if (isMcpSecretRef(server.auth.clientSecret)) {
+          const secretsStore = await scopedStore.getSecretsStore();
+          const revealed = await secretsStore.revealSecret(server.auth.clientSecret.secretRef, server.auth.clientSecret.scope, {});
+          clientSecret = revealed.plaintextValue;
+        } else {
+          clientSecret = server.auth.clientSecret;
+        }
+      }
+      return { client_id: server.auth.clientId, ...(clientSecret !== undefined ? { client_secret: clientSecret } : {}) };
+    },
+    async saveCodeVerifier(serverName: string, verifier: string) {
+      verifiers.set(serverName, verifier);
+    },
+    async consumeCodeVerifier(serverName: string) {
+      const verifier = verifiers.get(serverName);
+      verifiers.delete(serverName);
+      return verifier;
+    },
+  };
+}
+
+function mcpOAuthCallbackRedirectUri(req: Request): string {
+  const protoHeader = req.headers["x-forwarded-proto"];
+  const proto = (Array.isArray(protoHeader) ? protoHeader[0] : protoHeader) ?? req.protocol;
+  const hostHeader = req.headers["x-forwarded-host"];
+  const host = (Array.isArray(hostHeader) ? hostHeader[0] : hostHeader) ?? req.get("host");
+  return `${proto}://${host}/api/mcp/oauth/callback`;
 }
 
 // Test-injectable override; defaults to the statically imported engine binding.
@@ -1401,6 +1585,126 @@ export function createApiRoutes(store: TaskStore, options?: ServerOptions): Rout
       res.json(result);
     } catch (error) {
       rethrowAsApiError(error, "Failed to validate MCP server");
+    }
+  });
+
+  /*
+   * FNXC:McpConfig 2026-07-12-00:00:
+   * POST /mcp/oauth/authorize starts the interactive, one-time OAuth authorize dance for one oauth-configured
+   * MCP server: metadata discovery + RFC 7591 DCR (when no clientId yet) + PKCE authorization-URL construction,
+   * all via the shared engine helper (SDK `auth()` + `OAuthClientProvider`). A CSRF `state` is minted and held
+   * server-side (never trusts a client-supplied state); the caller (Settings → MCP "Connect / Authorize")
+   * redirects/opens the returned `authorizationUrl` in the user's browser. Never logs/returns anything besides
+   * the authorization URL; content-free logging only (server name, transport, coarse status).
+   */
+  router.post("/mcp/oauth/authorize", async (req, res) => {
+    try {
+      const { store: scopedStore } = await getProjectContext(req);
+      const { scope, name } = parseMcpOAuthRouteBody(req.body);
+      const { server: rawServer } = await findRawMcpServerDefinition(scopedStore, scope, name);
+      if (rawServer.transport === "stdio" || !rawServer.auth) {
+        throw badRequest("MCP server is not configured for OAuth");
+      }
+
+      const secrets = await scopedStore.getSecretsStore();
+      const resolved = await resolveMcpServersForRuntime({
+        globalSettings: { mcpServers: { enabled: true, servers: [rawServer] } },
+        projectSettings: undefined,
+        secrets,
+        reader: {},
+      });
+      const resolvedServer = resolved.servers[0];
+      if (resolved.errors.length > 0 || !resolvedServer || !hasMcpOAuthAuth(resolvedServer)) {
+        throw badRequest("Unable to resolve MCP server OAuth configuration", {
+          errors: resolved.errors.map((error) => ({ serverName: error.serverName, path: error.path, message: error.message })),
+        });
+      }
+
+      const state = mintMcpOAuthState(scope, name);
+      const authorizeStore = createDashboardMcpOAuthAuthorizeStore(scopedStore, scope);
+      const { authorizationUrl } = await startMcpOAuthAuthorize(resolvedServer, {
+        store: authorizeStore,
+        redirectUri: mcpOAuthCallbackRedirectUri(req),
+        state,
+      });
+      res.json({ authorizationUrl });
+    } catch (error) {
+      if (error instanceof McpOAuthNotConfiguredError || error instanceof McpOAuthStateRequiredError) {
+        throw badRequest(error.message);
+      }
+      rethrowAsApiError(error, "Failed to start MCP OAuth authorize");
+    }
+  });
+
+  /*
+   * FNXC:McpConfig 2026-07-12-00:00:
+   * GET /mcp/oauth/callback completes the interactive OAuth authorize dance: validates the CSRF `state`
+   * (missing/invalid/replayed all rejected — `consumeMcpOAuthState` is a read-and-delete, so a second hit with
+   * the same state finds nothing), exchanges the authorization `code` for tokens via the shared engine helper,
+   * and persists the resulting bundle as Fusion secret refs. Returns a minimal, content-free HTML page the
+   * popup/opener can detect (never echoes code/token/url back to the client).
+   */
+  router.get("/mcp/oauth/callback", async (req, res) => {
+    const sendResultPage = (ok: boolean, message: string) => {
+      res.status(ok ? 200 : 400).type("html").send(
+        `<!doctype html><html><body><script>try{if(window.opener){window.opener.postMessage({source:"fusion-mcp-oauth",ok:${ok ? "true" : "false"}},"*");}}catch(e){}</script><p>${message}</p><p>You can close this window.</p></body></html>`,
+      );
+    };
+
+    try {
+      const { store: scopedStore } = await getProjectContext(req);
+      const code = typeof req.query.code === "string" ? req.query.code : undefined;
+      const state = typeof req.query.state === "string" ? req.query.state : undefined;
+      if (!state) {
+        sendResultPage(false, "Missing or invalid authorization state.");
+        return;
+      }
+      const pending = consumeMcpOAuthState(state);
+      if (!pending) {
+        sendResultPage(false, "This authorization link is invalid or has already been used.");
+        return;
+      }
+      if (!code) {
+        sendResultPage(false, "Missing authorization code.");
+        return;
+      }
+
+      const { server: rawServer } = await findRawMcpServerDefinition(scopedStore, pending.scope, pending.serverName);
+      if (rawServer.transport === "stdio" || !rawServer.auth) {
+        sendResultPage(false, "MCP server is not configured for OAuth.");
+        return;
+      }
+      const secrets = await scopedStore.getSecretsStore();
+      const resolved = await resolveMcpServersForRuntime({
+        globalSettings: { mcpServers: { enabled: true, servers: [rawServer] } },
+        projectSettings: undefined,
+        secrets,
+        reader: {},
+      });
+      const resolvedServer = resolved.servers[0];
+      if (resolved.errors.length > 0 || !resolvedServer || !hasMcpOAuthAuth(resolvedServer)) {
+        sendResultPage(false, "Unable to resolve MCP server OAuth configuration.");
+        return;
+      }
+
+      const authorizeStore = createDashboardMcpOAuthAuthorizeStore(scopedStore, pending.scope);
+      await completeMcpOAuthCallback(resolvedServer, {
+        store: authorizeStore,
+        code,
+        state,
+        redirectUri: mcpOAuthCallbackRedirectUri(req),
+      });
+      sendResultPage(true, "MCP server connected.");
+    } catch (error) {
+      if (error instanceof McpOAuthVerifierMissingError) {
+        sendResultPage(false, "This authorization link is invalid or has already been used.");
+        return;
+      }
+      if (error instanceof McpOAuthNotConfiguredError || error instanceof McpOAuthStateRequiredError) {
+        sendResultPage(false, "MCP server is not configured for OAuth.");
+        return;
+      }
+      sendResultPage(false, "Failed to complete MCP OAuth authorization.");
     }
   });
 

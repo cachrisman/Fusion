@@ -40,6 +40,7 @@ Threat-model baseline:
 - Secret values must never be logged.
 - MCP server settings store only secret references for sensitive env/header/token fields; imports surface plaintext as secret-creation descriptors instead of persisting it in settings.
 - MCP server secret references are materialized only at session/probe creation time for MCP-capable AI lanes and `POST /api/mcp/validate`; responses and structured logs include status/count metadata only, never resolved env/header values.
+- MCP OAuth token/client-credential writeback (FUSI-075's dashboard-hosted interactive authorize, and FUSI-074's non-interactive engine refresh) creates/updates secrets keyed `mcp-oauth:<serverName>:access-token` / `:refresh-token` / `:client-secret`, scoped to the server's own settings scope (global or project); only the resulting `{ secretRef, scope }` is ever written into the server's `auth` block, never the raw token/credential.
 
 See also: [Storage](./storage.md), [Multi-project](./multi-project.md), [Architecture](./architecture.md), [Settings reference](./settings-reference.md), and [MCP](./mcp.md) for MCP-specific secret-reference workflows.
 

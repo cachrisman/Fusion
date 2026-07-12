@@ -42,7 +42,7 @@ Definitions use these shapes:
 
 Expected outcome: settings validation accepts only the required fields for the selected transport, rejects duplicate server names within one stored settings array, and rejects plaintext sensitive values.
 
-<!-- FNXC:McpConfig 2026-07-12-00:00: FUSI-073 (Phase 1 of 3, parent epic FUSI-072) adds an optional `auth` variant to the two HTTP-family transports for OAuth-only hosted connectors (Asana/Atlassian/Linear/Notion/Slack/claude.ai-class). FUSI-074 (Phase 2) wires this into the engine: a headless `OAuthClientProvider` (`packages/engine/src/mcp-oauth-provider.ts`) attaches to every HTTP-family MCP transport across all three consumer paths (session tools, runtime forwarding, validation probe), performing non-interactive token refresh when a stored token is expired but has a refresh token. The engine never opens a browser or performs interactive authorize — a server with no valid/refreshable token is skipped fail-soft with an actionable "needs re-authorize" reason. Dashboard authorize/callback UI + RFC 7591 DCR + RFC 8414 discovery remain Phase 3. -->
+<!-- FNXC:McpConfig 2026-07-12-00:00: FUSI-073 (Phase 1 of 3, parent epic FUSI-072) adds an optional `auth` variant to the two HTTP-family transports for OAuth-only hosted connectors (Asana/Atlassian/Linear/Notion/Slack/claude.ai-class). FUSI-074 (Phase 2) wires this into the engine: a headless `OAuthClientProvider` (`packages/engine/src/mcp-oauth-provider.ts`) attaches to every HTTP-family MCP transport across all three consumer paths (session tools, runtime forwarding, validation probe), performing non-interactive token refresh when a stored token is expired but has a refresh token. The engine never opens a browser or performs interactive authorize — a server with no valid/refreshable token is skipped fail-soft with an actionable "needs re-authorize" reason. FUSI-075 (Phase 3, this section) adds the dashboard-hosted interactive authorize + RFC 7591 DCR + RFC 8414 metadata discovery, completing the 3-phase build-out. -->
 ### OAuth auth (sse / streamable-http only)
 
 `sse` and `streamable-http` servers may additionally declare an `auth: { type: "oauth", ... }` block for authorization-server-protected MCP endpoints:
@@ -66,7 +66,28 @@ Expected outcome: settings validation accepts only the required fields for the s
 }
 ```
 
-`authorizationServerUrl` is required; `clientId` is optional (servers that rely on RFC 7591 Dynamic Client Registration can omit it). `clientSecret`, `accessToken`, and `refreshToken` are Fusion secret references only, following the same never-inline-plaintext rule as `headers`/`env`. `stdio` transports do not support `auth` (local, no OAuth). The engine connects using these tokens and refreshes them non-interactively when expired; there is no interactive authorize flow or DCR yet — those are dashboard-side Phase 3 work.
+`authorizationServerUrl` is required; `clientId` is optional (servers that rely on RFC 7591 Dynamic Client Registration can omit it). `clientSecret`, `accessToken`, and `refreshToken` are Fusion secret references only, following the same never-inline-plaintext rule as `headers`/`env`. `stdio` transports do not support `auth` (local, no OAuth). The engine connects using these tokens and refreshes them non-interactively when expired.
+
+#### Interactive authorize (Phase 3)
+
+<!-- FNXC:McpConfig 2026-07-12-00:00: FUSI-075 completes the outbound-MCP OAuth build-out with the one-time interactive authorize the headless engine cannot perform. The dashboard hosts both routes, drives the SDK's `auth()` helper (never a hand-rolled PKCE/discovery/DCR implementation) via the same `FusionMcpOAuthProvider` the engine uses (composed, not forked), and persists everything as Fusion secret refs — tokens and DCR-issued client credentials are never returned to the browser or logged. -->
+
+For a server with no pre-issued token, an operator completes a one-time authorize from **Settings → MCP**: a "Connect / Authorize" action appears on any sse/streamable-http server row that declares an `auth` block (both the Global and Project MCP settings cards render the same action, since both delegate to the same `McpServersCard` component). Clicking it:
+
+1. Calls `POST /api/mcp/oauth/authorize` with `{ scope, name }`. The dashboard resolves the server's oauth config, mints a server-side CSRF `state` value (never trusts a client-supplied one), and calls the engine's `startMcpOAuthAuthorize` helper, which performs RFC 8414 authorization-server metadata discovery, RFC 7591 Dynamic Client Registration when no `clientId` is configured yet (persisting the DCR-issued `client_id`/`client_secret` as secret refs), and builds a PKCE authorization URL. The route returns `{ authorizationUrl }` only — no code/token/verifier material.
+2. Opens `authorizationUrl` in a popup. After the user authorizes with the upstream provider, it redirects to `GET /api/mcp/oauth/callback?code=...&state=...`.
+3. The callback route validates `state` (missing/invalid/already-consumed values are all rejected with a clean 4xx and content-free logging — a replayed callback finds nothing, since the state and PKCE code verifier are each consumed exactly once), then calls the engine's `completeMcpOAuthCallback` helper to exchange the authorization code for tokens and persist the resulting access/refresh/expiry bundle as secret refs on the server's `auth` block. The callback responds with a minimal, content-free HTML page that `postMessage`s the popup's opener and can be closed.
+4. The Settings UI re-probes the server (reusing the existing `/mcp/validate` route) and updates the auth-state badge.
+
+Auth-state rendering (derived from the existing validate probe, which already resolves/refreshes oauth tokens before probing):
+
+| State | UI |
+| --- | --- |
+| No token yet | "Authorize" button |
+| Connected (including a token that was silently refreshed) | "Connected" badge, no prompt |
+| Refresh failed / interactive authorize required | "Re-authorize" button |
+
+The headers-only/stdio server rows never render this action — it is gated on `transport !== "stdio" && Boolean(auth)`.
 
 ## Secret references
 

@@ -413,6 +413,33 @@ export { discoverMcpServers, type DiscoverMcpServersOptions, type DiscoverMcpSer
 export { runtimeSupportsMcp, logMcpForwardingSkipped } from "./mcp-runtime-support.js";
 export { validateMcpServer, type McpValidationResult, type ValidateMcpServerOptions } from "./mcp-validation-service.js";
 export {
+  FusionMcpOAuthProvider,
+  createFusionMcpOAuthProvider,
+  createHttpMcpTransport,
+  createWarnOnlyMcpOAuthTokenStore,
+  describeMcpOAuthError,
+  hasMcpOAuthAuth,
+  McpOAuthInteractiveRequiredError,
+  McpOAuthNoTokenError,
+  McpOAuthRefreshFailedError,
+  type CreateHttpMcpTransportOptions,
+  type FusionMcpOAuthProviderOptions,
+  type McpOAuthTokenBundle,
+  type McpOAuthTokenStore,
+} from "./mcp-oauth-provider.js";
+export {
+  startMcpOAuthAuthorize,
+  completeMcpOAuthCallback,
+  createInMemoryMcpOAuthAuthorizeStore,
+  McpOAuthNotConfiguredError,
+  McpOAuthStateRequiredError,
+  McpOAuthUnexpectedResultError,
+  McpOAuthVerifierMissingError,
+  type McpOAuthAuthorizeStore,
+  type StartMcpOAuthAuthorizeOptions,
+  type CompleteMcpOAuthCallbackOptions,
+} from "./mcp-oauth-authorize.js";
+export {
   createInteractiveAiSessionWith,
   createCliAgentPlanningSessionWith,
   resolvePlanningExecutorSession,

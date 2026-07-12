@@ -120,6 +120,23 @@
   background: color-mix(in srgb, var(--color-warning) 12%, transparent);
 }
 
+/*
+FNXC:McpConfig 2026-07-12-00:00:
+The MCP OAuth Connect/Authorize action's "needs re-authorize" badge/CTA reuses the same badge shape as the
+other mcp-state-badge modifiers, colored with the error token (a stalled/failed refresh needs operator action,
+unlike --inherited's warning-toned informational state).
+*/
+.mcp-state-badge--needs-authorize {
+  color: var(--color-error);
+  background: color-mix(in srgb, var(--color-error) 12%, transparent);
+}
+
+.mcp-oauth-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
 .mcp-validation-status {
   color: var(--text-muted);
 }

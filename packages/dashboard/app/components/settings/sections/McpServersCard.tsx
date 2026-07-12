@@ -1,5 +1,5 @@
 import "./McpServersCard.css";
-import { Download, Pencil, Play, Plus, RefreshCw, Trash2, Upload } from "lucide-react";
+import { Download, KeyRound, Pencil, Play, Plus, RefreshCw, Trash2, Upload } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -239,6 +239,33 @@ function getValidationLabel(status: ValidationStatus): string {
   return status;
 }
 
+type McpOAuthUiState = "unknown" | "connected" | "needs-authorize";
+
+/*
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * Only sse/streamable-http servers carrying an `auth` block are OAuth-configured — headers-only and stdio
+ * servers never render the Connect/Authorize affordance (no empty button shell / orphaned click target).
+ */
+function isOAuthConfiguredServer(server: McpServerDefinition): boolean {
+  return server.transport !== "stdio" && Boolean((server as { auth?: unknown }).auth);
+}
+
+/*
+ * FNXC:McpConfig 2026-07-12-00:00:
+ * Derives the auth-state badge/CTA from the existing /mcp/validate probe result (FUSI-074's
+ * `validateHttpMcpServer` already resolves oauth tokens — including a silent proactive refresh — before
+ * probing, and maps a no-token/refresh-failed/interactive-required condition to a content-free
+ * "oauth: needs re-authorize (…)" error message). "connected" therefore also covers the silent
+ * expired-with-refresh-success case (the probe returns `valid` with no special message); an unrelated
+ * network failure (e.g. `unreachable`) is left as "unknown" rather than misreported as needing re-authorize.
+ */
+function getMcpOAuthUiState(validation?: ValidateState): McpOAuthUiState {
+  if (!validation || validation.status === "idle" || validation.status === "pending") return "unknown";
+  if (validation.status === "valid") return "connected";
+  if (validation.message?.includes("needs re-authorize")) return "needs-authorize";
+  return "unknown";
+}
+
 /**
  * FNXC:McpConfig 2026-06-26-01:17:
  * MCP settings are edited through one card for global and project scopes. Sensitive env/header/token-like values are modeled only as Fusion secret references; this component never writes plaintext sensitive values into the settings form.
@@ -264,6 +291,7 @@ export function McpServersCard({ scope, form, setForm, globalSettings, projectId
   const [discovered, setDiscovered] = useState<DiscoveredMcpResponse | null>(null);
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [oauthAuthorizing, setOauthAuthorizing] = useState<string | null>(null);
 
   const reloadSecrets = useCallback(async () => {
     try {
@@ -432,7 +460,7 @@ export function McpServersCard({ scope, form, setForm, globalSettings, projectId
     }
   };
 
-  const validateServer = async (server: McpServerDefinition) => {
+  const validateServer = useCallback(async (server: McpServerDefinition) => {
     setValidateStates((current) => ({ ...current, [server.name]: { status: "pending", message: t("settings.mcp.testing", "Testing…") } }));
     try {
       const result = await requestJson<{ status: "valid" | "unreachable" | "error"; message?: string }>("/api/mcp/validate", {
@@ -443,7 +471,70 @@ export function McpServersCard({ scope, form, setForm, globalSettings, projectId
     } catch (error) {
       setValidateStates((current) => ({ ...current, [server.name]: { status: "error", message: error instanceof Error ? error.message : String(error) } }));
     }
-  };
+  }, [t]);
+
+  /*
+   * FNXC:McpConfig 2026-07-12-00:00:
+   * Auto-probes oauth-configured rows once (never for headers-only/stdio servers) so the Connect/Authorize
+   * badge/CTA reflects real auth state on load instead of always defaulting to "unknown" until an operator
+   * manually presses Test. Guarded by `!validateStates[server.name]` so it fires once per server, not on every
+   * render, and skips rows that already have ANY validation result (including from a manual Test click).
+   */
+  useEffect(() => {
+    for (const { server } of displayRows) {
+      if (isOAuthConfiguredServer(server) && !validateStates[server.name]) {
+        void validateServer(server);
+      }
+    }
+  }, [displayRows, validateStates, validateServer]);
+
+  /*
+   * FNXC:McpConfig 2026-07-12-00:00:
+   * Settings → MCP "Connect / Authorize" action: calls the dashboard's /mcp/oauth/authorize start route (scope
+   * + server name only — never a client-supplied redirect/state), opens the returned authorization URL in a
+   * popup, and waits for either the callback page's postMessage (FUSI-075's minimal content-free HTML response)
+   * or the popup closing. Re-probes via the existing Test/validate path afterward so the badge reflects the new
+   * auth state — this component never receives or displays the authorization code/token itself.
+   */
+  const startOAuthAuthorize = useCallback(async (server: McpServerDefinition) => {
+    setOauthAuthorizing(server.name);
+    try {
+      const params = new URLSearchParams();
+      if (projectId) params.set("projectId", projectId);
+      const { authorizationUrl } = await requestJson<{ authorizationUrl: string }>(
+        `/api/mcp/oauth/authorize${params.toString() ? `?${params.toString()}` : ""}`,
+        { method: "POST", body: JSON.stringify({ scope, name: server.name }) },
+      );
+      const popup = window.open(authorizationUrl, "fusion-mcp-oauth", "width=520,height=680");
+      if (!popup) {
+        addToast(t("settings.mcp.oauthPopupBlocked", "Enable popups to complete MCP authorization"), "error");
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        const handleMessage = (event: MessageEvent) => {
+          const data = event.data as { source?: string } | undefined;
+          if (!data || data.source !== "fusion-mcp-oauth") return;
+          window.removeEventListener("message", handleMessage);
+          window.clearInterval(pollTimer);
+          resolve();
+        };
+        window.addEventListener("message", handleMessage);
+        const pollTimer = window.setInterval(() => {
+          if (popup.closed) {
+            window.removeEventListener("message", handleMessage);
+            window.clearInterval(pollTimer);
+            resolve();
+          }
+        }, 500);
+      });
+      await validateServer(server);
+      addToast(t("settings.mcp.oauthConnectedToast", "MCP server connected"), "success");
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setOauthAuthorizing(null);
+    }
+  }, [addToast, projectId, scope, t, validateServer]);
 
   const importServers = async (text: string) => {
     setImportError(null);
@@ -595,6 +686,34 @@ export function McpServersCard({ scope, form, setForm, globalSettings, projectId
                 </div>
                 <div className="mcp-server-row__actions">
                   <button type="button" className="btn btn-sm touch-target" onClick={() => void validateServer(server)} disabled={validation.status === "pending"}><Play aria-hidden="true" size={MCP_BUTTON_ICON_SIZE_SM} /> {validation.status === "pending" ? t("settings.mcp.testing", "Testing…") : t("settings.mcp.test", "Test")}</button>
+                  {isOAuthConfiguredServer(server) ? (() => {
+                    const oauthState = getMcpOAuthUiState(validateStates[server.name]);
+                    const authorizing = oauthAuthorizing === server.name;
+                    return (
+                      <div className="mcp-oauth-action" data-testid={`mcp-oauth-${server.name}`}>
+                        {oauthState === "connected" ? (
+                          <span className="mcp-state-badge mcp-state-badge--configured" data-testid={`mcp-oauth-badge-${server.name}`}>
+                            <span className="status-dot status-dot--online" aria-hidden="true" /> {t("settings.mcp.oauthConnected", "Connected")}
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn-sm touch-target"
+                            data-testid={`mcp-oauth-button-${server.name}`}
+                            onClick={() => void startOAuthAuthorize(server)}
+                            disabled={authorizing}
+                          >
+                            <KeyRound aria-hidden="true" size={MCP_BUTTON_ICON_SIZE_SM} />{" "}
+                            {authorizing
+                              ? t("settings.mcp.oauthAuthorizing", "Connecting…")
+                              : oauthState === "needs-authorize"
+                                ? t("settings.mcp.oauthReauthorize", "Re-authorize")
+                                : t("settings.mcp.oauthAuthorize", "Authorize")}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })() : null}
                   {state === "inherited" ? <button type="button" className="btn btn-sm touch-target" onClick={() => { setEditor(draftFromServer(server)); setEditorError(null); }}><Pencil aria-hidden="true" size={MCP_BUTTON_ICON_SIZE_SM} /> {t("settings.mcp.override", "Override")}</button> : null}
                   {state === "inherited" ? <button type="button" className="btn btn-warning btn-sm touch-target" onClick={() => disableInheritedServer(server.name)}>{t("settings.mcp.disableInherited", "Disable")}</button> : null}
                   {editable ? <button type="button" className="btn btn-sm touch-target" onClick={() => { setEditor(draftFromServer(server)); setEditorError(null); }}><Pencil aria-hidden="true" size={MCP_BUTTON_ICON_SIZE_SM} /> {t("actions.edit", "Edit")}</button> : null}
