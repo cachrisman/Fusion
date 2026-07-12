@@ -720,8 +720,22 @@ export class WorkflowGraphExecutor {
             verdictRaw === "APPROVE" || verdictRaw === "APPROVE_WITH_NOTES" || verdictRaw === "REVISE"
               ? verdictRaw
               : undefined;
+          /*
+           * FNXC:WorkflowStepResults 2026-07-12-00:00:
+           * FUSI-084 (reproduced on FUSI-083): a `failure` outcome can be stamped by a
+           * post-verdict scope-check / completion race even though the reviewer already
+           * recorded an approve-family verdict (`APPROVE`/`APPROVE_WITH_NOTES`). An
+           * approved review must never persist as `status="failed"` — that stranded a
+           * landed merge behind a permanent "Task Failed" only a manual
+           * `fn_task_bypass_review` could clear. The recorded verdict is authoritative:
+           * approve-family wins over a `failure` outcome. `REVISE` still maps to the
+           * non-blocking `advisory_failure` lane, and a verdict-ABSENT `failure` outcome
+           * (dispatch/infra exception, the `(no feedback captured)` signature) is
+           * unchanged and still `"failed"`.
+           */
           let stepStatus: WorkflowStepResult["status"];
-          if (groupResult.outcome === "failure") stepStatus = "failed";
+          if (verdict === "APPROVE" || verdict === "APPROVE_WITH_NOTES") stepStatus = "passed";
+          else if (groupResult.outcome === "failure") stepStatus = "failed";
           else if (groupResult.value === "advisory_failure") stepStatus = "advisory_failure";
           else if (verdict === "REVISE") stepStatus = "advisory_failure";
           else stepStatus = "passed";

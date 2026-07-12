@@ -538,6 +538,52 @@ describe("getTaskMergeBlocker", () => {
     expect(result).toContain("pre-merge workflow steps");
   });
 
+  it("FUSI-084: does NOT block merge when a failed-status pre-merge step carries an APPROVE-family verdict", () => {
+    for (const verdict of ["APPROVE", "APPROVE_WITH_NOTES"] as const) {
+      const result = getTaskMergeBlocker({
+        ...baseTask,
+        workflowStepResults: [{
+          workflowStepId: "WS-001",
+          workflowStepName: "Code Review",
+          phase: "pre-merge",
+          status: "failed",
+          verdict,
+          output: "REVIEW_VERDICT: approve",
+        }],
+      });
+      expect(result).toBeUndefined();
+    }
+  });
+
+  it("FUSI-084: STILL blocks merge when a failed-status pre-merge step carries a REVISE verdict", () => {
+    const result = getTaskMergeBlocker({
+      ...baseTask,
+      workflowStepResults: [{
+        workflowStepId: "WS-001",
+        workflowStepName: "Code Review",
+        phase: "pre-merge",
+        status: "failed",
+        verdict: "REVISE",
+        output: "REVIEW_VERDICT: revise",
+      }],
+    });
+    expect(result).toBe("task has failed pre-merge workflow steps");
+  });
+
+  it("FUSI-084: STILL blocks merge when a failed-status pre-merge step carries NO verdict (dispatch/infra failure)", () => {
+    const result = getTaskMergeBlocker({
+      ...baseTask,
+      workflowStepResults: [{
+        workflowStepId: "WS-001",
+        workflowStepName: "Code Review",
+        phase: "pre-merge",
+        status: "failed",
+        output: "(no feedback captured)",
+      }],
+    });
+    expect(result).toBe("task has failed pre-merge workflow steps");
+  });
+
   it("does NOT block merge on advisory pre-merge workflow findings", () => {
     const result = getTaskMergeBlocker({
       ...baseTask,

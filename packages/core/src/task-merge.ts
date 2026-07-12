@@ -279,10 +279,23 @@ export function getTaskMergeBlocker(
    * stays byte-identical in logic — the bypass works upstream of the blocker,
    * not by special-casing it here (FN-7720).
    */
+  /*
+   * FNXC:ReviewLaneBypass 2026-07-12-00:00:
+   * FUSI-084 defense-in-depth: a pre-merge step whose recorded `verdict` is
+   * approve-family (`APPROVE`/`APPROVE_WITH_NOTES`) must never block merge on
+   * `status` alone. The source fix (workflow-graph-executor.ts) now reconciles
+   * an approved verdict to `status="passed"`, so this branch should be
+   * unreachable for NEW results — but it stays verdict-aware as a belt-and-
+   * suspenders complement for any already-persisted `status="failed"` +
+   * approve-verdict result (e.g. rows written before this fix landed). A
+   * `failed` step with verdict `REVISE`, or with NO verdict at all (the
+   * `(no feedback captured)` / dispatch-exception signature), still blocks.
+   */
   if (
     task.workflowStepResults?.some((result) => {
       const phase = result.phase || "pre-merge";
-      return phase === "pre-merge" && result.status === "failed";
+      if (phase !== "pre-merge" || result.status !== "failed") return false;
+      return result.verdict !== "APPROVE" && result.verdict !== "APPROVE_WITH_NOTES";
     })
   ) {
     return "task has failed pre-merge workflow steps";

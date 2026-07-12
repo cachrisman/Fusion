@@ -520,6 +520,105 @@ describe("auto-merge proven finalization helper", () => {
     expect(store.moveTask).not.toHaveBeenCalled();
   });
 
+  it("FUSI-084: a landed merge whose only 'failed' pre-merge step carries an APPROVE verdict finalizes to done (no manual bypass)", async () => {
+    const strandedTask = {
+      id: "FN-FUSI-084-APPROVE",
+      title: "Approved review recorded failed by race",
+      description: "Test",
+      column: "in-progress",
+      dependencies: [],
+      steps: [{ status: "done" }],
+      currentStep: 0,
+      log: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      workflowStepResults: [{
+        workflowStepId: "code-review",
+        workflowStepName: "Code review",
+        phase: "pre-merge" as const,
+        status: "failed" as const,
+        verdict: "APPROVE" as const,
+        output: "REVIEW_VERDICT: approve",
+      }],
+      mergeDetails: { mergeConfirmed: true, commitSha: "efd7a5a8", landedFiles: ["packages/engine/src/executor.ts"] },
+    } as Task;
+    const doneTask = { ...strandedTask, column: "done", status: null, error: null } as Task;
+    const store = createMockStore(strandedTask) as unknown as TaskStore & {
+      getTask: ReturnType<typeof vi.fn>;
+      updateTask: ReturnType<typeof vi.fn>;
+      moveTask: ReturnType<typeof vi.fn>;
+      recordRunAuditEvent: ReturnType<typeof vi.fn>;
+    };
+    store.getTask.mockResolvedValue(strandedTask);
+    store.moveTask.mockResolvedValue(doneTask);
+    mockedExecSync.mockImplementation(() => "" as any);
+
+    const result = await finalizeProvenAutoMergeTask({
+      store,
+      taskId: "FN-FUSI-084-APPROVE",
+      result: { task: strandedTask, ok: true, merged: true, commitSha: "efd7a5a8", mergeConfirmed: true } as MergeResult,
+      source: "workflow-graph-merge-finalize",
+      rootDir: "/repo",
+    });
+
+    expect(result.outcome).toBe("done");
+    expect(store.moveTask).toHaveBeenCalledWith("FN-FUSI-084-APPROVE", "done", expect.objectContaining({
+      moveSource: "engine",
+      preserveProgress: true,
+    }));
+    // No "Merge confirmed but finalization blocked" park — status/error never set to failed.
+    expect(store.updateTask).not.toHaveBeenCalledWith("FN-FUSI-084-APPROVE", expect.objectContaining({ status: "failed" }));
+  });
+
+  it("FUSI-084: a landed merge whose 'failed' pre-merge step carries a REVISE verdict still blocks AND persists mergeDetails.commitSha", async () => {
+    const strandedTask = {
+      id: "FN-FUSI-084-REVISE",
+      title: "Genuinely failed review",
+      description: "Test",
+      column: "in-progress",
+      dependencies: [],
+      steps: [{ status: "done" }],
+      currentStep: 0,
+      log: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      workflowStepResults: [{
+        workflowStepId: "code-review",
+        workflowStepName: "Code review",
+        phase: "pre-merge" as const,
+        status: "failed" as const,
+        verdict: "REVISE" as const,
+        output: "REVIEW_VERDICT: revise",
+      }],
+      // Task row has NOT yet recorded a commitSha — mirrors the FUSI-083 secondary
+      // symptom where mergeConfirmed:true landed but commitSha was left unset.
+      mergeDetails: { mergeConfirmed: true, landedFiles: ["packages/engine/src/executor.ts"] },
+    } as Task;
+    const store = createMockStore(strandedTask) as unknown as TaskStore & {
+      getTask: ReturnType<typeof vi.fn>;
+      updateTask: ReturnType<typeof vi.fn>;
+      moveTask: ReturnType<typeof vi.fn>;
+      recordRunAuditEvent: ReturnType<typeof vi.fn>;
+    };
+    store.getTask.mockResolvedValue(strandedTask);
+
+    const result = await finalizeProvenAutoMergeTask({
+      store,
+      taskId: "FN-FUSI-084-REVISE",
+      result: { task: strandedTask, ok: true, merged: true, commitSha: "landed-but-parked-sha", mergeConfirmed: true } as MergeResult,
+      source: "workflow-graph-merge-finalize",
+      rootDir: "/repo",
+    });
+
+    expect(result).toEqual(expect.objectContaining({ outcome: "blocked", reason: "task has failed pre-merge workflow steps" }));
+    expect(store.updateTask).toHaveBeenCalledWith("FN-FUSI-084-REVISE", expect.objectContaining({
+      status: "failed",
+      error: "Merge confirmed but finalization blocked: task has failed pre-merge workflow steps",
+      mergeDetails: expect.objectContaining({ commitSha: "landed-but-parked-sha" }),
+    }));
+    expect(store.moveTask).not.toHaveBeenCalled();
+  });
+
   it("finalizes proven workflow merges even when the task branch still has residue outside the landed patch", async () => {
     const strandedTask = {
       id: "FN-BRANCH-PROOF",

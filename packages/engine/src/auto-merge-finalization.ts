@@ -199,9 +199,22 @@ export async function finalizeProvenAutoMergeTask({
     error: undefined,
   });
   if (hardBlocker) {
+    /*
+     * FNXC:WorkflowMerge 2026-07-12-00:00:
+     * FUSI-084: the just-computed `mergeDetails` (which already carries
+     * `result.commitSha` for the landed commit via `buildFinalizationMergeDetails`
+     * above) was previously used ONLY for the validation check, never persisted on
+     * this blocked-park branch. A hard-blocker park after a genuinely-landed merge
+     * therefore left `mergeDetails.commitSha` unset on the task row despite
+     * `mergeConfirmed: true` (reproduced on FUSI-083, commit efd7a5a8). Persist
+     * `mergeDetails` alongside the status/error park so the landed SHA survives even
+     * while blocked, and Step 1/2's verdict-aware reconciliation can un-park forward
+     * on the next finalize attempt without losing merge provenance.
+     */
     await store.updateTask(taskId, {
       status: "failed",
       error: `Merge confirmed but finalization blocked: ${hardBlocker}`,
+      mergeDetails,
     }).catch(() => undefined);
     await recordFinalizationAudit({
       store,

@@ -194,6 +194,36 @@ describe("WorkflowGraphExecutor optional-group → task.workflowStepResults (pla
     expect(failRecorder.results[0].status).toBe("failed");
   });
 
+  it("(c2) FUSI-084: failure outcome but approve-family verdict → status 'passed' (never stranded 'failed')", async () => {
+    // FNXC:WorkflowStepResults 2026-07-12-00:00: reproduces FUSI-083 — a post-verdict
+    // scope-check / completion race can stamp a `failure` outcome even though the
+    // reviewer already approved. The recorded verdict is authoritative: approve-family
+    // (APPROVE / APPROVE_WITH_NOTES) must never persist as status="failed".
+    for (const verdict of ["APPROVE", "APPROVE_WITH_NOTES"] as const) {
+      const recorder = makeRecorder();
+      const executor = new WorkflowGraphExecutor({
+        handlers: { prompt: innerHandler({ outcome: "failure", value: verdict }) },
+        recordWorkflowStepResult: recorder.record,
+      });
+      await executor.run(taskWith(["code-review"]), settingsOn(), codeReviewGroupIr());
+      expect(recorder.results).toHaveLength(1);
+      expect(recorder.results[0].status).toBe("passed");
+      expect(recorder.results[0].verdict).toBe(verdict);
+    }
+
+    // Verdict-ABSENT failure outcome is unchanged: still "failed" (the
+    // `(no feedback captured)` / dispatch-exception signature must remain blocking).
+    const absentRecorder = makeRecorder();
+    const absentExecutor = new WorkflowGraphExecutor({
+      handlers: { prompt: innerHandler({ outcome: "failure", value: "exception" }) },
+      recordWorkflowStepResult: absentRecorder.record,
+    });
+    await absentExecutor.run(taskWith(["code-review"]), settingsOn(), codeReviewGroupIr());
+    expect(absentRecorder.results).toHaveLength(1);
+    expect(absentRecorder.results[0].status).toBe("failed");
+    expect(absentRecorder.results[0].verdict).toBeUndefined();
+  });
+
   it("(d) DISABLED group → no entry recorded (byte-inert)", async () => {
     const recorder = makeRecorder();
     const executor = new WorkflowGraphExecutor({
