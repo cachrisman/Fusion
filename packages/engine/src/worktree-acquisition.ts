@@ -38,10 +38,97 @@ import { removeDesktopBuildArtifacts } from "./worktree-desktop-artifacts.js";
 import { installTaskWorktreeIdentityGuard } from "./worktree-hooks.js";
 import { copyConfiguredWorktreeFiles, type WorktreeCopyFileResult } from "./worktree-copy-files.js";
 import { resolveCapturedBaseCommitSha } from "./base-commit-capture.js";
-import { resolveIntegrationBranch } from "./integration-branch.js";
+import { isAncestorCommit, resolveIntegrationBranch } from "./integration-branch.js";
 import { activeSessionRegistry, type ActiveSessionRegistry } from "./active-session-registry.js";
 
 const execAsync = promisify(exec);
+
+/*
+FNXC:BranchBase 2026-07-12-18:40:
+FUSI-078: a dispatched task's worktree branch base must contain its Done dependencies' landed
+commits — never a stale snapshot predating them. This guard only runs when the caller is about
+to fall back to the resolved integration-branch NAME (no explicit `task.executionStartBranch`
+was already selected upstream, e.g. an in-review dependency's live branch — that precedence is
+trusted as-is per FUSI-078's spec). For each Done dependency with a recorded landed commit
+(`mergeDetails.commitSha`), verify the candidate start point already contains it via
+`git merge-base --is-ancestor`. If not: when the candidate is merely BEHIND the landed commit
+(the FUSI-059 case — local integration ref un-advanced), fast-forward the start point to the
+landed commit. If the two have diverged entirely (rewritten/squashed history), best-effort fall
+back to the landed commit anyway so the new branch never predates a Done dependency's work.
+Degrades gracefully on any git failure or missing landed sha — a stale base is corrected or, at
+worst, left uncorrected; it must never turn into a hard dispatch failure.
+*/
+async function correctStaleBaseCandidate(params: {
+  task: Task;
+  rootDir: string;
+  store: TaskStore;
+  candidate: string;
+  audit?: Pick<RunAuditor, "git" | "filesystem">;
+  logger?: { log: (m: string) => void; warn: (m: string) => void; error?: (m: string) => void };
+}): Promise<string> {
+  const { task, rootDir, store, candidate, audit, logger } = params;
+  const depIds = Array.isArray(task.dependencies) ? task.dependencies : [];
+  if (depIds.length === 0) {
+    return candidate;
+  }
+
+  let base = candidate;
+  let corrected = false;
+  let correctionReason: "stale-behind" | "diverged" | undefined;
+  const correctedForDeps: string[] = [];
+
+  for (const depId of depIds) {
+    let dep: Task | null = null;
+    try {
+      dep = await store.getTask(depId);
+    } catch {
+      continue;
+    }
+    if (!dep || dep.column !== "done") continue;
+    const landedSha = dep.mergeDetails?.commitSha;
+    if (!landedSha) continue;
+
+    let containsLanded: boolean;
+    try {
+      containsLanded = await isAncestorCommit(rootDir, landedSha, base);
+    } catch {
+      continue;
+    }
+    if (containsLanded) continue;
+
+    // `base` does not contain the dependency's landed commit -- stale (or diverged).
+    const baseIsAncestorOfLanded = await isAncestorCommit(rootDir, base, landedSha).catch(() => false);
+    base = landedSha;
+    corrected = true;
+    correctionReason = baseIsAncestorOfLanded ? "stale-behind" : "diverged";
+    correctedForDeps.push(depId);
+  }
+
+  if (!corrected) {
+    return candidate;
+  }
+
+  logger?.warn(
+    `${task.id}: worktree base "${candidate}" predated Done dependency landed commit(s) [${correctedForDeps.join(", ")}] — corrected start point to ${base} (${correctionReason})`,
+  );
+  try {
+    await audit?.git?.({
+      type: "task:branch-base-stale-corrected",
+      target: task.id,
+      metadata: {
+        taskId: task.id,
+        from: candidate,
+        to: base,
+        dependencyIds: correctedForDeps,
+        reason: correctionReason,
+      },
+    });
+  } catch {
+    // audit is best-effort observability; never block dispatch on it.
+  }
+
+  return base;
+}
 
 /**
  * Worktree acquisition contract:
@@ -223,7 +310,23 @@ export async function acquireTaskWorktree(opts: AcquireTaskWorktreeOptions): Pro
    * FNXC:WorktreeIsolation 2026-07-01-08:35:
    * Fresh task worktrees must never inherit the project root checkout's ambient HEAD. The root checkout can temporarily point at a sibling task branch/commit during merge or recovery work, so an omitted `git worktree add -b ... <startPoint>` contaminates new task branches with unrelated task commits. Use the task's explicit executionStartBranch when present; otherwise pin creation to the resolved integration branch.
    */
-  const freshStartPoint = baseBranch ?? await resolveIntegrationBranch(rootDir, settings, { logger: logger ?? console });
+  let freshStartPoint = baseBranch ?? await resolveIntegrationBranch(rootDir, settings, { logger: logger ?? console });
+  if (!baseBranch) {
+    /*
+    FNXC:BranchBase 2026-07-12-18:40:
+    Only the integration-branch-tip fallback path needs the stale-base guard: an explicit
+    `task.executionStartBranch` (e.g. an in-review dependency's live branch) is trusted as-is
+    per FUSI-078's spec and preserved unchanged above.
+    */
+    freshStartPoint = await correctStaleBaseCandidate({
+      task,
+      rootDir,
+      store,
+      candidate: freshStartPoint,
+      audit,
+      logger,
+    });
+  }
 
   let worktreePath = task.worktree;
   if (!worktreePath) {

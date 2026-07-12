@@ -1,8 +1,9 @@
-import { exec, execSync } from "node:child_process";
+import { exec, execFile, execSync } from "node:child_process";
 import { promisify } from "node:util";
 import type { ProjectSettings } from "@fusion/core";
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export type IntegrationBranchSettings =
   | ProjectSettings
@@ -159,6 +160,32 @@ export function resolveIntegrationBranchSync(
   const remotes = listGitRemotesSync(rootDir);
   warnFallback(rootDir, logger, remotes);
   return INTEGRATION_BRANCH_FALLBACK;
+}
+
+/*
+FNXC:BranchBase 2026-07-12-18:40:
+FUSI-078: a dispatched task's worktree branch base must contain its Done dependencies'
+landed commits — never a stale snapshot predating them. `resolveIntegrationBranch` only ever
+resolves a branch NAME; whatever the local ref of that branch currently points at becomes the
+new worktree's start point, and that local ref can be un-advanced/stale relative to a
+dependency's actually-landed commit (observed: `fusion/fusi-059` cut from a commit 38+ commits
+behind main, predating its Done dependency FUSI-057's landed work). This additive helper answers
+"does `descendantRef` already contain `ancestorSha`?" via `git merge-base --is-ancestor`, so a
+caller can detect and correct a stale candidate base before creating a branch on top of it.
+Uses `execFile` (argv array, no shell) since `ancestorSha`/`descendantRef` may originate from
+stored task metadata and must never be shell-interpolated.
+*/
+export async function isAncestorCommit(rootDir: string, ancestorSha: string, descendantRef: string): Promise<boolean> {
+  try {
+    await execFileAsync("git", ["merge-base", "--is-ancestor", ancestorSha, descendantRef], {
+      cwd: rootDir,
+      timeout: 5_000,
+      encoding: "utf8",
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function __resetIntegrationBranchCacheForTests(): void {

@@ -488,7 +488,25 @@ export type GitMutationType =
    * }
    * ```
    */
-  | "stash:pop-conflict";
+  | "stash:pop-conflict"
+  /**
+   * FUSI-078: emitted when the worktree-acquisition stale-base guard detects that a freshly
+   * resolved integration-branch candidate start point does NOT contain a Done dependency's
+   * actually-landed commit, and corrects the start point before `git worktree add -b ...`
+   * creates the new task branch. ids/counts/shas only — no prose.
+   *
+   * Metadata shape:
+   * ```ts
+   * {
+   *   taskId: string;
+   *   from: string;              // the stale candidate ref/sha that was rejected
+   *   to: string;                // the corrected start point (a dependency's landed sha)
+   *   dependencyIds: string[];   // Done dependency task IDs that triggered a correction
+   *   reason: "stale-behind" | "diverged";
+   * }
+   * ```
+   */
+  | "task:branch-base-stale-corrected";
 
 // ── Database mutation types ────────────────────────────────────────────────────
 

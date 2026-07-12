@@ -83,6 +83,7 @@ describe("acquireTaskWorktree", () => {
     store = {
       updateTask: vi.fn().mockResolvedValue(undefined),
       logEntry: vi.fn().mockResolvedValue(undefined),
+      getTask: vi.fn().mockResolvedValue(null),
     };
   });
 
@@ -220,6 +221,207 @@ describe("acquireTaskWorktree", () => {
 
     expect(createWorktree).toHaveBeenCalledWith("fusion/fn-200", expect.any(String), "FN-200", "main", false);
     expect(git(result.worktreePath, "git rev-parse HEAD")).toBe(mainHead);
+  });
+
+  // FUSI-078 surface matrix: a freshly dispatched task's worktree branch base must
+  // contain its Done dependencies' landed commits (or its in-review dependency's live
+  // branch tip), and otherwise the current default-branch tip -- never a stale snapshot.
+  describe("FUSI-078 stale-base guard", () => {
+    function landDependencyAheadOfStaleMain(rootDir: string): { staleMainHead: string; landedSha: string } {
+      const staleMainHead = git(rootDir, "git rev-parse main");
+      // Simulate the dependency's work landing on the shared integration branch
+      // elsewhere (e.g. a different checkout that advanced the ref, per
+      // FNXC:MergeIsolation) AFTER this rootDir's local `main` ref was captured --
+      // i.e. `main` here is stale relative to the dependency's actually-landed commit.
+      writeFileSync(join(rootDir, "dep-landed.txt"), "dep work\n", "utf-8");
+      git(rootDir, "git add dep-landed.txt");
+      git(rootDir, 'git commit -m "FUSI-057: dep landed work"');
+      const landedSha = git(rootDir, "git rev-parse HEAD");
+      // Reset the local `main` ref back to the stale tip -- this rootDir's checkout
+      // never observed the dependency landing (matches FUSI-059's symptom).
+      git(rootDir, `git update-ref refs/heads/main ${staleMainHead}`);
+      return { staleMainHead, landedSha };
+    }
+
+    it("corrects the start point when the integration branch is stale relative to a Done dependency's landed commit", async () => {
+      const rootDir = makeRepo();
+      const { staleMainHead, landedSha } = landDependencyAheadOfStaleMain(rootDir);
+      expect(git(rootDir, "git rev-parse main")).toBe(staleMainHead);
+
+      vi.mocked(store.getTask).mockResolvedValueOnce({
+        id: "FUSI-057",
+        column: "done",
+        mergeDetails: { commitSha: landedSha },
+      } as any);
+
+      const auditGit = vi.fn().mockResolvedValue(undefined);
+      const createWorktree = vi.fn(async (branchName: string, worktreePath: string, _taskId: string, startPoint?: string) => {
+        git(rootDir, `git worktree add -b ${branchName} ${JSON.stringify(worktreePath)} ${startPoint ?? ""}`);
+        return { path: worktreePath, branch: branchName };
+      });
+
+      const result = await acquireTaskWorktree({
+        task: { ...task, id: "FUSI-059", worktree: null, branch: null, dependencies: ["FUSI-057"] },
+        rootDir,
+        store,
+        settings: {},
+        audit: { git: auditGit, filesystem: vi.fn() } as any,
+        createWorktree,
+      });
+
+      // Pre-fix sanity: the stale `main` tip does NOT contain the dependency's landed
+      // commit (this is the FUSI-059 bug condition being reproduced).
+      expect(() => execSync(`git merge-base --is-ancestor ${landedSha} ${staleMainHead}`, { cwd: rootDir, stdio: "pipe" })).toThrow();
+      // After the fix: the created branch base DOES contain the dependency's landed commit.
+      expect(() => execSync(`git merge-base --is-ancestor ${landedSha} ${git(result.worktreePath, "git rev-parse HEAD")}`, { cwd: rootDir, stdio: "pipe" })).not.toThrow();
+      expect(git(result.worktreePath, "git rev-parse HEAD")).toBe(landedSha);
+      expect(createWorktree).toHaveBeenCalledWith("fusion/fusi-059", expect.any(String), "FUSI-059", landedSha, false);
+      expect(auditGit).toHaveBeenCalledWith(expect.objectContaining({
+        type: "task:branch-base-stale-corrected",
+        target: "FUSI-059",
+        metadata: expect.objectContaining({
+          from: "main",
+          to: landedSha,
+          dependencyIds: ["FUSI-057"],
+          reason: "stale-behind",
+        }),
+      }));
+    });
+
+    it("uses the in-review dependency's live branch tip without invoking the stale-base guard", async () => {
+      const rootDir = makeRepo();
+      git(rootDir, "git checkout -b fusion/fusi-057");
+      writeFileSync(join(rootDir, "in-review.txt"), "wip\n", "utf-8");
+      git(rootDir, "git add in-review.txt");
+      git(rootDir, 'git commit -m "FUSI-057: wip"');
+      const inReviewHead = git(rootDir, "git rev-parse HEAD");
+      git(rootDir, "git checkout main");
+
+      const createWorktree = vi.fn(async (branchName: string, worktreePath: string, _taskId: string, startPoint?: string) => {
+        git(rootDir, `git worktree add -b ${branchName} ${JSON.stringify(worktreePath)} ${startPoint ?? ""}`);
+        return { path: worktreePath, branch: branchName };
+      });
+
+      const result = await acquireTaskWorktree({
+        task: {
+          ...task,
+          id: "FUSI-059",
+          worktree: null,
+          branch: null,
+          dependencies: ["FUSI-057"],
+          executionStartBranch: "fusion/fusi-057",
+        },
+        rootDir,
+        store,
+        settings: {},
+        createWorktree,
+      });
+
+      expect(store.getTask).not.toHaveBeenCalled();
+      expect(git(result.worktreePath, "git rev-parse HEAD")).toBe(inReviewHead);
+      expect(createWorktree).toHaveBeenCalledWith("fusion/fusi-059", expect.any(String), "FUSI-059", "fusion/fusi-057", false);
+    });
+
+    it("leaves an in-review dependency WITHOUT a worktree to fall back to the integration branch tip", async () => {
+      const rootDir = makeRepo();
+      const mainHead = git(rootDir, "git rev-parse main");
+
+      vi.mocked(store.getTask).mockResolvedValueOnce({
+        id: "FUSI-057",
+        column: "in-review",
+        worktree: null,
+        mergeDetails: undefined,
+      } as any);
+
+      const createWorktree = vi.fn(async (branchName: string, worktreePath: string, _taskId: string, startPoint?: string) => {
+        git(rootDir, `git worktree add -b ${branchName} ${JSON.stringify(worktreePath)} ${startPoint ?? ""}`);
+        return { path: worktreePath, branch: branchName };
+      });
+
+      const result = await acquireTaskWorktree({
+        task: { ...task, id: "FUSI-059", worktree: null, branch: null, dependencies: ["FUSI-057"] },
+        rootDir,
+        store,
+        settings: {},
+        createWorktree,
+      });
+
+      expect(git(result.worktreePath, "git rev-parse HEAD")).toBe(mainHead);
+      expect(createWorktree).toHaveBeenCalledWith("fusion/fusi-059", expect.any(String), "FUSI-059", "main", false);
+    });
+
+    it("starts a no-dependency task from the current default-branch tip unmodified", async () => {
+      const rootDir = makeRepo();
+      const mainHead = git(rootDir, "git rev-parse main");
+
+      const createWorktree = vi.fn(async (branchName: string, worktreePath: string, _taskId: string, startPoint?: string) => {
+        git(rootDir, `git worktree add -b ${branchName} ${JSON.stringify(worktreePath)} ${startPoint ?? ""}`);
+        return { path: worktreePath, branch: branchName };
+      });
+
+      const result = await acquireTaskWorktree({
+        task: { ...task, id: "FUSI-059", worktree: null, branch: null, dependencies: [] },
+        rootDir,
+        store,
+        settings: {},
+        createWorktree,
+      });
+
+      expect(store.getTask).not.toHaveBeenCalled();
+      expect(git(result.worktreePath, "git rev-parse HEAD")).toBe(mainHead);
+    });
+
+    it("corrects the start point when only one of multiple dependencies is Done and stale", async () => {
+      const rootDir = makeRepo();
+      const { staleMainHead, landedSha } = landDependencyAheadOfStaleMain(rootDir);
+      expect(git(rootDir, "git rev-parse main")).toBe(staleMainHead);
+
+      vi.mocked(store.getTask).mockImplementation(async (id: string) => {
+        if (id === "FUSI-057") {
+          return { id, column: "done", mergeDetails: { commitSha: landedSha } } as any;
+        }
+        if (id === "FUSI-058") {
+          return { id, column: "in-progress" } as any;
+        }
+        return null;
+      });
+
+      const createWorktree = vi.fn(async (branchName: string, worktreePath: string, _taskId: string, startPoint?: string) => {
+        git(rootDir, `git worktree add -b ${branchName} ${JSON.stringify(worktreePath)} ${startPoint ?? ""}`);
+        return { path: worktreePath, branch: branchName };
+      });
+
+      const result = await acquireTaskWorktree({
+        task: { ...task, id: "FUSI-059", worktree: null, branch: null, dependencies: ["FUSI-058", "FUSI-057"] },
+        rootDir,
+        store,
+        settings: {},
+        createWorktree,
+      });
+
+      expect(git(result.worktreePath, "git rev-parse HEAD")).toBe(landedSha);
+    });
+
+    it("degrades gracefully (does not throw) when store.getTask fails for a dependency", async () => {
+      const rootDir = makeRepo();
+      const mainHead = git(rootDir, "git rev-parse main");
+      vi.mocked(store.getTask).mockRejectedValueOnce(new Error("boom"));
+
+      const createWorktree = vi.fn(async (branchName: string, worktreePath: string, _taskId: string, startPoint?: string) => {
+        git(rootDir, `git worktree add -b ${branchName} ${JSON.stringify(worktreePath)} ${startPoint ?? ""}`);
+        return { path: worktreePath, branch: branchName };
+      });
+
+      const result = await acquireTaskWorktree({
+        task: { ...task, id: "FUSI-059", worktree: null, branch: null, dependencies: ["FUSI-057"] },
+        rootDir,
+        store,
+        settings: {},
+        createWorktree,
+      });
+
+      expect(git(result.worktreePath, "git rev-parse HEAD")).toBe(mainHead);
+    });
   });
 
   it("acquires from pool when enabled", async () => {

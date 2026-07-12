@@ -2022,6 +2022,7 @@ The GitHub tracking state listener now attaches to every registered project stor
 - Each active task runs in isolated worktree under `.worktrees/*`
 - Executor creates branches like `fusion/{task-id}` (`executor.ts`)
 - `WorktreePool` can recycle idle worktrees when enabled
+- Base-selection invariant (FUSI-078): a freshly dispatched task's worktree branch base must contain its Done dependencies' actually-landed commits (`mergeDetails.commitSha`) — never a stale local-integration-branch snapshot predating them. `worktree-acquisition.ts`'s `correctStaleBaseCandidate` guard verifies this via `git merge-base --is-ancestor` on the integration-branch-tip fallback path only (an in-review dependency's live branch remains trusted as-is) and degrades gracefully rather than hard-failing dispatch; see `docs/solutions/logic-errors/worktree-branch-stale-base.md`.
 
 #### WorktreeBackend abstraction
 - Backend contract: `WorktreeBackend` (`packages/engine/src/worktree-backend.ts`, re-exported via `packages/engine/src/worktree-pool.ts`).
