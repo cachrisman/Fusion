@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TaskStore } from "@fusion/core";
+import { isValidFileScopeEntry } from "@fusion/core";
 import { createTaskFileScopeAddTool } from "../agent-tools.js";
 
 vi.mock("@fusion/core", async (importOriginal) => {
@@ -25,6 +26,46 @@ function createMockStore(prompt: string) {
   const appendAgentLog = vi.fn<TaskStore["appendAgentLog"]>().mockResolvedValue(undefined);
   const store = { getTask, updateTask, appendAgentLog } as unknown as TaskStore;
   return { store, getTask, updateTask, appendAgentLog };
+}
+
+function extractFileScopeSectionTokens(prompt: string): string[] {
+  const match = prompt.match(/##\s+File\s+Scope\s*\n([\s\S]*?)(?=\n##\s|$)/);
+  if (!match) return [];
+  return Array.from(match[1].matchAll(/`([^`]+)`/g), (m) => m[1]);
+}
+
+/*
+FNXC:FileScope 2026-07-12-00:00 (FUSI-079):
+Faithful fake of the real `store.updateTask` prompt-write gate
+(`validateNewlyIntroducedFileScope` in packages/core/src/store.ts): rejects only
+File Scope backtick tokens that are BOTH invalid (via the real, unmocked
+`isValidFileScopeEntry`) AND newly introduced relative to the previously-persisted
+prompt. This is what makes the regression below meaningful — the earlier
+mocked-`updateTask` tests above always resolve unconditionally and would not have
+caught the FUSI-079 bug (real `updateTask` re-validated every backtick token in the
+section, including pre-existing descriptive prose, and hard-rejected the whole
+append).
+*/
+function createRealValidatingStore(prompt: string) {
+  let currentPrompt = prompt;
+  const getTask = vi.fn<TaskStore["getTask"]>().mockImplementation(async () => ({ id: TASK_ID, prompt: currentPrompt } as any));
+  const updateTask = vi.fn<TaskStore["updateTask"]>().mockImplementation(async (_id: string, updates: any) => {
+    const nextPrompt = updates.prompt as string;
+    const prevInvalid = new Set(
+      extractFileScopeSectionTokens(currentPrompt).filter((token) => !isValidFileScopeEntry(token)),
+    );
+    const newlyInvalid = extractFileScopeSectionTokens(nextPrompt).filter(
+      (token) => !isValidFileScopeEntry(token) && !prevInvalid.has(token),
+    );
+    if (newlyInvalid.length > 0) {
+      throw new Error(`Invalid File Scope entries in PROMPT.md for ${TASK_ID}: ${newlyInvalid.join(", ")}.`);
+    }
+    currentPrompt = nextPrompt;
+    return { id: TASK_ID, prompt: nextPrompt } as any;
+  });
+  const appendAgentLog = vi.fn<TaskStore["appendAgentLog"]>().mockResolvedValue(undefined);
+  const store = { getTask, updateTask, appendAgentLog } as unknown as TaskStore;
+  return { store, updateTask };
 }
 
 async function runTool(tool: { execute: (...args: any[]) => Promise<any> }, params: Record<string, unknown>) {
@@ -100,5 +141,25 @@ describe("fn_task_file_scope_add", () => {
 
     expect(updateTask).not.toHaveBeenCalled();
     expect(getText(result)).toMatch(/no "## File Scope" section/);
+  });
+
+  it("FUSI-079 appends a valid file when the store applies real validateNewlyIntroducedFileScope semantics over pre-existing invalid prose", async () => {
+    const promptWithProse = `## Mission
+Do the thing.
+
+## File Scope
+- \`packages/engine/src/existing.ts\`
+- Add \`getUsageControlSnapshot?\` handling, update \`SchedulerOptions\` via \`runHoldReleaseSweepPass\` \`(new)\`
+
+## Steps
+1. Go.
+`;
+    const { store, updateTask } = createRealValidatingStore(promptWithProse);
+    const tool = createTaskFileScopeAddTool(store, TASK_ID);
+
+    const result = await runTool(tool, { files: ["packages/engine/src/foo.ts"] });
+
+    expect(updateTask).toHaveBeenCalledTimes(1);
+    expect(getText(result)).toMatch(/Added to File Scope/);
   });
 });

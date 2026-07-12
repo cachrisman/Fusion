@@ -1190,6 +1190,33 @@ function validateFileScopeInPromptContent(prompt: string): { valid: string[]; in
   return { valid, invalid };
 }
 
+/*
+FNXC:FileScope 2026-07-12-00:00:
+Appending a pre-validated File Scope entry (via fn_task_file_scope_add) must not be
+rejected because of backtick prose already present in the persisted `## File Scope`
+section (e.g. descriptive bullets like `SchedulerOptions`, `(new)`, `new Scheduler(...)`).
+validateFileScopeInPromptContent re-parses EVERY backtick token in the section, so a
+whole-prompt rewrite that merely appends one new valid path still lists every
+pre-existing invalid token in the thrown error. validateNewlyIntroducedFileScope makes
+the updateTask prompt-write gate delta-aware: it computes the invalid tokens of the
+next prompt, subtracts whichever invalid tokens were ALREADY invalid in the
+previously-persisted prompt, and returns only the genuinely NEW invalid tokens. When
+there is no baseline (empty/absent previousPrompt, e.g. createTask) this degrades to
+the original full-strength validation.
+*/
+function validateNewlyIntroducedFileScope(
+  previousPrompt: string,
+  nextPrompt: string,
+): { invalid: string[] } {
+  const nextValidation = validateFileScopeInPromptContent(nextPrompt);
+  if (!previousPrompt) {
+    return { invalid: nextValidation.invalid };
+  }
+  const previousInvalid = new Set(validateFileScopeInPromptContent(previousPrompt).invalid);
+  const newlyInvalid = nextValidation.invalid.filter((token) => !previousInvalid.has(token));
+  return { invalid: newlyInvalid };
+}
+
 function sanitizeFileScopeInPromptContent(prompt: string): { sanitized: string; dropped: string[]; kept: string[] } {
   const headingMatch = prompt.match(/^##\s+File\s+Scope\s*$/m);
   if (!headingMatch) {
@@ -9657,7 +9684,17 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
       // partial commit. (This is the write counterpart to the read-resilience
       // guards elsewhere in getTask/updateStep.)
       if (updates.prompt !== undefined) {
-        const validation = validateFileScopeInPromptContent(updates.prompt);
+        // FNXC:FileScope 2026-07-12-00:00: gate on the delta-aware validator — only
+        // File Scope tokens that are invalid AND newly introduced relative to the
+        // currently-persisted PROMPT.md block the write. Pre-existing backtick prose
+        // already committed to disk is never re-litigated by an unrelated append.
+        let previousPrompt = "";
+        try {
+          previousPrompt = await readFile(join(dir, "PROMPT.md"), "utf8");
+        } catch {
+          previousPrompt = "";
+        }
+        const validation = validateNewlyIntroducedFileScope(previousPrompt, updates.prompt);
         if (validation.invalid.length > 0) {
           throw new InvalidFileScopeError(id, validation.invalid);
         }

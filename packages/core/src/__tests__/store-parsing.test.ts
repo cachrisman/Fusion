@@ -820,6 +820,49 @@ ${invalidScopeEntries.map((entry) => `- \`${entry}\``).join("\n")}
       await store.updateTask(task.id, { prompt: validPrompt });
       expect(await readFile(promptPath, "utf-8")).toBe(validPrompt);
     });
+
+    /*
+    FNXC:FileScope 2026-07-12-00:00 (FUSI-079):
+    Regression coverage for the delta-aware File Scope gate: appending a valid new
+    entry (mirroring what fn_task_file_scope_add produces) must not be rejected by
+    backtick prose ALREADY present in the persisted PROMPT.md's `## File Scope`
+    section, while a genuinely NEW invalid token still blocks the write. Drives the
+    fix through the real TaskStore.updateTask prompt-write branch (not a mocked
+    updateTask), per FUSI-079's Do-NOT guardrail.
+    */
+    it("FUSI-079 updateTask append succeeds despite pre-existing invalid File Scope prose", async () => {
+      const task = await store.createTask({ description: "append despite prose" });
+      const promptPath = join(rootDir, ".fusion", "tasks", task.id, "PROMPT.md");
+      const baselinePrompt = `# ${task.id}: append despite prose\n\n## File Scope\n\n- \`packages/core/src/store.ts\`\n- Add \`getUsageControlSnapshot?\` handling, update \`SchedulerOptions\` via \`runHoldReleaseSweepPass\` \`(new)\`, see \`new Scheduler(...)\`\n`;
+      await writeFile(promptPath, baselinePrompt);
+
+      const appendedPrompt = `${baselinePrompt}- \`packages/dashboard/src/server.ts\`\n`;
+
+      await store.updateTask(task.id, { prompt: appendedPrompt });
+
+      const persisted = await readFile(promptPath, "utf-8");
+      expect(persisted).toBe(appendedPrompt);
+      expect(persisted).toContain("getUsageControlSnapshot?");
+      expect(persisted).toContain("packages/dashboard/src/server.ts");
+
+      const paths = await store.parseFileScopeFromPrompt(task.id);
+      expect(paths).toEqual(["packages/core/src/store.ts", "packages/dashboard/src/server.ts"]);
+    });
+
+    it("FUSI-079 updateTask still rejects a brand-new invalid File Scope token, naming only the new one", async () => {
+      const task = await store.createTask({ description: "reject new invalid token" });
+      const promptPath = join(rootDir, ".fusion", "tasks", task.id, "PROMPT.md");
+      const baselinePrompt = `# ${task.id}: reject new invalid token\n\n## File Scope\n\n- \`packages/core/src/store.ts\`\n- Uses \`SchedulerOptions\` and \`(new)\`\n`;
+      await writeFile(promptPath, baselinePrompt);
+
+      const nextPrompt = `${baselinePrompt}- \`origin/main\`\n`;
+
+      await expect(store.updateTask(task.id, { prompt: nextPrompt })).rejects.toMatchObject({
+        invalidEntries: ["origin/main"],
+      });
+
+      expect(await readFile(promptPath, "utf-8")).toBe(baselinePrompt);
+    });
   });
 
 });
