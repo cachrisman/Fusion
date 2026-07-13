@@ -615,6 +615,7 @@ function AppInner() {
     globalPauseReason,
     isTestMode,
     taskStuckTimeoutMs,
+    usagePauseThresholdPercent,
     staleHighFanoutBlockerAgeThresholdMs,
     capacityRiskBannerEnabled,
     capacityRiskTodoThreshold,
@@ -1835,7 +1836,7 @@ function AppInner() {
         onSubtaskBreakdown={subtaskBreakdownEnabled ? openSubtaskBreakdownWithNav : undefined}
         taskOperations={{ moveTask, deleteTask, mergeTask, archiveTask, revertTask, retryTask, bypassReview, resetTask, duplicateTask }}
         deepLink={{ handleDetailClose }}
-        settings={{ prAuthAvailable, autoMerge, taskDetailChatFirst, themeMode, colorTheme, dashboardFontScalePct, shadcnCustomColors, resolvedThemeMode, setThemeMode, setColorTheme, setDashboardFontScalePct, setShadcnCustomColors, setQuickChatButtonModeImmediate }}
+        settings={{ prAuthAvailable, autoMerge, taskDetailChatFirst, themeMode, colorTheme, dashboardFontScalePct, shadcnCustomColors, resolvedThemeMode, usagePauseThresholdPercent, setThemeMode, setColorTheme, setDashboardFontScalePct, setShadcnCustomColors, setQuickChatButtonModeImmediate }}
         onSettingsClose={handleSettingsCloseWithNav}
         onReopenOnboarding={reopenOnboardingWithNav}
         onOpenApprovals={(_approvalId) => handleTaskViewChange("mailbox")}

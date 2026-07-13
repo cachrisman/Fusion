@@ -380,6 +380,58 @@
   transform: translateX(-50%);
 }
 
+/*
+FNXC:UsageIndicator 2026-07-13-00:00 (FUSI-058):
+Inline marker on the usage progress bar for the configured proactive-pause
+threshold (`usagePauseThresholdPercent`). Mirrors `.usage-pace-marker`
+positioning/sizing (design tokens only) but uses the warning/error status
+colors instead of a neutral tone so it reads as a limit line, not a pace hint.
+*/
+.usage-threshold-marker {
+  position: absolute;
+  top: -2px;
+  width: 2px;
+  height: 12px;
+  background: var(--color-warning);
+  border-radius: 1px;
+  z-index: 3;
+  transform: translateX(-50%);
+}
+
+.usage-threshold-marker--reached {
+  background: var(--color-error);
+}
+
+/* Near-limit warning banner shown when a window approaches or reaches the configured threshold. */
+.usage-threshold-warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  margin-top: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+}
+
+.usage-threshold-warning-icon {
+  flex-shrink: 0;
+}
+
+.usage-threshold-warning-text {
+  font-weight: 500;
+}
+
+.usage-threshold-warning--approaching .usage-threshold-warning-icon,
+.usage-threshold-warning--approaching .usage-threshold-warning-text {
+  color: var(--color-warning);
+}
+
+.usage-threshold-warning--reached .usage-threshold-warning-icon,
+.usage-threshold-warning--reached .usage-threshold-warning-text {
+  color: var(--color-error);
+}
+
 .usage-pace-row {
   display: flex;
   align-items: center;
@@ -586,6 +638,15 @@
   .usage-provider-reorder-btn {
     min-width: calc(var(--space-md) * 3);
     min-height: calc(var(--space-md) * 3);
+  }
+
+  /* FUSI-058: keep the near-limit warning text wrapping cleanly on narrow viewports. */
+  .usage-threshold-warning {
+    align-items: flex-start;
+  }
+
+  .usage-threshold-warning-text {
+    white-space: normal;
   }
 }
 

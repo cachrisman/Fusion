@@ -72,6 +72,31 @@ export function SchedulingSection({ scopeBanner, form, setForm, globalMaxConcurr
         }}/>
         <small>{t("settings.scheduling.maximumConcurrentPlanningAgents", "Maximum concurrent planning agents. Default: 2.")}</small>
       </div>
+      {/*
+      FNXC:UsageControl 2026-07-13-00:00 (FUSI-058):
+      Two threshold settings gate downstream usage-control behaviors: pause (this task)
+      reserves headroom before a hard 429, throttle (FUSI-059) shapes dispatch pace.
+      Both are blank = undefined = feature off, matching every other optional numeric
+      setting in this section (e.g. taskStuckTimeoutMs).
+      */}
+      <div className="form-group">
+        <label htmlFor="usagePauseThresholdPercent">{t("settings.scheduling.usagePauseThresholdPercent", "Usage Pause Threshold (%)")}</label>
+        <input id="usagePauseThresholdPercent" type="number" min={0} max={100} step={1} value={form.usagePauseThresholdPercent ?? ""} onChange={(e) => {
+            const val = e.target.value;
+            const num = Number(val);
+            setForm((f) => ({ ...f, usagePauseThresholdPercent: val !== "" && Number.isFinite(num) ? Math.min(100, Math.max(0, num)) : undefined } as SettingsFormState));
+        }}/>
+        <small>{t("settings.scheduling.usagePauseThresholdPercentHint", "Proactively pause all automated agent activity when worst-case Claude usage (5h or weekly window) crosses this percent — BEFORE a hard rate-limit is hit, reserving operator headroom. Leave blank to disable (default: off).")}</small>
+      </div>
+      <div className="form-group">
+        <label htmlFor="usageThrottleThresholdPercent">{t("settings.scheduling.usageThrottleThresholdPercent", "Usage Throttle Threshold (%)")}</label>
+        <input id="usageThrottleThresholdPercent" type="number" min={0} max={100} step={1} value={form.usageThrottleThresholdPercent ?? ""} onChange={(e) => {
+            const val = e.target.value;
+            const num = Number(val);
+            setForm((f) => ({ ...f, usageThrottleThresholdPercent: val !== "" && Number.isFinite(num) ? Math.min(100, Math.max(0, num)) : undefined } as SettingsFormState));
+        }}/>
+        <small>{t("settings.scheduling.usageThrottleThresholdPercentHint", "Begin throttling new agent launches as worst-case Claude usage crosses this percent (adaptive-concurrency dispatch shaping). Leave blank to disable (default: off).")}</small>
+      </div>
       <div className="form-group">
         <label htmlFor="pollIntervalMs">{t("settings.scheduling.pollIntervalMs", "Poll Interval (ms)")}</label>
         <input id="pollIntervalMs" type="number" min={5000} step={1000} value={form.pollIntervalMs ?? ""} onChange={(e) => {

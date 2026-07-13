@@ -25,6 +25,10 @@ export interface UseAppSettingsResult {
   globalPauseReason: string | undefined;
   enginePaused: boolean;
   taskStuckTimeoutMs: number | undefined;
+  /* FNXC:UsageControl 2026-07-13-00:00 (FUSI-058): the configured proactive-pause
+   * threshold, surfaced so `UsageIndicator` can render an inline marker + near-limit
+   * warning without hand-rolling a second settings fetch. Undefined = feature off. */
+  usagePauseThresholdPercent: number | undefined;
   staleHighFanoutBlockerAgeThresholdMs: number;
   capacityRiskBannerEnabled: boolean;
   capacityRiskTodoThreshold: number;
@@ -77,6 +81,7 @@ export function useAppSettings(projectId?: string): UseAppSettingsResult {
   const [globalPauseReason, setGlobalPauseReason] = useState<string | undefined>(undefined);
   const [enginePaused, setEnginePaused] = useState(false);
   const [taskStuckTimeoutMs, setTaskStuckTimeoutMs] = useState<number | undefined>(undefined);
+  const [usagePauseThresholdPercent, setUsagePauseThresholdPercent] = useState<number | undefined>(undefined);
   const [staleHighFanoutBlockerAgeThresholdMs, setStaleHighFanoutBlockerAgeThresholdMs] = useState(2 * 60 * 60 * 1000);
   const [capacityRiskBannerEnabled, setCapacityRiskBannerEnabled] = useState(false);
   const [capacityRiskTodoThreshold, setCapacityRiskTodoThreshold] = useState(20);
@@ -142,6 +147,9 @@ export function useAppSettings(projectId?: string): UseAppSettingsResult {
       setEnginePaused(Boolean(settings.enginePaused));
       setPrAuthAvailable(Boolean(settings.prAuthAvailable));
       setTaskStuckTimeoutMs(settings.taskStuckTimeoutMs);
+      setUsagePauseThresholdPercent(
+        typeof settings.usagePauseThresholdPercent === "number" ? settings.usagePauseThresholdPercent : undefined,
+      );
       setStaleHighFanoutBlockerAgeThresholdMs(
         settings.staleHighFanoutBlockerAgeThresholdMs ?? 2 * 60 * 60 * 1000,
       );
@@ -321,6 +329,7 @@ export function useAppSettings(projectId?: string): UseAppSettingsResult {
     globalPauseReason,
     enginePaused,
     taskStuckTimeoutMs,
+    usagePauseThresholdPercent,
     staleHighFanoutBlockerAgeThresholdMs,
     capacityRiskBannerEnabled,
     capacityRiskTodoThreshold,

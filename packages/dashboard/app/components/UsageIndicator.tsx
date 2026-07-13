@@ -22,6 +22,14 @@ interface UsageIndicatorProps {
    * presentation is "modal"/undefined.
    */
   presentation?: "modal" | "embedded";
+  /**
+   * FNXC:UsageIndicator 2026-07-13-00:00 (FUSI-058):
+   * The configured `usagePauseThresholdPercent` project setting, threaded down from
+   * `useAppSettings` (the app's existing settings hook — no second settings fetch
+   * added here). Undefined = feature off: no marker, no near-limit warning are
+   * rendered anywhere in this component tree.
+   */
+  usagePauseThresholdPercent?: number;
 }
 
 /**
@@ -90,6 +98,28 @@ function getUsageColorClass(percentUsed: number): string {
   if (percentUsed > 70) return "usage-progress-fill--medium";
   return "usage-progress-fill--low";
 }
+
+/**
+ * FNXC:UsageControl 2026-07-13-00:00 (FUSI-058):
+ * `usagePauseThresholdPercent` gates the engine's proactive pause on the SAME
+ * Claude-only worst-case reduction as `resolveUsageControlSnapshot` (see
+ * `packages/dashboard/src/usage.ts`: `p.name === "Claude" && p.status === "ok"`).
+ * The marker/warning must only render on the provider the engine actually acts
+ * on — showing it on an unrelated provider (Codex, Gemini, etc.) would be
+ * misleading, so this mirrors that same gate on the display side.
+ */
+function isThresholdGatedProvider(provider: Pick<ProviderUsage, "name" | "status">): boolean {
+  return provider.name === "Claude" && provider.status === "ok";
+}
+
+/**
+ * FNXC:UsageIndicator 2026-07-13-00:00 (FUSI-058):
+ * How many percentage points below `usagePauseThresholdPercent` the near-limit
+ * warning band starts. E.g. threshold=90, band=10 → warning shows from 80% up.
+ * Documented here since PROMPT.md left the exact band to implementation
+ * discretion ("define an approach band, e.g. within N% below threshold").
+ */
+const USAGE_THRESHOLD_WARNING_BAND_PERCENT = 10;
 
 const HIDDEN_WINDOWS_STORAGE_KEY = "kb-usage-hidden-windows";
 const MODAL_SIZE_STORAGE_KEY = "kb-usage-modal-size";
@@ -246,12 +276,14 @@ interface UsageWindowRowProps {
   viewMode: 'used' | 'remaining';
   isHidden: boolean;
   onToggleHidden: () => void;
+  /** FUSI-058: undefined = feature off, or this provider is not threshold-gated (non-Claude). */
+  thresholdPercent?: number;
 }
 
 /**
  * Single usage window row with progress bar
  */
-function UsageWindowRow({ window, viewMode, isHidden, onToggleHidden }: UsageWindowRowProps) {
+function UsageWindowRow({ window, viewMode, isHidden, onToggleHidden, thresholdPercent }: UsageWindowRowProps) {
   const { t } = useTranslation("app");
   const colorClass = getUsageColorClass(window.percentUsed);
   const isRemainingMode = viewMode === 'remaining';
@@ -302,6 +334,37 @@ function UsageWindowRow({ window, viewMode, isHidden, onToggleHidden }: UsageWin
   const isBehind = pace?.status === "behind";
   const isOnTrack = pace?.status === "on-track";
 
+  /*
+  FNXC:UsageIndicator 2026-07-13-00:00 (FUSI-058):
+  Threshold marker + near-limit warning wire the configured proactive-pause
+  threshold (`usagePauseThresholdPercent`) into an operator-visible affordance.
+  Feature off (`thresholdPercent` undefined) → render NOTHING (no marker, no
+  warning, no empty wrapper) at any breakpoint or presentation. Marker position
+  mirrors the pace marker: `left: ${thresholdPercent}%` in "used" mode, mirrored
+  in "remaining" mode since the bar itself flips which side fills.
+  */
+  const hasThreshold = thresholdPercent !== undefined;
+  const thresholdMarkerPosition = hasThreshold
+    ? (isRemainingMode ? (100 - thresholdPercent) : thresholdPercent)
+    : 0;
+  const isAtOrOverThreshold = hasThreshold && window.percentUsed >= thresholdPercent;
+  const isNearThreshold = hasThreshold
+    && !isAtOrOverThreshold
+    && window.percentUsed >= thresholdPercent - USAGE_THRESHOLD_WARNING_BAND_PERCENT;
+  const showThresholdWarning = isAtOrOverThreshold || isNearThreshold;
+  const thresholdWarningText = showThresholdWarning
+    ? (isAtOrOverThreshold
+        ? t("usage.thresholdReached", "{{percent}}% of {{label}} — pause threshold reached", {
+            percent: Math.round(window.percentUsed),
+            label: window.label,
+          })
+        : t("usage.thresholdApproaching", "{{percent}}% of {{label}}{{resetSuffix}}", {
+            percent: Math.round(window.percentUsed),
+            label: window.label,
+            resetSuffix: displayResetText ? `, ${displayResetText}` : "",
+          }))
+    : null;
+
   return (
     <div className={`usage-window ${isHidden ? "usage-window--hidden" : ""}`}>
       <div className="usage-window-header">
@@ -341,6 +404,15 @@ function UsageWindowRow({ window, viewMode, isHidden, onToggleHidden }: UsageWin
             data-testid="pace-marker"
           />
         )}
+        {hasThreshold && (
+          <div
+            className={`usage-threshold-marker${isAtOrOverThreshold ? " usage-threshold-marker--reached" : ""}`}
+            style={{ left: `${thresholdMarkerPosition}%` }}
+            aria-hidden="true"
+            data-testid="usage-threshold-marker"
+            title={t("usage.thresholdMarkerTitle", "Proactive pause threshold: {{percent}}%", { percent: thresholdPercent })}
+          />
+        )}
       </div>
       <div className="usage-window-footer">
         <span className="usage-window-left">{footerText}</span>
@@ -361,6 +433,15 @@ function UsageWindowRow({ window, viewMode, isHidden, onToggleHidden }: UsageWin
           )}
         </span>
       </div>
+      {showThresholdWarning && thresholdWarningText && (
+        <div
+          className={`usage-threshold-warning${isAtOrOverThreshold ? " usage-threshold-warning--reached" : " usage-threshold-warning--approaching"}`}
+          data-testid="usage-threshold-warning"
+        >
+          <AlertTriangle size={14} className="usage-threshold-warning-icon" />
+          <span className="usage-threshold-warning-text">{thresholdWarningText}</span>
+        </div>
+      )}
       {shouldShowPace && (
         <div className="usage-pace-row" data-testid="pace-row">
           {isAhead && (
@@ -406,6 +487,8 @@ interface ProviderCardProps {
   canMoveDown: boolean;
   onMoveUp: () => void;
   onMoveDown: () => void;
+  /** FUSI-058: undefined = feature off. */
+  usagePauseThresholdPercent?: number;
 }
 
 /**
@@ -475,9 +558,13 @@ function ProviderCard({
   canMoveDown,
   onMoveUp,
   onMoveDown,
+  usagePauseThresholdPercent,
 }: ProviderCardProps) {
   const { t } = useTranslation("app");
   const providerWindows = provider.windows ?? [];
+  // FUSI-058: only the Claude-gated provider (the one the engine's proactive
+  // pause actually acts on) renders the threshold marker/warning.
+  const thresholdPercent = isThresholdGatedProvider(provider) ? usagePauseThresholdPercent : undefined;
   const hiddenCount = getRestorableHiddenWindowCount(provider.name, providerWindows, hiddenWindows);
   const getStatusBadge = () => {
     switch (provider.status) {
@@ -582,6 +669,7 @@ function ProviderCard({
                 viewMode={viewMode}
                 isHidden={hidden}
                 onToggleHidden={() => onToggleWindow(provider.name, window.label, index)}
+                thresholdPercent={thresholdPercent}
               />
             );
           })}
@@ -621,7 +709,7 @@ function UsageSkeleton() {
  * Shows hourly and weekly usage windows with percentage bars,
  * reset timers, and pace indicators.
  */
-export function UsageIndicator({ isOpen, onClose, projectId, anchorRect, presentation = "modal" }: UsageIndicatorProps) {
+export function UsageIndicator({ isOpen, onClose, projectId, anchorRect, presentation = "modal", usagePauseThresholdPercent }: UsageIndicatorProps) {
   const { t } = useTranslation("app");
   const isEmbedded = presentation === "embedded";
   const { providers, loading, error, lastUpdated, hasFetched, refresh } = useUsageData({
@@ -1021,6 +1109,7 @@ export function UsageIndicator({ isOpen, onClose, projectId, anchorRect, present
                   hiddenWindows={hiddenWindows}
                   onToggleWindow={handleToggleWindow}
                   onShowAllHidden={handleShowAllHidden}
+                  usagePauseThresholdPercent={usagePauseThresholdPercent}
                   isDragging={draggingProvider === provider.name}
                   isDragOver={dragOverProvider === provider.name}
                   dragOverPosition={dragOverProvider === provider.name ? dragOverPosition : null}

@@ -932,6 +932,11 @@ export class InProcessRuntime
         rootDir: this.config.workingDirectory,
         agentStore: this.agentStore,
         getUsageControlSnapshot: this.usageControlSnapshotProvider,
+        // FUSI-058: same UsageLimitPauser instance handed to TaskExecutor (see
+        // `executorOptions.usageLimitPauser` above) so the maintenance sweep's
+        // proactive threshold pause and reactive hard-limit pauses share one
+        // idempotency source of truth.
+        usageLimitPauser: this.usageLimitPauser,
         isWorktreeResumeReserved: this.cliAgentRuntime?.isWorktreeResumeReserved,
         recoverCompletedTask: (task) => this.executor.recoverCompletedTask(task),
         recoverFailedPreMergeStep: (task) => this.executor.recoverFailedPreMergeWorkflowStep(task),
@@ -1654,6 +1659,10 @@ export class InProcessRuntime
    */
   setUsageLimitPauser(pauser: UsageLimitPauser): void {
     this.usageLimitPauser = pauser;
+    // FUSI-058: mirrors `setUsageControlSnapshotProvider` — pushes a post-construction
+    // (re)wire to the already-built SelfHealingManager, since `setUsageLimitPauser` is
+    // sometimes called before `start()` builds it and sometimes after.
+    this.selfHealingManager?.setUsageLimitPauser(pauser);
   }
 
   /**

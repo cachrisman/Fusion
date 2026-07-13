@@ -2902,4 +2902,249 @@ describe("UsageIndicator", () => {
     expect(screen.queryByText("user@example.com")).not.toBeInTheDocument();
     expect(document.querySelector(".usage-provider-email")).not.toBeInTheDocument();
   });
+
+  // ── FUSI-058: usage-threshold marker + near-limit warning ─────────
+
+  describe("usagePauseThresholdPercent marker + near-limit warning", () => {
+    function claudeProvider(percentUsed: number, label = "Weekly"): ProviderUsage[] {
+      return [
+        {
+          name: "Claude",
+          icon: "🟠",
+          status: "ok",
+          windows: [
+            {
+              label,
+              percentUsed,
+              percentLeft: 100 - percentUsed,
+              resetText: "resets in 2d",
+              resetMs: 172800000,
+            },
+          ],
+        },
+      ];
+    }
+
+    it("does NOT render the threshold marker or warning when usagePauseThresholdPercent is undefined (feature off)", () => {
+      mockUseUsageData.mockReturnValue(createUsageDataState({
+        providers: claudeProvider(95),
+        loading: false,
+        error: null,
+        lastUpdated: new Date(),
+        refresh: mockRefresh,
+      }));
+
+      render(<UsageIndicator isOpen={true} onClose={mockOnClose} projectId={TEST_PROJECT_ID} />);
+
+      expect(document.querySelector('[data-testid="usage-threshold-marker"]')).not.toBeInTheDocument();
+      expect(document.querySelector('[data-testid="usage-threshold-warning"]')).not.toBeInTheDocument();
+    });
+
+    it("renders the threshold marker at the configured percent when usage is under threshold, without the warning", () => {
+      mockUseUsageData.mockReturnValue(createUsageDataState({
+        providers: claudeProvider(40),
+        loading: false,
+        error: null,
+        lastUpdated: new Date(),
+        refresh: mockRefresh,
+      }));
+
+      render(
+        <UsageIndicator
+          isOpen={true}
+          onClose={mockOnClose}
+          projectId={TEST_PROJECT_ID}
+          usagePauseThresholdPercent={90}
+        />
+      );
+
+      const marker = document.querySelector('[data-testid="usage-threshold-marker"]') as HTMLElement;
+      expect(marker).toBeInTheDocument();
+      expect(marker.style.left).toBe("90%");
+      expect(marker).not.toHaveClass("usage-threshold-marker--reached");
+      expect(document.querySelector('[data-testid="usage-threshold-warning"]')).not.toBeInTheDocument();
+    });
+
+    it("renders the near-limit warning (approaching band) when usage is within the band below threshold, colored as warning", () => {
+      mockUseUsageData.mockReturnValue(createUsageDataState({
+        providers: claudeProvider(85, "Weekly"), // within 10pp of a 90% threshold
+        loading: false,
+        error: null,
+        lastUpdated: new Date(),
+        refresh: mockRefresh,
+      }));
+
+      render(
+        <UsageIndicator
+          isOpen={true}
+          onClose={mockOnClose}
+          projectId={TEST_PROJECT_ID}
+          usagePauseThresholdPercent={90}
+        />
+      );
+
+      const warning = document.querySelector('[data-testid="usage-threshold-warning"]');
+      expect(warning).toBeInTheDocument();
+      expect(warning).toHaveClass("usage-threshold-warning--approaching");
+      expect(warning).not.toHaveClass("usage-threshold-warning--reached");
+      expect(warning?.textContent).toContain("85%");
+      expect(warning?.textContent).toContain("Weekly");
+    });
+
+    it("renders the reached-state warning (error color) and marker when usage is at/over the threshold", () => {
+      mockUseUsageData.mockReturnValue(createUsageDataState({
+        providers: claudeProvider(92, "Weekly"),
+        loading: false,
+        error: null,
+        lastUpdated: new Date(),
+        refresh: mockRefresh,
+      }));
+
+      render(
+        <UsageIndicator
+          isOpen={true}
+          onClose={mockOnClose}
+          projectId={TEST_PROJECT_ID}
+          usagePauseThresholdPercent={90}
+        />
+      );
+
+      const marker = document.querySelector('[data-testid="usage-threshold-marker"]');
+      expect(marker).toHaveClass("usage-threshold-marker--reached");
+      const warning = document.querySelector('[data-testid="usage-threshold-warning"]');
+      expect(warning).toBeInTheDocument();
+      expect(warning).toHaveClass("usage-threshold-warning--reached");
+      expect(warning).not.toHaveClass("usage-threshold-warning--approaching");
+      expect(warning?.textContent).toContain("pause threshold reached");
+    });
+
+    it("does NOT render the marker/warning when usage is well under the approach band", () => {
+      mockUseUsageData.mockReturnValue(createUsageDataState({
+        providers: claudeProvider(20),
+        loading: false,
+        error: null,
+        lastUpdated: new Date(),
+        refresh: mockRefresh,
+      }));
+
+      render(
+        <UsageIndicator
+          isOpen={true}
+          onClose={mockOnClose}
+          projectId={TEST_PROJECT_ID}
+          usagePauseThresholdPercent={90}
+        />
+      );
+
+      expect(document.querySelector('[data-testid="usage-threshold-warning"]')).not.toBeInTheDocument();
+      // Marker still renders (it's a static limit line, unrelated to current usage), just the warning is gated.
+      expect(document.querySelector('[data-testid="usage-threshold-marker"]')).toBeInTheDocument();
+    });
+
+    it("does NOT render the marker/warning for a non-Claude provider even when usage is high (Claude-only gate, matches engine's worst-case reduction)", () => {
+      mockUseUsageData.mockReturnValue(createUsageDataState({
+        providers: [
+          {
+            name: "OpenAI",
+            icon: "🤖",
+            status: "ok",
+            windows: [
+              { label: "Hourly", percentUsed: 97, percentLeft: 3, resetText: "resets in 5m" },
+            ],
+          },
+        ],
+        loading: false,
+        error: null,
+        lastUpdated: new Date(),
+        refresh: mockRefresh,
+      }));
+
+      render(
+        <UsageIndicator
+          isOpen={true}
+          onClose={mockOnClose}
+          projectId={TEST_PROJECT_ID}
+          usagePauseThresholdPercent={90}
+        />
+      );
+
+      expect(document.querySelector('[data-testid="usage-threshold-marker"]')).not.toBeInTheDocument();
+      expect(document.querySelector('[data-testid="usage-threshold-warning"]')).not.toBeInTheDocument();
+    });
+
+    it("does NOT render the marker/warning when the Claude provider status is not \"ok\" (e.g. no-auth), even with windows/high usage", () => {
+      mockUseUsageData.mockReturnValue(createUsageDataState({
+        providers: [
+          {
+            name: "Claude",
+            icon: "🟠",
+            status: "no-auth",
+            windows: [],
+          },
+        ],
+        loading: false,
+        error: null,
+        lastUpdated: new Date(),
+        refresh: mockRefresh,
+      }));
+
+      render(
+        <UsageIndicator
+          isOpen={true}
+          onClose={mockOnClose}
+          projectId={TEST_PROJECT_ID}
+          usagePauseThresholdPercent={90}
+        />
+      );
+
+      expect(document.querySelector('[data-testid="usage-threshold-marker"]')).not.toBeInTheDocument();
+      expect(document.querySelector('[data-testid="usage-threshold-warning"]')).not.toBeInTheDocument();
+    });
+
+    it("renders the marker/warning in the embedded right-dock presentation as well as the modal presentation", () => {
+      mockUseUsageData.mockReturnValue(createUsageDataState({
+        providers: claudeProvider(92, "Weekly"),
+        loading: false,
+        error: null,
+        lastUpdated: new Date(),
+        refresh: mockRefresh,
+      }));
+
+      render(
+        <UsageIndicator
+          isOpen={true}
+          onClose={mockOnClose}
+          projectId={TEST_PROJECT_ID}
+          presentation="embedded"
+          usagePauseThresholdPercent={90}
+        />
+      );
+
+      expect(document.querySelector('[data-testid="usage-threshold-marker"]')).toBeInTheDocument();
+      expect(document.querySelector('[data-testid="usage-threshold-warning"]')).toBeInTheDocument();
+    });
+
+    it("renders the marker/warning at the mobile breakpoint (narrow viewport)", () => {
+      setViewportSize({ width: 375, height: 700 });
+      mockUseUsageData.mockReturnValue(createUsageDataState({
+        providers: claudeProvider(88, "Weekly"),
+        loading: false,
+        error: null,
+        lastUpdated: new Date(),
+        refresh: mockRefresh,
+      }));
+
+      render(
+        <UsageIndicator
+          isOpen={true}
+          onClose={mockOnClose}
+          projectId={TEST_PROJECT_ID}
+          usagePauseThresholdPercent={90}
+        />
+      );
+
+      expect(document.querySelector('[data-testid="usage-threshold-marker"]')).toBeInTheDocument();
+      expect(document.querySelector('[data-testid="usage-threshold-warning"]')).toBeInTheDocument();
+    });
+  });
 });

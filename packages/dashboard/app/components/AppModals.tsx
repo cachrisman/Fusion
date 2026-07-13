@@ -82,6 +82,9 @@ interface AppModalsProps {
     dashboardFontScalePct: number;
     shadcnCustomColors: Record<string, string>;
     resolvedThemeMode: "dark" | "light";
+    /* FNXC:UsageControl 2026-07-13-00:00 (FUSI-058): threaded to UsageIndicator so it can
+     * render the configured proactive-pause threshold without a second settings fetch. */
+    usagePauseThresholdPercent: number | undefined;
     setThemeMode: (mode: ThemeMode) => void;
     setColorTheme: (theme: ColorTheme) => void;
     setDashboardFontScalePct: (scalePct: number) => void;
@@ -433,6 +436,7 @@ export function AppModals({
         onClose={closeUsageWithNav}
         projectId={projectId}
         anchorRect={modalManager.usageAnchorRect}
+        usagePauseThresholdPercent={settings.usagePauseThresholdPercent}
       />
 
       {modalManager.schedulesOpen && (

@@ -32,6 +32,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { IN_REVIEW_STALL_DEADLOCK_LOG_PREFIX, IN_REVIEW_STALL_LOG_PREFIX, IN_REVIEW_STALL_TERMINAL_LOG_PREFIX, allowsAutoMergeProcessing, resolveEffectiveAutoMerge, countRecentIdenticalStallEntries, detectDependencyCycle, detectSelfDefeatingDependency, evaluateNoCommitsNoOpFinalize, getInReviewStalledSignal, getInReviewStallReason, getPrimaryPrInfo, getStalePausedReviewSignal, getStalePausedTodoSignal, getTaskHardMergeBlocker, getTaskMergeBlocker, isEphemeralAgent, isMergeRequestContractShadowEnabled, isWorkflowColumnsEnabled, isWorkspaceTask, isSharedBranchGroupMemberIntegration, parseExplicitDuplicateMarker, resolveMaxAutoMergeRetries, resolveOptionalStepRevisionBudget, resolveOptionalReviewRevisionBudget, resolveWorkflowIrForTask, AWAITING_APPROVAL_PAUSE_REASON, type Agent, type AgentStore, type ChatStore, type MessageStore, type TaskStore, type Settings, type Task, type MergeDetails, type TaskPriority, type MergeResult, type WorkflowStepResult } from "@fusion/core";
 import type { MeshLeaseManager } from "./mesh-lease-manager.js";
+import type { UsageLimitPauser } from "./usage-limit-detector.js";
 import { createLogger, schedulerLog } from "./logger.js";
 import { mergeEffectiveSettings } from "./effective-settings.js";
 import { RemovalReason, classifyTaskWorktree, getRegisteredWorktreeBranchMap, getRegisteredWorktreePaths, isUsableTaskWorktree, removeWorktree, resolveWorktreeBackend, scanIdleWorktrees, scanOrphanedBranches } from "./worktree-pool.js";
@@ -118,6 +119,13 @@ const yieldEventLoop = (): Promise<void> => new Promise((resolve) => setImmediat
 const DONE_TASK_INTEGRITY_SWEEP_LIMIT = 50;
 const BOARD_STALL_NOTIFICATION_COOLDOWN_MS = 60 * 60_000;
 const DB_CORRUPTION_NOTIFICATION_COOLDOWN_MS = 60 * 60 * 1000;
+/**
+ * FUSI-058: cooldown for the proactive usage-threshold pause/resume ntfy
+ * notifications, mirroring `BOARD_STALL_NOTIFICATION_COOLDOWN_MS`, so a
+ * pause↔resume flap around the threshold boundary (e.g. usage hovering right
+ * at the configured percent) does not spam the operator.
+ */
+const USAGE_THRESHOLD_NOTIFICATION_COOLDOWN_MS = 15 * 60_000;
 const FTS_MAINTENANCE_MERGE_CADENCE_TICKS = 1;
 const FTS_MAINTENANCE_OPTIMIZE_CADENCE_TICKS = 4;
 export const STALE_TEMP_MERGE_WORKTREE_MS = 2 * 60 * 60 * 1000;
@@ -473,6 +481,17 @@ export interface SelfHealingOptions {
    * for the field shape and its relationship to FUSI-053's `getRateLimitResetAt`.
    */
   getUsageControlSnapshot?: () => Promise<UsageControlSnapshot | null>;
+  /**
+   * FUSI-058: the SAME `UsageLimitPauser` instance the in-process runtime hands to
+   * `TaskExecutor` (`InProcessRuntime.usageLimitPauser`). The self-healing maintenance
+   * sweep uses it to trigger a PROACTIVE `globalPauseReason: "usage-threshold"` pause
+   * (via `UsageLimitPauser.onUsageThresholdReached`) when `getUsageControlSnapshot()`
+   * reports worst-case usage crossing `settings.usagePauseThresholdPercent` — BEFORE any
+   * hard 429/usage-limit error occurs. May also be wired post-construction via
+   * `setUsageLimitPauser` (mirrors `setUsageControlSnapshotProvider`) since the runtime's
+   * pauser and this manager can be constructed independently.
+   */
+  usageLimitPauser?: UsageLimitPauser;
 }
 
 const APPROVED_TRIAGE_RECOVERY_GRACE_MS = 60_000;
@@ -888,6 +907,9 @@ export class SelfHealingManager {
   private readonly processBootStartedAt = Date.now();
   private dependencyBlockedTodoReporter: DependencyBlockedTodoReporter | null = null;
   private lastDbCorruptionNotifiedAt: number | null = null;
+  /** FUSI-058: last time a "usage-threshold-pause"/"usage-threshold-resume" ntfy fired. */
+  private lastUsageThresholdPauseNtfyAt: number | null = null;
+  private lastUsageThresholdResumeNtfyAt: number | null = null;
 
   private boardStallWindow: {
     windowStartMs: number;
@@ -939,6 +961,15 @@ export class SelfHealingManager {
    */
   setUsageControlSnapshotProvider(provider: SelfHealingOptions["getUsageControlSnapshot"]): void {
     this.options.getUsageControlSnapshot = provider;
+  }
+
+  /**
+   * FUSI-058: mirrors `setUsageControlSnapshotProvider` — lets the runtime wire (or
+   * rewire) the shared `UsageLimitPauser` after this manager has already been
+   * constructed, matching `InProcessRuntime.setUsageLimitPauser`'s existing timing.
+   */
+  setUsageLimitPauser(pauser: SelfHealingOptions["usageLimitPauser"]): void {
+    this.options.usageLimitPauser = pauser;
   }
 
   private classifyPausedAbortWorkflowRecovery(
@@ -1640,19 +1671,46 @@ export class SelfHealingManager {
    *    for blind-probe backoff, not real reset horizons).
    */
   private async scheduleResetAwareUnpause(settings: Settings): Promise<void> {
+    /*
+    FNXC:UsageControl 2026-07-13-00:00 (FUSI-058):
+    A "usage-threshold" pause must ALSO resume via this reset-aware path (it must
+    never sit paused forever) — but `rateLimitResetProvider`
+    (`getRateLimitResetAt`/`resolveRateLimitResetAt`) only resolves a reset time
+    for a window that is FULLY exhausted (percentUsed >= 100), which a proactive
+    threshold pause (e.g. at 90%) is NOT. So for globalPauseReason ===
+    "usage-threshold", prefer the injected `getUsageControlSnapshot()`'s
+    `soonestResetAt`/`soonestResetMs` (available at any usage level, not just
+    full exhaustion) as the reset-time source, falling back to
+    `rateLimitResetProvider` and then blind backoff exactly as before. The
+    "rate-limit" (and undefined/legacy) reason path is UNCHANGED.
+    */
+    const isUsageThresholdPause = settings.globalPauseReason === "usage-threshold";
+
+    if (isUsageThresholdPause) {
+      const snapshotProvider = this.options.getUsageControlSnapshot;
+      if (snapshotProvider) {
+        try {
+          const snapshot = await snapshotProvider();
+          if (snapshot && snapshot.soonestResetAt && snapshot.soonestResetMs !== null && snapshot.soonestResetMs > 0) {
+            if (this.scheduleFromResolvedReset(settings, { resetAt: snapshot.soonestResetAt, resetMs: snapshot.soonestResetMs })) {
+              return;
+            }
+          }
+        } catch (err: unknown) {
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          log.warn(`getUsageControlSnapshot failed for usage-threshold resume — falling back: ${errorMessage}`);
+        }
+      }
+    }
+
     const provider = this.rateLimitResetProvider;
     if (provider) {
       try {
         const resolved = await provider();
         if (resolved && resolved.resetMs > 0) {
-          const buffer = settings.autoUnpauseResetBufferMs ?? 60_000;
-          const rawDelay = resolved.resetMs + buffer;
-          // Ceiling: longest legitimate Claude reset horizon (weekly window) + buffer.
-          const ceilingMs = 7 * 24 * 60 * 60 * 1000 + buffer;
-          const delay = Math.min(Math.max(rawDelay, 0), ceilingMs);
-          log.log(`Reset-aware unpause: resetAt=${resolved.resetAt}`);
-          this.scheduleUnpause(delay, { resetAware: true });
-          return;
+          if (this.scheduleFromResolvedReset(settings, resolved)) {
+            return;
+          }
         }
       } catch (err: unknown) {
         const errorMessage = err instanceof Error ? err.message : String(err);
@@ -1661,6 +1719,18 @@ export class SelfHealingManager {
     }
 
     this.scheduleBlindBackoffUnpause(settings);
+  }
+
+  /** Shared clamp+schedule for a resolved `{ resetAt, resetMs }` reset time. */
+  private scheduleFromResolvedReset(settings: Settings, resolved: { resetAt: string; resetMs: number }): boolean {
+    const buffer = settings.autoUnpauseResetBufferMs ?? 60_000;
+    const rawDelay = resolved.resetMs + buffer;
+    // Ceiling: longest legitimate Claude reset horizon (weekly window) + buffer.
+    const ceilingMs = 7 * 24 * 60 * 60 * 1000 + buffer;
+    const delay = Math.min(Math.max(rawDelay, 0), ceilingMs);
+    log.log(`Reset-aware unpause: resetAt=${resolved.resetAt}`);
+    this.scheduleUnpause(delay, { resetAware: true });
+    return true;
   }
 
   /** Existing exponential-backoff fallback path, unchanged. */
@@ -1712,6 +1782,10 @@ export class SelfHealingManager {
       }
 
       const wasRateLimitPause = settings.globalPauseReason === "rate-limit";
+      // FUSI-058: distinct from the hard rate-limit redrive audit below — a
+      // proactive threshold pause resuming is "headroom freed up", not "we got
+      // rate-limited and are retrying".
+      const wasUsageThresholdPause = settings.globalPauseReason === "usage-threshold";
 
       log.warn("Auto-unpause: clearing globalPause");
       this.lastUnpauseAt = Date.now();
@@ -1731,9 +1805,34 @@ export class SelfHealingManager {
         }).catch(() => undefined);
       }
 
+      if (wasUsageThresholdPause) {
+        const auditor = createRunAuditor(this.store, {
+          runId: generateSyntheticRunId("self-healing", "usage-threshold-resume"),
+          agentId: "self-healing",
+          taskId: "usage-threshold-resume",
+          phase: "maintenance",
+        });
+        await auditor.database({
+          type: "task:usage-threshold-resume" as DatabaseMutationType,
+          target: "global",
+          metadata: { reason: "auto-unpause-cleared-usage-threshold-pause" },
+        }).catch(() => undefined);
+
+        await this.notifyUsageThresholdResume(settings).catch(() => undefined);
+      }
+
       // Note: if the rate limit is still active, the next agent session will
       // hit it again → UsageLimitPauser triggers globalPause → our listener
       // catches the transition and schedules the next attempt with escalated backoff.
+      //
+      // FNXC:UsageControl 2026-07-13-00:00 (FUSI-058):
+      // Same steady-state applies to "usage-threshold": if usage is STILL over
+      // threshold after this clear (window reset but usage climbed right back up,
+      // or the reset hasn't actually happened), the next maintenance tick's
+      // `checkUsageThresholdPause` sweep will simply re-pause with a fresh
+      // "usage-threshold" pause — this is intentional steady-state behavior, not a
+      // bug: the threshold check is idempotent and re-evaluates live usage on
+      // every tick rather than trusting a one-time decision.
     } catch (err: unknown) { const errorMessage = err instanceof Error ? err.message : String(err);
       log.error(`Auto-unpause failed: ${errorMessage}`);
     }
@@ -2568,6 +2667,209 @@ export class SelfHealingManager {
     }
   }
 
+  // ── Proactive usage-threshold pause (FUSI-058) ─────────────────────
+
+  /**
+   * FNXC:UsageControl 2026-07-13-00:00 (FUSI-058):
+   * Reads `settings.usagePauseThresholdPercent` + the injected
+   * `getUsageControlSnapshot()` each maintenance tick and proactively triggers
+   * `UsageLimitPauser.onUsageThresholdReached` (globalPauseReason:
+   * "usage-threshold") the moment worst-case usage crosses the configured
+   * threshold — BEFORE a hard 429/usage-limit error is ever hit, reserving
+   * operator headroom. Feature-off / already-paused / no-provider guards make
+   * this call paused-safe to run unconditionally in batch 1:
+   *  - `usagePauseThresholdPercent` undefined → feature OFF, no-op.
+   *  - `settings.globalPause` already true (ANY reason, including "manual") →
+   *    no-op; never overrides an existing pause. `UsageLimitPauser` re-checks
+   *    this itself, but checking here too avoids an unnecessary snapshot read.
+   *  - No `usageLimitPauser`/`getUsageControlSnapshot` wired, or the snapshot
+   *    resolves `null` (no Claude provider / no live usage data) → no-op.
+   * Reads through the FUSI-057 dashboard-side 30s cache via the injected
+   * callback — this adds NO new provider API pressure / polling.
+   */
+  private async checkUsageThresholdPause(): Promise<void> {
+    const settings = await this.store.getSettings();
+    const thresholdPercent = settings.usagePauseThresholdPercent;
+    if (thresholdPercent === undefined || thresholdPercent === null) {
+      return;
+    }
+    if (settings.globalPause) {
+      return;
+    }
+
+    const pauser = this.options.usageLimitPauser;
+    const getSnapshot = this.options.getUsageControlSnapshot;
+    if (!pauser || !getSnapshot) {
+      return;
+    }
+
+    let snapshot: UsageControlSnapshot | null;
+    try {
+      snapshot = await getSnapshot();
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.warn(`checkUsageThresholdPause: getUsageControlSnapshot failed: ${errorMessage}`);
+      return;
+    }
+    if (!snapshot) {
+      return;
+    }
+    if (snapshot.worstPercentUsed < thresholdPercent) {
+      return;
+    }
+
+    let activated = false;
+    try {
+      activated = await pauser.onUsageThresholdReached({
+        window: snapshot.worstWindowLabel,
+        percentUsed: snapshot.worstPercentUsed,
+        thresholdPercent,
+      });
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error(`checkUsageThresholdPause: onUsageThresholdReached failed: ${errorMessage}`);
+      return;
+    }
+
+    if (!activated) {
+      return;
+    }
+
+    const auditor = createRunAuditor(this.store, {
+      runId: generateSyntheticRunId("self-healing", "usage-threshold-pause"),
+      agentId: "self-healing",
+      taskId: "usage-threshold-pause",
+      phase: "maintenance",
+    });
+    await auditor.database({
+      type: "task:usage-threshold-pause" as DatabaseMutationType,
+      target: "global",
+      metadata: {
+        worstPercentUsed: snapshot.worstPercentUsed,
+        thresholdPercent,
+        worstWindowLabel: snapshot.worstWindowLabel,
+        soonestResetAt: snapshot.soonestResetAt,
+      },
+    }).catch(() => undefined);
+
+    await this.notifyUsageThresholdPause(settings, snapshot, thresholdPercent);
+  }
+
+  /**
+   * FNXC:UsageControl 2026-07-13-00:00 (FUSI-058):
+   * Proactive-pause notification — fires on the SAME threshold crossing that
+   * triggered `checkUsageThresholdPause`'s pause. Reuses the existing ntfy
+   * dispatch pattern in this file (`getActiveNotificationService()` first,
+   * else `settings.ntfyEnabled && settings.ntfyTopic` + `resolveNtfyEvents` +
+   * `isNtfyEventEnabled` + `buildNtfyClickUrl` + `sendNtfyNotification`).
+   * Wrapped in try/catch — a notification failure must never affect the pause
+   * that already succeeded. Cooldown-gated like `runBoardStallAutoRecoverySweep`
+   * so a flapping threshold does not spam.
+   */
+  private async notifyUsageThresholdPause(
+    settings: Settings,
+    snapshot: UsageControlSnapshot,
+    thresholdPercent: number,
+  ): Promise<void> {
+    const now = Date.now();
+    if (
+      this.lastUsageThresholdPauseNtfyAt !== null
+      && now - this.lastUsageThresholdPauseNtfyAt < USAGE_THRESHOLD_NOTIFICATION_COOLDOWN_MS
+    ) {
+      return;
+    }
+
+    const title = "Paused — usage threshold reached";
+    const message = `Paused — ${Math.round(snapshot.worstPercentUsed)}% of ${snapshot.worstWindowLabel} Claude limit reached (threshold ${thresholdPercent}%), holding headroom before a hard limit.`;
+
+    try {
+      const notificationService = getActiveNotificationService();
+      if (notificationService) {
+        await notificationService.dispatch("usage-threshold-pause", {
+          event: "usage-threshold-pause",
+          timestamp: new Date().toISOString(),
+          metadata: {
+            worstPercentUsed: snapshot.worstPercentUsed,
+            thresholdPercent,
+            worstWindowLabel: snapshot.worstWindowLabel,
+            soonestResetAt: snapshot.soonestResetAt,
+          },
+        });
+        this.lastUsageThresholdPauseNtfyAt = now;
+        return;
+      }
+
+      const enabled = Boolean(settings.ntfyEnabled && settings.ntfyTopic);
+      const events = resolveNtfyEvents(settings.ntfyEvents);
+      if (enabled && isNtfyEventEnabled(events, "usage-threshold-pause")) {
+        const clickUrl = buildNtfyClickUrl({ dashboardHost: settings.ntfyDashboardHost });
+        await sendNtfyNotification({
+          ntfyBaseUrl: settings.ntfyBaseUrl,
+          ntfyAccessToken: settings.ntfyAccessToken,
+          topic: settings.ntfyTopic!,
+          title,
+          message,
+          priority: "default",
+          clickUrl,
+        });
+        this.lastUsageThresholdPauseNtfyAt = now;
+      }
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.warn(`notifyUsageThresholdPause: notification dispatch failed: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * FNXC:UsageControl 2026-07-13-00:00 (FUSI-058):
+   * Companion resume notification, fired from `attemptUnpause` when the pause
+   * being cleared had `globalPauseReason === "usage-threshold"`. Same
+   * dispatch pattern + cooldown as {@link notifyUsageThresholdPause}.
+   */
+  private async notifyUsageThresholdResume(settings: Settings): Promise<void> {
+    const now = Date.now();
+    if (
+      this.lastUsageThresholdResumeNtfyAt !== null
+      && now - this.lastUsageThresholdResumeNtfyAt < USAGE_THRESHOLD_NOTIFICATION_COOLDOWN_MS
+    ) {
+      return;
+    }
+
+    const title = "Resumed — usage threshold cleared";
+    const message = "Resumed — Claude usage window reset and dropped back under the configured pause threshold.";
+
+    try {
+      const notificationService = getActiveNotificationService();
+      if (notificationService) {
+        await notificationService.dispatch("usage-threshold-resume", {
+          event: "usage-threshold-resume",
+          timestamp: new Date().toISOString(),
+        });
+        this.lastUsageThresholdResumeNtfyAt = now;
+        return;
+      }
+
+      const enabled = Boolean(settings.ntfyEnabled && settings.ntfyTopic);
+      const events = resolveNtfyEvents(settings.ntfyEvents);
+      if (enabled && isNtfyEventEnabled(events, "usage-threshold-resume")) {
+        const clickUrl = buildNtfyClickUrl({ dashboardHost: settings.ntfyDashboardHost });
+        await sendNtfyNotification({
+          ntfyBaseUrl: settings.ntfyBaseUrl,
+          ntfyAccessToken: settings.ntfyAccessToken,
+          topic: settings.ntfyTopic!,
+          title,
+          message,
+          priority: "default",
+          clickUrl,
+        });
+        this.lastUsageThresholdResumeNtfyAt = now;
+      }
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.warn(`notifyUsageThresholdResume: notification dispatch failed: ${errorMessage}`);
+    }
+  }
+
   private async runMaintenance(): Promise<void> {
     if (this.maintenanceRunning) {
       log.log("Maintenance cycle skipped — previous cycle still running");
@@ -2688,6 +2990,18 @@ export class SelfHealingManager {
         { name: "fts-maintenance", fn: () => this.maintainTaskFts() },
         { name: "checkpoint-wal", fn: () => Promise.resolve(this.checkpointWal()) },
         { name: "enforce-worktree-cap", fn: () => this.enforceWorktreeCap() },
+        /*
+        FNXC:UsageControl 2026-07-13-00:00 (FUSI-058):
+        Proactive usage-threshold pause check runs every maintenance tick, paused or not
+        (batch 1 is the paused-safe batch) — the check itself is internally paused-safe: it
+        reads fresh settings and returns immediately when `usagePauseThresholdPercent` is
+        undefined (feature off) or `globalPause` is already true (any reason, including
+        "manual" — never overridden). This must run in batch 1 rather than the
+        pause-gated batch 2, since a pause condition being detected IS the trigger —
+        gating it on "not already paused" via batch 2's outer skip would make the very
+        first threshold pause unreachable.
+        */
+        { name: "check-usage-threshold-pause", fn: () => this.checkUsageThresholdPause() },
       ];
       for (const fn of batch1Fns) {
         try {

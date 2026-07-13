@@ -136,6 +136,15 @@ export const DEFAULT_GLOBAL_SETTINGS = {
     "fallback-used",
     "memory-dreams-processed",
     "token-budget",
+    /*
+    FNXC:UsageControl 2026-07-13-00:00 (FUSI-058):
+    "usage-threshold-pause"/"usage-threshold-resume" are intentionally OMITTED from
+    the default event list — proactive-pause notifications are opt-in. Unlike
+    "failed"/"board-stall-unrecovered" (real degraded conditions an operator wants
+    to hear about immediately), a threshold pause is a deliberate headroom
+    reservation that resolves itself via the FUSI-053 reset-aware auto-unpause; an
+    operator who wants visibility into it opts in via NotificationsSection.
+    */
   ],
   ntfyDashboardHost: undefined,
   taskTokenBudget: undefined,

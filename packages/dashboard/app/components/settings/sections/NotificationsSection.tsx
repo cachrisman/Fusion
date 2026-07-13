@@ -40,6 +40,14 @@ export const NOTIFICATION_EVENT_OPTIONS: Array<{
     { event: "message:agent-to-agent", label: "Agent → agent message", description: "Agents are talking to each other (including replies)" },
     { event: "message:room", label: "Agent message in room", description: "An agent posted a reply in a chat room you're watching" },
     { event: "oauth-token-expired", label: "OAuth token expired", description: "Notify when a provider OAuth token (Codex, Claude, etc.) expires." },
+    /*
+    FNXC:UsageControl 2026-07-13-00:00 (FUSI-058):
+    Opt-in (NOT in DEFAULT_NTFY_EVENTS, matching DEFAULT_GLOBAL_SETTINGS.ntfyEvents in
+    settings-schema.ts) — a proactive threshold pause is a deliberate headroom reservation,
+    not a failure, so operators choose in.
+    */
+    { event: "usage-threshold-pause", label: "Usage threshold pause", description: "When Fusion proactively pauses automated activity because Claude usage crossed the configured pause threshold (before a hard rate limit)" },
+    { event: "usage-threshold-resume", label: "Usage threshold resume", description: "When Fusion automatically resumes after a proactive usage-threshold pause clears" },
 ];
 export type TestNotificationProvider = "ntfy" | "webhook" | "ntfy-message" | "ntfy-room";
 export interface NotificationsSectionProps extends SectionBaseProps {

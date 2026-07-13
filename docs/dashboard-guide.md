@@ -729,6 +729,19 @@ Mutating actions such as staging, committing, checkout, stash, pull, push, fetch
 
 ![Git Manager](./screenshots/git-manager.png)
 
+## Usage Indicator — proactive pause threshold marker (FUSI-058)
+
+The **Usage** popover (`UsageIndicator`, opened from the header Activity icon, and available inline in the Right Dock's embedded presentation) shows live AI-provider subscription usage windows with progress bars, reset timers, and pace indicators.
+
+When a project sets **Settings → Scheduling → Usage Pause Threshold (%)** (`usagePauseThresholdPercent`), the Claude usage-bar rows (5h session and weekly windows) render two additional affordances, following the same `--color-warning`/`--color-error` status-token convention used elsewhere in the dashboard:
+
+- **Threshold marker** — a small vertical line on the progress bar at the configured percent (positioned the same way as the existing pace marker), showing at a glance where the engine's proactive pause will trigger.
+- **Near-limit warning** — a banner shown once a window's usage is within 10 percentage points of the threshold (`--color-warning`), escalating to `--color-error` once usage is at or over the threshold. The banner names the window and, where available, the time until it resets.
+
+Both affordances render only for the Claude provider (matching the engine's proactive-pause gate, which only acts on Claude usage) and render nothing at all — no marker, no warning, no empty shell — when `usagePauseThresholdPercent` is left blank (the feature is off by default). The marker/warning render identically in the modal and embedded (Right Dock) presentations and at mobile breakpoints.
+
+When the engine actually triggers the proactive pause, the existing `GlobalPauseBanner` (see the reset-time-aware auto-unpause note under **OAuth Re-login Banner** below) surfaces it the same way it does a hard rate-limit pause, and — if configured — an opt-in `usage-threshold-pause`/`usage-threshold-resume` ntfy notification is sent (see **Settings → Notifications** and `docs/settings-reference.md`'s `ntfyEvents` entry).
+
 ## Merge Advance Notice
 
 Merge Advance Notice is a global banner (`MergeAdvanceNotice`) mounted in the main app chrome that appears when the integration branch advances.

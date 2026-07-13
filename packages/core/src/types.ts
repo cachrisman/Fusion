@@ -784,7 +784,9 @@ export type NtfyNotificationEvent =
   | "message:room"
   | "oauth-token-expired"
   | "task-created"
-  | "workflow-notify";
+  | "workflow-notify"
+  | "usage-threshold-pause"
+  | "usage-threshold-resume";
 
 /** Known notification event types. Providers may support additional custom events. */
 export const NOTIFICATION_EVENTS = [
@@ -811,6 +813,18 @@ export const NOTIFICATION_EVENTS = [
   "oauth-token-expired",
   "task-created",
   "workflow-notify",
+  /*
+   * FNXC:UsageControl 2026-07-13-00:00 (FUSI-058):
+   * Proactive-pause notifications fire on BOTH the threshold pause (headroom
+   * reservation before a hard 429) and the resume once the exhausted window
+   * resets and usage drops back under `usagePauseThresholdPercent`. Kept as two
+   * distinct opt-in events (NOT enabled by default in
+   * `DEFAULT_GLOBAL_SETTINGS.ntfyEvents` — see settings-schema.ts) rather than
+   * folding into the existing "failed"/board-stall style events, since a
+   * proactive threshold pause is a deliberate headroom decision, not a failure.
+   */
+  "usage-threshold-pause",
+  "usage-threshold-resume",
 ] as const;
 
 /** Notification event type. Known events plus provider-specific custom events. */

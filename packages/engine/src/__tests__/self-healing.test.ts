@@ -596,6 +596,246 @@ describe("SelfHealingManager", () => {
     });
   });
 
+  // ── FUSI-058: usage-threshold pause resume + notification ─────────
+
+  describe("usage-threshold auto-unpause + resume notification", () => {
+    it("resumes a \"usage-threshold\" pause via getUsageControlSnapshot's soonestResetAt/soonestResetMs (not getRateLimitResetAt, which requires full exhaustion)", async () => {
+      const getUsageControlSnapshot = vi.fn().mockResolvedValue({
+        worstPercentUsed: 92,
+        worstPercentLeft: 8,
+        soonestResetAt: new Date(Date.now() + 10_000).toISOString(),
+        soonestResetMs: 10_000,
+        pace: null,
+        worstWindowLabel: "5h session",
+      });
+      const getRateLimitResetAt = vi.fn().mockResolvedValue(null); // exhaustion-gated provider has nothing to offer at 92%
+      manager = new SelfHealingManager(store, { rootDir: "/tmp/test-project", getUsageControlSnapshot, getRateLimitResetAt });
+      manager.start();
+
+      store.emit("settings:updated", {
+        settings: {
+          globalPause: true,
+          globalPauseReason: "usage-threshold",
+          autoUnpauseEnabled: true,
+          autoUnpauseBaseDelayMs: 100_000, // deliberately large so a blind-backoff fallback would fail this assertion
+          autoUnpauseMaxDelayMs: 800_000,
+          autoUnpauseResetBufferMs: 1_000,
+        },
+        previous: { globalPause: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getUsageControlSnapshot).toHaveBeenCalledTimes(1);
+
+      // resetMs(10s) + buffer(1s) = 11s.
+      await vi.advanceTimersByTimeAsync(10_500);
+      expect(store.updateSettings).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(store.updateSettings).toHaveBeenCalledWith({
+        globalPause: false,
+        globalPauseReason: undefined,
+      });
+      // getRateLimitResetAt must not even be consulted once the snapshot resolved a reset.
+      expect(getRateLimitResetAt).not.toHaveBeenCalled();
+    });
+
+    it("falls back to rateLimitResetProvider, then blind backoff, when getUsageControlSnapshot has no reset for a usage-threshold pause", async () => {
+      const getUsageControlSnapshot = vi.fn().mockResolvedValue(null);
+      manager = new SelfHealingManager(store, { rootDir: "/tmp/test-project", getUsageControlSnapshot });
+      manager.start();
+
+      store.emit("settings:updated", {
+        settings: {
+          globalPause: true,
+          globalPauseReason: "usage-threshold",
+          autoUnpauseEnabled: true,
+          autoUnpauseBaseDelayMs: 100,
+          autoUnpauseMaxDelayMs: 800,
+        },
+        previous: { globalPause: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(150);
+
+      expect(getUsageControlSnapshot).toHaveBeenCalledTimes(1);
+      expect(store.updateSettings).toHaveBeenCalledWith({
+        globalPause: false,
+        globalPauseReason: undefined,
+      });
+    });
+
+    it("does not auto-resume a usage-threshold pause when autoUnpauseEnabled is false", async () => {
+      const getUsageControlSnapshot = vi.fn().mockResolvedValue({
+        worstPercentUsed: 95,
+        worstPercentLeft: 5,
+        soonestResetAt: new Date(Date.now() + 5_000).toISOString(),
+        soonestResetMs: 5_000,
+        pace: null,
+        worstWindowLabel: "weekly",
+      });
+      manager = new SelfHealingManager(store, { rootDir: "/tmp/test-project", getUsageControlSnapshot });
+      manager.start();
+
+      store.emit("settings:updated", {
+        settings: { globalPause: true, globalPauseReason: "usage-threshold", autoUnpauseEnabled: false },
+        previous: { globalPause: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      expect(getUsageControlSnapshot).not.toHaveBeenCalled();
+      expect(store.updateSettings).not.toHaveBeenCalled();
+    });
+
+    it("does not auto-resume a \"manual\" pause even when getUsageControlSnapshot resolves a reset (manual semantics unchanged)", async () => {
+      const getUsageControlSnapshot = vi.fn().mockResolvedValue({
+        worstPercentUsed: 95,
+        worstPercentLeft: 5,
+        soonestResetAt: new Date(Date.now() + 5_000).toISOString(),
+        soonestResetMs: 5_000,
+        pace: null,
+        worstWindowLabel: "weekly",
+      });
+      manager = new SelfHealingManager(store, { rootDir: "/tmp/test-project", getUsageControlSnapshot });
+      manager.start();
+
+      store.emit("settings:updated", {
+        settings: { globalPause: true, globalPauseReason: "manual", autoUnpauseEnabled: true },
+        previous: { globalPause: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      expect(getUsageControlSnapshot).not.toHaveBeenCalled();
+      expect(store.updateSettings).not.toHaveBeenCalled();
+    });
+
+    it("does not regress the hard \"rate-limit\" resume path when getUsageControlSnapshot is also wired", async () => {
+      const getUsageControlSnapshot = vi.fn().mockResolvedValue({
+        worstPercentUsed: 50,
+        worstPercentLeft: 50,
+        soonestResetAt: new Date(Date.now() + 99_000).toISOString(),
+        soonestResetMs: 99_000,
+        pace: null,
+        worstWindowLabel: "5h session",
+      });
+      const getRateLimitResetAt = vi.fn().mockResolvedValue({
+        resetAt: new Date(Date.now() + 10_000).toISOString(),
+        resetMs: 10_000,
+      });
+      manager = new SelfHealingManager(store, { rootDir: "/tmp/test-project", getUsageControlSnapshot, getRateLimitResetAt });
+      manager.start();
+
+      store.emit("settings:updated", {
+        settings: {
+          globalPause: true,
+          globalPauseReason: "rate-limit",
+          autoUnpauseEnabled: true,
+          autoUnpauseBaseDelayMs: 100_000,
+          autoUnpauseMaxDelayMs: 800_000,
+          autoUnpauseResetBufferMs: 1_000,
+        },
+        previous: { globalPause: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      // A "rate-limit" pause must use rateLimitResetProvider, never getUsageControlSnapshot.
+      expect(getUsageControlSnapshot).not.toHaveBeenCalled();
+      expect(getRateLimitResetAt).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(11_000);
+      expect(store.updateSettings).toHaveBeenCalledWith({
+        globalPause: false,
+        globalPauseReason: undefined,
+      });
+    });
+
+    it("emits the task:usage-threshold-resume run-audit event and fires the usage-threshold-resume ntfy notification on resume", async () => {
+      const recordRunAuditEvent = vi.fn().mockResolvedValue(undefined);
+      store = createMockStore({
+        getSettings: vi.fn().mockResolvedValue({
+          globalPause: true,
+          globalPauseReason: "usage-threshold",
+          autoUnpauseEnabled: true,
+          autoUnpauseBaseDelayMs: 100,
+          autoUnpauseMaxDelayMs: 800,
+          maintenanceIntervalMs: 0,
+          ntfyEnabled: true,
+          ntfyTopic: "fusion-alerts",
+          ntfyEvents: ["usage-threshold-resume"],
+        }),
+        recordRunAuditEvent,
+      });
+      manager = new SelfHealingManager(store, { rootDir: "/tmp/test-project" });
+      manager.start();
+
+      store.emit("settings:updated", {
+        settings: {
+          globalPause: true,
+          globalPauseReason: "usage-threshold",
+          autoUnpauseEnabled: true,
+          autoUnpauseBaseDelayMs: 100,
+          autoUnpauseMaxDelayMs: 800,
+        },
+        previous: { globalPause: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(150);
+
+      expect(store.updateSettings).toHaveBeenCalledWith({
+        globalPause: false,
+        globalPauseReason: undefined,
+      });
+      expect(recordRunAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+        domain: "database",
+        mutationType: "task:usage-threshold-resume",
+        target: "global",
+      }));
+    });
+
+    it("does NOT emit task:usage-threshold-resume for a plain rate-limit resume (distinct audit events)", async () => {
+      const recordRunAuditEvent = vi.fn().mockResolvedValue(undefined);
+      store = createMockStore({
+        getSettings: vi.fn().mockResolvedValue({
+          globalPause: true,
+          globalPauseReason: "rate-limit",
+          autoUnpauseEnabled: true,
+          autoUnpauseBaseDelayMs: 100,
+          autoUnpauseMaxDelayMs: 800,
+          maintenanceIntervalMs: 0,
+        }),
+        recordRunAuditEvent,
+      });
+      manager = new SelfHealingManager(store, { rootDir: "/tmp/test-project" });
+      manager.start();
+
+      store.emit("settings:updated", {
+        settings: {
+          globalPause: true,
+          globalPauseReason: "rate-limit",
+          autoUnpauseEnabled: true,
+          autoUnpauseBaseDelayMs: 100,
+          autoUnpauseMaxDelayMs: 800,
+        },
+        previous: { globalPause: false },
+      });
+
+      await vi.advanceTimersByTimeAsync(150);
+
+      expect(store.updateSettings).toHaveBeenCalledWith({
+        globalPause: false,
+        globalPauseReason: undefined,
+      });
+      expect(recordRunAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+        mutationType: "task:reconcile-rate-limit-redrive",
+      }));
+      expect(recordRunAuditEvent).not.toHaveBeenCalledWith(expect.objectContaining({
+        mutationType: "task:usage-threshold-resume",
+      }));
+    });
+  });
+
   // ── Stuck kill budget ─────────────────────────────────────────────
 
   describe("checkStuckBudget", () => {

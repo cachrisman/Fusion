@@ -73,6 +73,20 @@ export function checkSessionError(session: { state: { errorMessage?: string; err
   }
 }
 
+/*
+FNXC:UsageControl 2026-07-13-00:00 (FUSI-058):
+Two distinct pause reasons now exist: "rate-limit" (reactive — a hard 429/usage-limit error
+was actually hit) and "usage-threshold" (proactive — the self-healing maintenance sweep
+observed worst-case usage crossing `usagePauseThresholdPercent` BEFORE any hard error).
+Separating the reasons lets the dashboard and reset-aware auto-unpause distinguish "we
+reserved headroom early" from "we got throttled". A hard rate-limit hit always takes
+priority: `onUsageLimitHit` escalates an active "usage-threshold" pause to "rate-limit"
+in place (same idempotent no-op semantics otherwise) since the reactive condition is more
+severe than the proactive one it was standing in for. Neither pause method ever overrides
+an existing "manual" pause — a caller must never see this class turn `globalPause` from
+true back to a different reason (other than the threshold->rate-limit escalation) or from
+true to false; only the FUSI-053 reset-aware auto-unpause and explicit operator action clear it.
+*/
 export class UsageLimitPauser {
   private paused = false;
 
@@ -91,6 +105,15 @@ export class UsageLimitPauser {
     if (this.paused) {
       const settings = await this.store.getSettings();
       if (settings.globalPause) {
+        // FUSI-058: a hard rate-limit hit escalates a prior proactive "usage-threshold"
+        // pause in place — the reactive condition is more severe than the proactive one.
+        if (settings.globalPauseReason === "usage-threshold") {
+          await this.store.updateSettings({ globalPause: true, globalPauseReason: "rate-limit" });
+          log.warn(
+            `${agentType} hit usage limit on ${taskId} while a proactive usage-threshold pause was active — escalating to rate-limit`,
+          );
+          return;
+        }
         // Still paused — no need to trigger again
         log.log(`Global pause already active — ignoring duplicate from ${agentType}/${taskId}`);
         return;
@@ -114,5 +137,46 @@ export class UsageLimitPauser {
     await this.store.updateSettings({ globalPause: true, globalPauseReason: "rate-limit" });
 
     log.warn("⚠ Global pause activated — all automated activity will halt");
+  }
+
+  /**
+   * FUSI-058: called by the self-healing maintenance sweep when the injected
+   * `getUsageControlSnapshot()` reports worst-case usage crossing
+   * `usagePauseThresholdPercent` — BEFORE any hard 429/usage-limit error occurs.
+   * Triggers a proactive global pause with the reserved `globalPauseReason:
+   * "usage-threshold"` so the operator keeps headroom.
+   *
+   * **Idempotency:** reads current settings before every call so repeated ticks over
+   * threshold only pause once, and never overrides an already-active pause of ANY
+   * reason (including a prior "usage-threshold" pause, a "rate-limit" pause, or a
+   * "manual" operator pause) — the caller does not need to pre-check `globalPause`.
+   *
+   * @returns `true` if a new pause was activated, `false` if a pause was already active.
+   */
+  async onUsageThresholdReached(details: {
+    window: string;
+    percentUsed: number;
+    thresholdPercent: number;
+  }): Promise<boolean> {
+    const { window, percentUsed, thresholdPercent } = details;
+
+    const settings = await this.store.getSettings();
+    if (settings.globalPause) {
+      log.log(
+        `Skipping proactive usage-threshold pause — global pause already active (reason=${settings.globalPauseReason ?? "unknown"})`,
+      );
+      return false;
+    }
+
+    this.paused = true;
+
+    log.warn(
+      `Proactive usage-threshold pause: ${window} at ${percentUsed}% (>= threshold ${thresholdPercent}%)`,
+    );
+
+    await this.store.updateSettings({ globalPause: true, globalPauseReason: "usage-threshold" });
+
+    log.warn("⚠ Global pause activated proactively (usage-threshold) — reserving operator headroom before a hard limit");
+    return true;
   }
 }
