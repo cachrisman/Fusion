@@ -5424,10 +5424,16 @@ describe("SelfHealingManager", () => {
 
       expect(result).toBe(0);
       expect(store.moveTask).not.toHaveBeenCalledWith("FN-353", "done");
-      expect(store.updateTask).toHaveBeenCalledWith("FN-353", {
+      // FNXC:SelfHealingLifecycle 2026-07-13-08:00: The finalization-blocked park's
+      // store.updateTask call also intentionally persists `mergeDetails` (FUSI-084 —
+      // the landed commit SHA must survive on the task row even while parked as
+      // blocked). Assert the meaningful subset via objectContaining rather than an
+      // exact object shape, matching the sibling assertions in this file and in
+      // merger-merge-lifecycle.test.ts. (FUSI-086)
+      expect(store.updateTask).toHaveBeenCalledWith("FN-353", expect.objectContaining({
         status: "failed",
         error: "Merge confirmed but finalization blocked: task has incomplete steps",
-      });
+      }));
       expect(store.logEntry).toHaveBeenCalledWith(
         "FN-353",
         expect.stringContaining("finalization blocked"),
