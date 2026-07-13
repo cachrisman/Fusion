@@ -878,6 +878,47 @@ describe("POST /tasks/:id/retry", () => {
     expect(engine.clearTaskPauseAbortState).not.toHaveBeenCalled();
   });
 
+  /*
+  FNXC:ManualRetry 2026-07-13-12:25:
+  Plan-in-place workflows (Coding (Ideas): no "triage" column) keep needs-replan cards in
+  "todo"; the Retry button the cards already show must map to the planning retry there
+  instead of a 400. Default-workflow todo cards keep the generic-retry semantics.
+  */
+  it("offers the planning retry for a needs-replan todo card in a workflow without a triage column", async () => {
+    const replanTask = { ...FAKE_TASK_DETAIL, column: "todo", status: "needs-replan" };
+    (store.getTask as ReturnType<typeof vi.fn>).mockResolvedValue(replanTask);
+    (store as unknown as Record<string, unknown>).getTaskWorkflowSelection = vi.fn().mockReturnValue({ workflowId: "builtin:coding-ideas", stepIds: [] });
+    (store.updateTask as ReturnType<typeof vi.fn>).mockResolvedValue(replanTask);
+
+    const res = await REQUEST(buildApp(), "POST", "/api/tasks/KB-001/retry", JSON.stringify({}), {
+      "Content-Type": "application/json",
+    });
+
+    expect(res.status).toBe(200);
+    // Planning-retry semantics: status reset to needs-replan, no column move.
+    expect(store.updateTask).toHaveBeenCalledWith("KB-001", expect.objectContaining({ status: "needs-replan" }));
+    expect(store.moveTask).not.toHaveBeenCalled();
+    expect(store.logEntry).toHaveBeenCalledWith("KB-001", "Retry requested from dashboard (planning retry budget reset)");
+  });
+
+  it("keeps generic retry semantics for a needs-replan todo card in the default workflow", async () => {
+    const replanTask = { ...FAKE_TASK_DETAIL, column: "todo", status: "needs-replan" };
+    const movedTask = { ...FAKE_TASK_DETAIL, column: "todo", status: undefined };
+    (store.getTask as ReturnType<typeof vi.fn>).mockResolvedValue(replanTask);
+    (store as unknown as Record<string, unknown>).getTaskWorkflowSelection = vi.fn().mockReturnValue(undefined);
+    (store.updateTask as ReturnType<typeof vi.fn>).mockResolvedValue(replanTask);
+    (store.moveTask as ReturnType<typeof vi.fn>).mockResolvedValue(movedTask);
+
+    const res = await REQUEST(buildApp(), "POST", "/api/tasks/KB-001/retry", JSON.stringify({}), {
+      "Content-Type": "application/json",
+    });
+
+    // Default workflow declares "triage": a needs-replan todo card is not a planning
+    // retry there — and needs-replan alone is not a generic-retryable status.
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("not in a retryable state");
+  });
+
   it("retries a failed task in any column (not just in-progress)", async () => {
     const failedTaskInTodo = { ...FAKE_TASK_DETAIL, column: "todo", status: "failed" };
     const movedTask = { ...FAKE_TASK_DETAIL, column: "todo", status: undefined };
@@ -2445,6 +2486,81 @@ describe("POST /tasks/batch-update-models", () => {
     expect(res.body.error).toContain("nodeId must be a string, null, or undefined");
   });
 
+  it("bulk sets thinkingLevel across selected tasks", async () => {
+    const task1 = { ...FAKE_TASK_DETAIL, id: "FN-001" };
+    const task2 = { ...FAKE_TASK_DETAIL, id: "FN-002" };
+    const updated1 = { ...task1, thinkingLevel: "high" };
+    const updated2 = { ...task2, thinkingLevel: "high" };
+
+    (store.getTask as ReturnType<typeof vi.fn>).mockResolvedValueOnce(task1).mockResolvedValueOnce(task2);
+    (store.updateTask as ReturnType<typeof vi.fn>).mockResolvedValueOnce(updated1).mockResolvedValueOnce(updated2);
+
+    const res = await REQUEST(buildApp(), "POST", "/api/tasks/batch-update-models", JSON.stringify({
+      taskIds: ["FN-001", "FN-002"],
+      thinkingLevel: "high",
+    }), {
+      "Content-Type": "application/json",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(2);
+    expect(store.updateTask).toHaveBeenCalledWith("FN-001", { thinkingLevel: "high" });
+    expect(store.updateTask).toHaveBeenCalledWith("FN-002", { thinkingLevel: "high" });
+  });
+
+  it("rejects invalid thinkingLevel values", async () => {
+    const res = await REQUEST(buildApp(), "POST", "/api/tasks/batch-update-models", JSON.stringify({
+      taskIds: ["FN-001"],
+      thinkingLevel: "maximum",
+    }), {
+      "Content-Type": "application/json",
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("thinkingLevel must be one of");
+    expect(store.updateTask).not.toHaveBeenCalled();
+  });
+
+  it("omitted thinkingLevel leaves existing values untouched", async () => {
+    const task1 = { ...FAKE_TASK_DETAIL, id: "FN-001", thinkingLevel: "medium" };
+    const updated1 = { ...task1, modelProvider: "openai", modelId: "gpt-4o" };
+
+    (store.getTask as ReturnType<typeof vi.fn>).mockResolvedValueOnce(task1);
+    (store.updateTask as ReturnType<typeof vi.fn>).mockResolvedValueOnce(updated1);
+
+    const res = await REQUEST(buildApp(), "POST", "/api/tasks/batch-update-models", JSON.stringify({
+      taskIds: ["FN-001"],
+      modelProvider: "openai",
+      modelId: "gpt-4o",
+    }), {
+      "Content-Type": "application/json",
+    });
+
+    expect(res.status).toBe(200);
+    expect(store.updateTask).toHaveBeenCalledWith("FN-001", {
+      modelProvider: "openai",
+      modelId: "gpt-4o",
+    });
+  });
+
+  it("clears thinkingLevel when null is provided", async () => {
+    const task1 = { ...FAKE_TASK_DETAIL, id: "FN-001", thinkingLevel: "medium" };
+    const updated1 = { ...task1, thinkingLevel: undefined };
+
+    (store.getTask as ReturnType<typeof vi.fn>).mockResolvedValueOnce(task1);
+    (store.updateTask as ReturnType<typeof vi.fn>).mockResolvedValueOnce(updated1);
+
+    const res = await REQUEST(buildApp(), "POST", "/api/tasks/batch-update-models", JSON.stringify({
+      taskIds: ["FN-001"],
+      thinkingLevel: null,
+    }), {
+      "Content-Type": "application/json",
+    });
+
+    expect(res.status).toBe(200);
+    expect(store.updateTask).toHaveBeenCalledWith("FN-001", { thinkingLevel: null });
+  });
+
   it("updates nodeId across multiple tasks", async () => {
     const task1 = { ...FAKE_TASK_DETAIL, id: "FN-001" };
     const task2 = { ...FAKE_TASK_DETAIL, id: "FN-002" };
@@ -3785,6 +3901,80 @@ describe("PATCH /tasks/:id", () => {
     expect(res.body.error).toContain("thinkingLevel must be one of");
   });
 
+  it("forwards valid per-lane thinking levels to store.updateTask", async () => {
+    (store.updateTask as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...FAKE_TASK_DETAIL,
+      validatorThinkingLevel: "high",
+      planningThinkingLevel: "minimal",
+    });
+
+    const res = await REQUEST(buildApp(), "PATCH", "/api/tasks/KB-001", JSON.stringify({
+      validatorThinkingLevel: "high",
+      planningThinkingLevel: "minimal",
+    }), {
+      "Content-Type": "application/json",
+    });
+
+    expect(res.status).toBe(200);
+    expect(store.updateTask).toHaveBeenCalledWith("KB-001", {
+      validatorThinkingLevel: "high",
+      planningThinkingLevel: "minimal",
+    });
+  });
+
+  it("returns 400 for invalid per-lane thinking level values via PATCH", async () => {
+    const res = await REQUEST(buildApp(), "PATCH", "/api/tasks/KB-001", JSON.stringify({
+      validatorThinkingLevel: "maximum",
+    }), {
+      "Content-Type": "application/json",
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("validatorThinkingLevel must be one of");
+    expect(store.updateTask).not.toHaveBeenCalled();
+  });
+
+  it("accepts null to clear per-lane thinking levels via PATCH", async () => {
+    (store.updateTask as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...FAKE_TASK_DETAIL,
+      validatorThinkingLevel: undefined,
+      planningThinkingLevel: undefined,
+    });
+
+    const res = await REQUEST(buildApp(), "PATCH", "/api/tasks/KB-001", JSON.stringify({
+      validatorThinkingLevel: null,
+      planningThinkingLevel: null,
+    }), {
+      "Content-Type": "application/json",
+    });
+
+    expect(res.status).toBe(200);
+    expect(store.updateTask).toHaveBeenCalledWith("KB-001", {
+      validatorThinkingLevel: null,
+      planningThinkingLevel: null,
+    });
+  });
+
+  it("omits per-lane thinking updates when fields are absent via PATCH", async () => {
+    (store.updateTask as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...FAKE_TASK_DETAIL,
+      title: "No lane thinking patch",
+      validatorThinkingLevel: "high",
+      planningThinkingLevel: "low",
+    });
+
+    const res = await REQUEST(buildApp(), "PATCH", "/api/tasks/KB-001", JSON.stringify({
+      title: "No lane thinking patch",
+    }), {
+      "Content-Type": "application/json",
+    });
+
+    expect(res.status).toBe(200);
+    expect(store.updateTask).toHaveBeenCalledWith("KB-001", {
+      title: "No lane thinking patch",
+    });
+  });
+
   it("forwards reviewLevel to store.updateTask", async () => {
     (store.updateTask as ReturnType<typeof vi.fn>).mockResolvedValue({
       ...FAKE_TASK_DETAIL,
@@ -4105,6 +4295,35 @@ describe("PATCH /tasks/:id/assign and GET /agents/:id/tasks", () => {
     expect(store.updateTask).toHaveBeenCalledWith("FN-200", { assignedAgentId: reviewerAgentId });
   }, 20000);
 
+  /*
+  FNXC:AgentRouting 2026-07-12-13:35:
+  Issue #2015: the /assign route must honor per-agent assignmentPolicy — "none" (liaison guarantee) is
+  refused even with override=true.
+  */
+  it("returns 409 when assigning to a policy-'none' executor, even with override", async () => {
+    const { AgentStore } = await import("@fusion/core");
+    const agentStore = new AgentStore({ rootDir: fusionDir });
+    await agentStore.init();
+    const liaison = await agentStore.createAgent({
+      name: "Platform Liaison",
+      role: "executor",
+      runtimeConfig: { assignmentPolicy: "none" },
+    });
+
+    for (const override of [undefined, true]) {
+      const res = await REQUEST(
+        buildApp(),
+        "PATCH",
+        "/api/tasks/FN-200/assign",
+        JSON.stringify({ agentId: liaison.id, ...(override ? { override } : {}) }),
+        { "Content-Type": "application/json" },
+      );
+      expect(res.status).toBe(409);
+      expect(res.body.error).toContain("assignmentPolicy \"none\"");
+    }
+    expect(store.updateTask).not.toHaveBeenCalled();
+  }, 30_000);
+
   it("returns 404 when assigning to a non-existent agent", async () => {
     const res = await REQUEST(
       buildApp(),
@@ -4260,7 +4479,8 @@ describe("PATCH /tasks/:id/assign and GET /agents/:id/tasks", () => {
     const res = await REQUEST(buildApp(), "POST", `/api/agents/${agentId}/inbox`);
 
     expect(res.status).toBe(200);
-    expect(store.selectNextTaskForAgent).toHaveBeenCalledWith(agentId);
+    // FNXC:AgentRouting 2026-07-12-14:20: issue #2015 — the inbox preview now passes the agent so role/assignmentPolicy filtering applies.
+    expect(store.selectNextTaskForAgent).toHaveBeenCalledWith(agentId, expect.objectContaining({ id: agentId, role: "executor" }));
     expect(res.body).toEqual({
       task: expect.objectContaining({ id: "FN-500" }),
       priority: "todo",
@@ -4274,7 +4494,8 @@ describe("PATCH /tasks/:id/assign and GET /agents/:id/tasks", () => {
     const res = await REQUEST(buildApp(), "POST", `/api/agents/${agentId}/inbox`);
 
     expect(res.status).toBe(200);
-    expect(store.selectNextTaskForAgent).toHaveBeenCalledWith(agentId);
+    // FNXC:AgentRouting 2026-07-12-14:20: issue #2015 — the inbox preview now passes the agent so role/assignmentPolicy filtering applies.
+    expect(store.selectNextTaskForAgent).toHaveBeenCalledWith(agentId, expect.objectContaining({ id: agentId, role: "executor" }));
     expect(res.body).toEqual({ task: null });
   }, 30_000);
 
@@ -4377,6 +4598,53 @@ describe("Task checkout routes", () => {
     expect(res.status).toBe(200);
     expect(res.body.checkedOutBy).toBe(agentAId);
     expect(res.body.checkedOutAt).toBeTruthy();
+  }, 20_000);
+
+  /*
+  FNXC:AgentRouting 2026-07-12-13:40:
+  Issue #2015: POST /tasks/:id/checkout was an UNGUARDED binding surface — role-incompatible or
+  policy-excluded agents could acquire the lease. The guard now lives in AgentStore.checkoutTask and must
+  surface here as 409.
+  */
+  it("POST /tasks/:id/checkout — returns 409 for a role-incompatible agent", async () => {
+    const { AgentStore } = await import("@fusion/core");
+    const agentStore = new AgentStore({ rootDir: fusionDir });
+    await agentStore.init();
+    const liaison = await agentStore.createAgent({ name: "Custom Liaison", role: "custom" });
+
+    const res = await REQUEST(
+      buildApp(),
+      "POST",
+      `/api/tasks/${taskState.id}/checkout`,
+      JSON.stringify({ agentId: liaison.id }),
+      { "Content-Type": "application/json" },
+    );
+
+    expect(res.status).toBe(409);
+    expect(taskState.checkedOutBy).toBeUndefined();
+  }, 20_000);
+
+  it("POST /tasks/:id/checkout — returns 409 for an executor with assignmentPolicy 'none'", async () => {
+    const { AgentStore } = await import("@fusion/core");
+    const agentStore = new AgentStore({ rootDir: fusionDir });
+    await agentStore.init();
+    const liaison = await agentStore.createAgent({
+      name: "Platform Liaison",
+      role: "executor",
+      runtimeConfig: { assignmentPolicy: "none" },
+    });
+
+    const res = await REQUEST(
+      buildApp(),
+      "POST",
+      `/api/tasks/${taskState.id}/checkout`,
+      JSON.stringify({ agentId: liaison.id }),
+      { "Content-Type": "application/json" },
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("assignmentPolicy \"none\"");
+    expect(taskState.checkedOutBy).toBeUndefined();
   }, 20_000);
 
   it("POST /tasks/:id/checkout — returns 409 on conflict", async () => {

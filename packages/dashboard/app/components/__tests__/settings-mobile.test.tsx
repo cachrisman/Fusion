@@ -43,6 +43,7 @@ const defaultSettings = {
 vi.mock("../../api", () => ({
   fetchProjects: vi.fn(() => Promise.resolve([])),
   fetchGitRemotes: vi.fn(() => Promise.resolve({ remotes: [] })),
+  fetchGitRemotesDetailed: vi.fn(() => Promise.resolve([])),
   fetchGitBranches: vi.fn(() => Promise.resolve([])),
   fetchSettings: vi.fn(() => Promise.resolve({ ...defaultSettings })),
   fetchSettingsByScope: vi.fn(() => Promise.resolve({ global: { ...defaultSettings }, project: {} })),
@@ -179,6 +180,37 @@ function expectMobileRule(css: string, selector: string, declaration: string): v
   expect(pattern.test(css)).toBe(true);
 }
 
+function getMobileMediaBlocks(css: string): string[] {
+  const blocks: string[] = [];
+  const mediaPattern = /@media[^{]*\(max-width:\s*768px\)[^{]*\{/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = mediaPattern.exec(css)) !== null) {
+    let depth = 0;
+    let end = match.index;
+    for (; end < css.length; end += 1) {
+      if (css[end] === "{") depth += 1;
+      if (css[end] === "}") depth -= 1;
+      if (depth === 0 && end > match.index) {
+        end += 1;
+        break;
+      }
+    }
+    blocks.push(css.slice(match.index, end));
+    mediaPattern.lastIndex = end;
+  }
+
+  return blocks;
+}
+
+function expectNoMobileRule(css: string, selector: string, declaration: string): void {
+  const pattern = new RegExp(
+    `${escapeRegExp(selector)}\\s*\\{[^}]*${escapeRegExp(declaration)}`,
+  );
+  const offendingBlock = getMobileMediaBlocks(css).find((block) => pattern.test(block));
+  expect(offendingBlock).toBeUndefined();
+}
+
 function expectBaseRule(css: string, selector: string, declaration: string): void {
   const pattern = new RegExp(
     `${escapeRegExp(selector)}\\s*\\{[^}]*${escapeRegExp(declaration)}`,
@@ -189,6 +221,9 @@ function expectBaseRule(css: string, selector: string, declaration: string): voi
 describe("SettingsModal mobile adaptations", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.removeItem("fusion_github_star_count");
+    localStorage.removeItem("fusion:github-star-clicked");
+    localStorage.setItem("fusion:settings:show-advanced", "true");
     mockSettingsViewport(false);
   });
 
@@ -206,14 +241,21 @@ describe("SettingsModal mobile adaptations", () => {
   FN-7506 mobile surface coverage: the Reset Settings button and its confirmation
   dialog must be reachable and usable at the mobile breakpoint, with no horizontal
   overflow, mirroring the desktop assertions in SettingsModal.general.test.tsx.
+
+  FNXC:SettingsReset 2026-07-12-00:00:
+  FN-7880 mobile label coverage: the same footer affordance renders in modal and
+  embedded SettingsView presentations, but only the mobile viewport shortens the
+  visible label to Reset. Desktop and tablet keep Reset Settings.
   */
-  it("renders and operates the Reset Settings button/dialog at the mobile breakpoint", async () => {
+  it("renders and operates the compact Reset button/dialog at the mobile breakpoint", async () => {
     mockSettingsViewport(true);
     const { findByTestId, container } = render(<SettingsModal onClose={vi.fn()} addToast={vi.fn()} />);
     await waitFor(() => expect(fetchSettings).toHaveBeenCalled());
 
     const resetBtn = await findByTestId("settings-reset");
     expect(container.querySelector(".modal-actions")?.contains(resetBtn)).toBe(true);
+    expect(resetBtn).toHaveTextContent(/^Reset$/);
+    expect(resetBtn).not.toHaveTextContent("Reset Settings");
 
     const user = userEvent.setup({ delay: null, pointerEventsCheck: 0 });
     await user.click(resetBtn);
@@ -226,8 +268,37 @@ describe("SettingsModal mobile adaptations", () => {
     expect(updateSettings).not.toHaveBeenCalled();
   });
 
+  it("uses viewport-specific reset labels in modal and embedded footers", async () => {
+    mockSettingsViewport(true);
+    const mobileModal = render(<SettingsModal onClose={vi.fn()} addToast={vi.fn()} />);
+    await waitFor(() => expect(fetchSettings).toHaveBeenCalled());
+    expect(await mobileModal.findByTestId("settings-reset")).toHaveTextContent(/^Reset$/);
+    mobileModal.unmount();
+
+    vi.clearAllMocks();
+    mockSettingsViewport(true);
+    const mobileEmbedded = render(<SettingsView onClose={vi.fn()} addToast={vi.fn()} />);
+    await waitFor(() => expect(fetchSettings).toHaveBeenCalled());
+    expect(await mobileEmbedded.findByTestId("settings-reset")).toHaveTextContent(/^Reset$/);
+    mobileEmbedded.unmount();
+
+    vi.clearAllMocks();
+    mockSettingsViewport(false);
+    const desktopModal = render(<SettingsModal onClose={vi.fn()} addToast={vi.fn()} />);
+    await waitFor(() => expect(fetchSettings).toHaveBeenCalled());
+    expect(await desktopModal.findByTestId("settings-reset")).toHaveTextContent(/^Reset Settings$/);
+    desktopModal.unmount();
+
+    vi.clearAllMocks();
+    mockSettingsViewport(false);
+    const desktopEmbedded = render(<SettingsView onClose={vi.fn()} addToast={vi.fn()} />);
+    await waitFor(() => expect(fetchSettings).toHaveBeenCalled());
+    expect(await desktopEmbedded.findByTestId("settings-reset")).toHaveTextContent(/^Reset Settings$/);
+  });
+
   it("renders the compact app version label in mobile layout", async () => {
     mockSettingsViewport(true);
+
     const { findByText, queryByText, container } = render(<SettingsModal onClose={vi.fn()} addToast={vi.fn()} />);
     await waitFor(() => expect(fetchSettings).toHaveBeenCalled());
 
@@ -550,6 +621,32 @@ describe("SettingsModal mobile adaptations", () => {
     expect(container.querySelectorAll(".notification-provider-card").length).toBeGreaterThan(1);
   });
 
+  it("keeps the GitHub star count visible in the mobile Settings header", async () => {
+    const css = loadAllAppCss();
+
+    expectNoMobileRule(css, ".settings-header-actions .settings-github-star-btn__count", "display: none;");
+    expectBaseRule(css, ".settings-github-star-btn__count", "display: inline-flex;");
+
+    localStorage.setItem("fusion_github_star_count", JSON.stringify({ count: 1234, fetchedAt: Date.now() }));
+    mockSettingsViewport(true);
+
+    const modalRender = render(<SettingsModal onClose={vi.fn()} addToast={vi.fn()} />);
+    await waitFor(() => expect(fetchSettings).toHaveBeenCalled());
+    const modalCount = modalRender.container.querySelector(".settings-github-star-btn__count");
+    expect(modalCount).toBeTruthy();
+    expect(modalCount?.textContent).toBe("1.2k");
+    modalRender.unmount();
+
+    vi.mocked(fetchSettings).mockClear();
+    const embeddedRender = render(<SettingsView onClose={vi.fn()} addToast={vi.fn()} />);
+    await waitFor(() => expect(fetchSettings).toHaveBeenCalled());
+    const embeddedCount = embeddedRender.container.querySelector(".settings-github-star-btn__count");
+    expect(embeddedCount).toBeTruthy();
+    expect(embeddedCount?.textContent).toBe("1.2k");
+    embeddedRender.unmount();
+    localStorage.removeItem("fusion_github_star_count");
+  });
+
   it("contains required mobile settings CSS overrides", () => {
     const css = loadAllAppCss();
 
@@ -569,7 +666,8 @@ describe("SettingsModal mobile adaptations", () => {
     expectMobileRule(css, ".settings-nav-item", "gap: var(--space-xs);");
     expectMobileRule(css, ".settings-content", "padding: var(--space-sm) var(--space-sm) var(--space-md);");
     expectMobileRule(css, ".settings-content textarea", "font-size: 16px;");
-    expectMobileRule(css, ".settings-section-heading", "padding: var(--space-md) var(--space-sm) var(--space-sm);");
+    expectMobileRule(css, ".settings-section-heading", "padding: var(--space-md) 0 var(--space-sm);");
+
     expectMobileRule(css, ".settings-section-heading", "margin: 0 0 var(--space-sm);");
     expectMobileRule(css, ".settings-scope-icon", "margin-right: 0;");
     expectMobileRule(css, ".settings-scope-banner", "margin: 0 var(--space-sm) var(--space-xs);");
@@ -663,7 +761,7 @@ describe("SettingsModal mobile adaptations", () => {
   it("styles settings scrollbar rules for sidebar and content", () => {
     const css = loadAllAppCss();
 
-    expectBaseRule(css, ".settings-navigation", "border-right: var(--btn-border-width) solid var(--border);");
+    expectBaseRule(css, ".settings-navigation", "background: var(--surface);");
     expectBaseRule(css, ".settings-search", "border-bottom: var(--btn-border-width) solid var(--border);");
     expectBaseRule(css, ".settings-sidebar", "scrollbar-color: var(--border) transparent;");
     expectBaseRule(css, ".settings-sidebar", "scrollbar-width: thin;");
@@ -707,7 +805,6 @@ describe("SettingsModal mobile adaptations", () => {
       expect(hideToggle.getAttribute("aria-expanded")).toBe("true");
       expect(hideToggle.closest(".settings-mobile-section-picker")).toBe(picker);
       expect(document.getElementById("settings-search-row-region")).toBeTruthy();
-      expect(picker.nextElementSibling?.classList.contains("settings-search")).toBe(true);
 
       await user.click(getByLabelText("Hide search"));
       await waitFor(() => expect(queryByTestId("settings-search-input")).toBeNull());

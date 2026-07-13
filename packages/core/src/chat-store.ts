@@ -113,6 +113,7 @@ interface ChatRoomRow {
   projectId: string | null;
   createdBy: string | null;
   status: string;
+  thinkingLevel: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -214,6 +215,7 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
       projectId: row.projectId ?? null,
       createdBy: row.createdBy ?? null,
       status: row.status as ChatRoomStatus,
+      thinkingLevel: row.thinkingLevel ?? null,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
@@ -473,6 +475,16 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
       setClauses.push("modelId = ?");
       params.push(input.modelId);
     }
+
+/*
+     * FNXC:Chat-ModelSwitch 2026-07-12-00:00:
+     * Existing direct chats must be able to retarget to a real agent without recreating the conversation. Keep this independent from modelProvider/modelId so omitted model keys remain untouched.
+     */
+    if (input.agentId !== undefined) {
+      setClauses.push("agentId = ?");
+      params.push(input.agentId);
+    }
+
     if (input.thinkingLevel !== undefined) {
       setClauses.push("thinkingLevel = ?");
       params.push(input.thinkingLevel);
@@ -955,6 +967,7 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
       projectId: input.projectId ?? null,
       createdBy: input.createdBy ?? null,
       status: "active",
+      thinkingLevel: input.thinkingLevel ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -970,8 +983,8 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
 
     this.db.transaction(() => {
       this.db.prepare(`
-        INSERT INTO chat_rooms (id, name, slug, description, projectId, createdBy, status, createdAt, updatedAt)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO chat_rooms (id, name, slug, description, projectId, createdBy, status, thinkingLevel, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         room.id,
         room.name,
@@ -980,6 +993,7 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
         room.projectId,
         room.createdBy,
         room.status,
+        room.thinkingLevel,
         room.createdAt,
         room.updatedAt,
       );
@@ -1060,6 +1074,10 @@ export class ChatStore extends EventEmitter<ChatStoreEvents> {
     if (input.status !== undefined) {
       setClauses.push("status = ?");
       params.push(input.status);
+    }
+    if (input.thinkingLevel !== undefined) {
+      setClauses.push("thinkingLevel = ?");
+      params.push(input.thinkingLevel);
     }
 
     params.push(id);

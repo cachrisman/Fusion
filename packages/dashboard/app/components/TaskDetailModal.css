@@ -2415,10 +2415,13 @@ The done-task Summary tab is a scrollable overview composed from existing detail
 
 /*
 FNXC:TaskDetailSummaryTokenCost 2026-06-27-00:00:
-The done-task Summary token-cost section must reuse task-summary card hierarchy while showing per-model counts and cost without hardcoded colors or spacing. Mobile converts table rows to stacked cards so the modal and right dock do not trap horizontal scrolling.
+The done-task Summary token-cost section must reuse task-summary card hierarchy while showing per-model counts and cost without hardcoded colors or spacing.
 
 FNXC:TaskDetailSummaryTokenCost 2026-06-28-00:00:
 The desktop table needs a token-scale min-width and non-anywhere model-name wrapping so narrow right-dock containers scroll horizontally instead of collapsing MODEL values to one character per line.
+
+FNXC:TaskDetailSummaryTokenCost 2026-07-11-00:00:
+Mobile per-model breakdowns must stay real tables and scroll horizontally inside .task-summary-token-table-wrap, matching the Command Center .cc-table-wrap pattern. Do not stack rows into cards; side-by-side model token/cost columns are the user-facing scan path.
 */
 .task-summary-token-table-wrap {
   width: 100%;
@@ -2614,74 +2617,6 @@ has history; no shell appears otherwise.
 
   .task-summary-stats {
     grid-template-columns: 1fr;
-  }
-
-  .task-summary-token-table-wrap {
-    overflow-x: visible;
-  }
-
-  .task-summary-token-table,
-  .task-summary-token-table thead,
-  .task-summary-token-table tbody,
-  .task-summary-token-table tfoot,
-  .task-summary-token-table tr,
-  .task-summary-token-table th,
-  .task-summary-token-table td {
-    display: block;
-    min-width: 0;
-  }
-
-  .task-summary-token-table thead {
-    display: none;
-  }
-
-  .task-summary-token-table tbody tr,
-  .task-summary-token-table tfoot tr {
-    padding: var(--space-sm);
-    background: var(--surface);
-    border: var(--btn-border-width) solid var(--border);
-    border-radius: var(--radius-md);
-  }
-
-  .task-summary-token-table tbody,
-  .task-summary-token-table tfoot {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-xs);
-  }
-
-  .task-summary-token-table td,
-  .task-summary-token-table tfoot th {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-sm);
-    padding: var(--space-xs) 0;
-    border-bottom: 0;
-    text-align: right;
-  }
-
-  .task-summary-token-table td::before {
-    content: attr(data-label);
-    color: var(--text-muted);
-    font-family: var(--font-sans);
-    font-weight: 600;
-    text-align: left;
-  }
-
-  .task-summary-token-table tfoot td::before {
-    content: none;
-  }
-
-  .task-summary-token-table tfoot th {
-    color: var(--text);
-    text-align: left;
-    text-transform: none;
-    letter-spacing: normal;
-  }
-
-  .task-summary-token-table tfoot th::after {
-    content: ":";
   }
 
   .task-summary-work-list li {
@@ -3688,6 +3623,10 @@ Read-only list/placeholder only — not the deferred rich per-repo-status compon
 /*
 FNXC:TaskDetailTerminal 2026-07-10-00:00:
 FN-7813's interactive task Terminal tab hosts an embedded TerminalModal, so the section must provide a real flex height and keep terminal scrolling internal to the shell instead of the surrounding detail modal.
+
+FNXC:TaskDetailTerminal 2026-07-11-00:00:
+Mobile Task Detail needs a shorter embedded terminal than the desktop/tablet shell so tab context and controls remain reachable above the fold; keep the value token-based and large enough for an interactive shell.
+
 */
 .detail-section--worktree-terminal {
   display: flex;
@@ -3698,6 +3637,7 @@ FN-7813's interactive task Terminal tab hosts an embedded TerminalModal, so the 
 
 @media (max-width: 768px) {
   .detail-section--worktree-terminal {
-    min-height: min(65dvh, calc(var(--space-2xl) * 14));
+    min-height: min(50dvh, calc(var(--space-2xl) * 11));
+
   }
 }

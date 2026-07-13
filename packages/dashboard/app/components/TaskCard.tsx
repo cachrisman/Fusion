@@ -39,7 +39,7 @@ import { getStalledReviewSignal } from "../utils/taskStalledReview";
 import { getInReviewStallCopy, shouldShowInReviewStallBadge } from "../utils/inReviewStallCopy";
 import { getStalePausedReviewCopy, shouldShowStalePausedReviewBadge } from "../utils/stalePausedReviewCopy";
 import { getTaskAgeStalenessCopy, shouldShowTaskAgeStalenessBadge } from "../utils/taskAgeStalenessCopy";
-import { getUnifiedTaskProgress } from "../utils/taskProgress";
+import { getUnifiedTaskProgress, isPlanReviewRunning } from "../utils/taskProgress";
 import { getPrBadgeModifierClass } from "../utils/prBadgeClass";
 import { getActiveRuntimeMs, getEndToEndDurationMs, getTimedDurationMs, getWorkflowRuntimeMs, parseTimestampToMs } from "../utils/taskTiming";
 import { canStartPrFeedbackAddressing, getTaskPrimaryPrInfo } from "../utils/prFeedback";
@@ -48,12 +48,15 @@ import { useConfirm } from "../hooks/useConfirm";
 import { extractDependencyDeleteConflict, extractLineageDeleteConflict } from "../utils/taskDelete";
 import { MAX_AUTO_MERGE_RETRIES, type BlockerFanoutEntry } from "../hooks/useBlockerFanout";
 import { useRetryWarning } from "../context/RetryWarningContext";
+import { useCostBadge } from "../context/CostBadgeContext";
 import { useColumnLabel } from "../i18n/labels";
 import { isRateLimitedTask } from "../utils/rateLimitedTaskState";
 import { RateLimitedTaskNotice } from "./RateLimitedTaskNotice";
 import { WorkspaceWorktreesSummary, isWorkspaceTask } from "./WorkspaceWorktreesSummary";
 import { WorkflowIcon } from "./WorkflowIcon";
 import { TaskContextMenu, buildTaskActionMenuModel, getTaskPrAutomationLabel, type TaskContextMenuColumnFlags, type TaskContextMenuColumnMetadata, type TaskMenuActionDescriptor } from "./TaskContextMenu";
+import { formatCost, hasTaskCost, taskTotalCost } from "../utils/taskTokenCost";
+import { getPriorityColorVar, getPriorityIcon, getPriorityLabel } from "../utils/priorityIndicator";
 
 /** Per-branch progress snapshot (U13). Surfaced as an optional additive field
  *  on the task payload for the parallel-window badge (U9). */
@@ -910,6 +913,7 @@ function TaskCardComponent({
   const [missionTitle, setMissionTitle] = useState<string | null>(null);
   const [agentName, setAgentName] = useState<string | null>(null);
   const [showSendBackMenu, setShowSendBackMenu] = useState(false);
+  const [showDoneActionsMenu, setShowDoneActionsMenu] = useState(false);
   const [contextMenuPosition, setContextMenuPosition] = useState<{ x: number; y: number } | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
   const [isPrCreateOpen, setIsPrCreateOpen] = useState(false);
@@ -929,11 +933,21 @@ function TaskCardComponent({
   */
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const sendBackRef = useRef<HTMLDivElement>(null);
+  const doneActionsRef = useRef<HTMLDivElement>(null);
   const [isInViewport, setIsInViewport] = useState(false);
   const { badgeUpdates, subscribeToBadge, unsubscribeFromBadge } = useBadgeWebSocket(projectId);
   const { agentsMap } = useAgentsMapCache(projectId);
   const { confirm } = useConfirm();
   const retryWarningThreshold = useRetryWarning();
+  const costBadge = useCostBadge();
+  /*
+  FNXC:TaskCardCostBadge 2026-07-11-12:20:
+  The optional spend chip sits beside execution time but stays fully absent unless the default-off setting is enabled and the task has positive token usage. Use the shared read-time taskTokenCost helper so unpriced models show the guess-free “—” sentinel instead of a fabricated $0.
+  */
+  const cardCost = costBadge.enabled && hasTaskCost(task as TaskDetail)
+    ? taskTotalCost(task as TaskDetail, costBadge.pricingOverrides)
+    : null;
+  const cardCostLabel = cardCost ? formatCost(cardCost.usd, cardCost.unavailable) : null;
 
   // Touch gesture detection refs
   const touchStartPosRef = useRef<{ x: number; y: number; time: number } | null>(null);
@@ -963,6 +977,18 @@ function TaskCardComponent({
     document.addEventListener("click", handleClick);
     return () => document.removeEventListener("click", handleClick);
   }, [showSendBackMenu]);
+
+  // Close done-actions menu on outside click
+  useEffect(() => {
+    if (!showDoneActionsMenu) return;
+    const handleClick = (e: MouseEvent) => {
+      if (doneActionsRef.current && !doneActionsRef.current.contains(e.target as Node)) {
+        setShowDoneActionsMenu(false);
+      }
+    };
+    document.addEventListener("click", handleClick);
+    return () => document.removeEventListener("click", handleClick);
+  }, [showDoneActionsMenu]);
 
   // Fetch mission title when missionId is set
   useEffect(() => {
@@ -1274,10 +1300,19 @@ function TaskCardComponent({
   const pausedByAgent = Boolean(!isDoneColumn && task.paused && task.pausedByAgentId);
   const normalizedPriority = normalizeTaskPriorityValue(task.priority);
   const showPriorityBadge = normalizedPriority !== DEFAULT_TASK_PRIORITY;
+  const PriorityBadgeIcon = getPriorityIcon(normalizedPriority);
   const isStuck = isTaskStuck(task, taskStuckTimeoutMs, lastFetchTimeMs);
   const stalledReview = getStalledReviewSignal(task);
   const showStalledReview = Boolean(stalledReview && task.column === "in-review" && !isPaused);
   const hasInReviewStall = shouldShowInReviewStallBadge(task);
+  /*
+  FNXC:TaskCardPlanReviewBadge 2026-07-11-12:05:
+  FN-7831 requires the card header to show a distinct "Reviewing" badge while the optional `plan-review` workflow step is actively running, even while the card remains in Planning/`triage`. Use the shared predicate so TaskCard stays in sync with ListView.
+  */
+  const planReviewRunning = useMemo(
+    () => isPlanReviewRunning(task),
+    [task.steps, task.enabledWorkflowSteps, task.workflowStepResults],
+  );
   // CLI agent session badges (U11) — distinct from staleness/stall badges.
   const cliWaitingOnInput = cliSessionState?.agentState === "waitingOnInput";
   const cliNeedsAttention = cliSessionState?.agentState === "needsAttention";
@@ -1393,7 +1428,7 @@ function TaskCardComponent({
   );
   /*
   FNXC:TaskCardWorkflowProgress 2026-07-08-hh:mm:
-  FN-7676 — cards in the Planning/`triage` column must not surface the steps breakdown (progress bar, active badge, step-count toggle, expandable list); enumerated implementation steps are premature planning artifacts, not execution progress. The affordance now appears only after the task leaves Planning (`in-progress` / `executing`), matching `ListView.shouldShowTaskProgress`. A running Plan Review while still in `triage` intentionally no longer surfaces the card progress indicator — the header `planning` status badge remains the only in-flight signal.
+  FN-7676 — cards in the Planning/`triage` column must not surface the steps breakdown (progress bar, active badge, step-count toggle, expandable list); enumerated implementation steps are premature planning artifacts, not execution progress. The affordance now appears only after the task leaves Planning (`in-progress` / `executing`), matching `ListView.shouldShowTaskProgress`. FN-7831 adds a separate header "Reviewing" badge for a running Plan Review, but the progress breakdown itself remains hidden in Planning.
   */
   const showProgressSection =
     unifiedProgress.total > 0 && (task.status === "executing" || task.column === "in-progress");
@@ -2406,6 +2441,7 @@ function TaskCardComponent({
   const openContextMenuAt = useCallback((clientX: number, clientY: number) => {
     if (!hasContextMenuActions || isEditing) return;
     setShowSendBackMenu(false);
+    setShowDoneActionsMenu(false);
     setContextMenuPosition({
       x: Math.max(CONTEXT_MENU_VIEWPORT_MARGIN, Math.min(clientX, window.innerWidth - CONTEXT_MENU_VIEWPORT_MARGIN)),
       y: Math.max(CONTEXT_MENU_VIEWPORT_MARGIN, Math.min(clientY, window.innerHeight - CONTEXT_MENU_VIEWPORT_MARGIN)),
@@ -2558,6 +2594,11 @@ function TaskCardComponent({
   const handleSendBackClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     setShowSendBackMenu((current) => !current);
+  }, []);
+
+  const handleDoneActionsToggle = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowDoneActionsMenu((current) => !current);
   }, []);
 
   const handleSendBackOptionClick = useCallback(async (e: React.MouseEvent, column: Column) => {
@@ -2737,6 +2778,133 @@ function TaskCardComponent({
     && filesChangedButton == null
     && showTrackingIndicator
     && Boolean(githubTrackedIssue);
+  const footerHasLeadingContent = Boolean(filesChangedButton)
+    || (isGitHubImportedTask && !showLinkedIssueChipForImport);
+  const footerRightHasContent = Boolean(cardCostLabel
+    || timeIndicator
+    || showNearDuplicateChip
+    || showUndoOfChip
+    || ((showTrackingIndicator || showLinkedIssueChipForImport) && githubTrackedIssue)
+    || (task.retrySummary?.total ?? 0) > 0);
+  /*
+   * FNXC:TaskCardCostBadge 2026-07-12-00:00:
+   * The footer-right badge cluster (cost, timing, retry, duplicate, and tracking chips) should render inline at the bottom-right of `.card-meta` when the footer has no leading content. Cards with files-changed or GitHub source-provenance leading content keep the existing `.card-footer-row` layout so in-progress and tracked-card footer behavior remains stable.
+   */
+  const placeFooterRightInMeta = footerRightHasContent
+    && !footerHasLeadingContent
+    && !chipFarRight
+    && metaRowVisible;
+  const footerRightCluster = footerRightHasContent ? (
+    <div className="card-footer-row-right">
+      {showUndoOfChip && (
+        <span
+          className="card-undo-chip"
+          title={t("tasks.undoOfTitle", "Created to undo {{id}}", { id: String(revertOfId) })}
+          aria-label={t("tasks.undoOfTitle", "Created to undo {{id}}", { id: String(revertOfId) })}
+        >
+          <span>{t("tasks.undoOf", "Undo of {{id}}", { id: String(revertOfId) })}</span>
+        </span>
+      )}
+      {showNearDuplicateChip && (
+        <>
+          <span
+            className="card-duplicate-chip"
+            title={t("tasks.nearDuplicateTitle", "Potential near-duplicate of {{id}}", { id: String(task.sourceMetadata?.nearDuplicateOf) })}
+            aria-label={t("tasks.nearDuplicateTitle", "Potential near-duplicate of {{id}}", { id: String(task.sourceMetadata?.nearDuplicateOf) })}
+          >
+            <span>{t("tasks.duplicateOf", "Duplicate of {{id}}", { id: String(task.sourceMetadata?.nearDuplicateOf) })}</span>
+          </span>
+          {onUpdateTask && (
+            <button
+              type="button"
+              className="card-duplicate-keep"
+              onClick={(e) => void handleDismissNearDuplicate(e)}
+              title={t("tasks.keepTaskTitle", "Keep this task and dismiss duplicate warning")}
+              aria-label={t("tasks.keepTaskTitle", "Keep this task and dismiss duplicate warning")}
+            >
+              {t("tasks.keep", "Keep")}
+            </button>
+          )}
+        </>
+      )}
+      {chipFarRight && (showTrackingIndicator || showLinkedIssueChipForImport) && githubTrackedIssue && (
+        <a
+          className="card-github-tracking-chip card-github-tracking-link"
+          href={githubTrackedIssue.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={t("tasks.linkedIssueChipTitle", "Linked GitHub issue: {{owner}}/{{repo}}#{{number}}", { owner: githubTrackedIssue.owner, repo: githubTrackedIssue.repo, number: githubTrackedIssue.number })}
+          aria-label={t("tasks.linkedIssueChipAriaLabel", "Linked GitHub issue #{{number}}", { number: githubTrackedIssue.number })}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <ProviderIcon provider="github" size="sm" />
+          <span>{`#${githubTrackedIssue.number}`}</span>
+        </a>
+      )}
+      {(task.retrySummary?.total ?? 0) > 0 && (
+        <span
+          className={`card-retry-badge${(retryWarningThreshold != null && (task.retrySummary?.total ?? 0) >= retryWarningThreshold) ? " card-retry-badge--error" : " card-retry-badge--warning"}`}
+          onClick={handleOpenRetries}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              event.stopPropagation();
+              onOpenDetailWithTab?.(task, "retries");
+            }
+          }}
+          aria-label={t("tasks.retriesAriaLabel", "{{count}} retries", { count: task.retrySummary?.total ?? 0 })}
+          title={t("tasks.openRetryBreakdown", "Open retry breakdown")}
+        >
+          <RotateCw size={11} />
+          <span>{task.retrySummary?.total ?? 0}</span>
+        </span>
+      )}
+      {(!chipFarRight || !((showTrackingIndicator || showLinkedIssueChipForImport) && githubTrackedIssue))
+        && (showTrackingIndicator || showLinkedIssueChipForImport) && githubTrackedIssue && (
+          <a
+            className="card-github-tracking-chip card-github-tracking-link"
+            href={githubTrackedIssue.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={t("tasks.linkedIssueChipTitle", "Linked GitHub issue: {{owner}}/{{repo}}#{{number}}", { owner: githubTrackedIssue.owner, repo: githubTrackedIssue.repo, number: githubTrackedIssue.number })}
+            aria-label={t("tasks.linkedIssueChipAriaLabel", "Linked GitHub issue #{{number}}", { number: githubTrackedIssue.number })}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <ProviderIcon provider="github" size="sm" />
+            <span>{`#${githubTrackedIssue.number}`}</span>
+          </a>
+        )}
+      {/*
+      FNXC:TaskCardTimingBadge 2026-06-13-17:20:
+      The execution-time badge belongs in the bottom-right footer cluster and must match sibling footer badge sizing while preserving its existing label, title, aria text, and live-update data.
+      */}
+      {cardCostLabel && (
+        <span
+          className="card-cost-indicator"
+          title={t("tasks.costBadgeTitle", "Estimated cost {{amount}}", { amount: cardCostLabel })}
+          aria-label={t("tasks.costBadgeAriaLabel", "Estimated cost {{amount}}", { amount: cardCostLabel })}
+        >
+          {/*
+          FNXC:TaskCardCostBadge 2026-07-12-00:00:
+          The cost chip must show only the formatted amount because formatCost already includes the currency symbol; do not render a leading dollar-sign icon that duplicates the label.
+          */}
+          <span>{cardCostLabel}</span>
+        </span>
+      )}
+      {timeIndicator && (
+        <span
+          className="card-time-indicator"
+          title={timeIndicator.title}
+          aria-label={timeIndicator.ariaLabel}
+        >
+          <Clock size={12} />
+          <span>{timeIndicator.label}</span>
+        </span>
+      )}
+    </div>
+  ) : null;
   const hasWorkflowBadge = typeof workflowBadge?.workflowId === "string"
     && workflowBadge.workflowId.trim().length > 0
     && typeof workflowBadge.workflowName === "string"
@@ -2753,6 +2921,34 @@ function TaskCardComponent({
     // metadata (absent for the common "off" default) — include it in the wrapper
     // guard so `.card-meta-badges` only renders when it has a real child.
     || showOversightBadge;
+  const hasHeaderBadges = Boolean(isPaused)
+    || Boolean(!isPaused && visualStatus && visualStatus !== "queued")
+    || planReviewRunning
+    || Boolean(!isPaused && task.column === "todo" && !visualStatus && (task.steps?.length ?? 0) > 0)
+    || Boolean(hasInReviewStall && stallCopy)
+    || cliWaitingOnInput
+    || cliNeedsAttention
+    || Boolean(hasStalePausedReview && stalePausedReviewCopy)
+    || Boolean(hasTaskAgeStaleness && taskAgeStalenessCopy)
+    || Boolean(isStuck && (isPaused || !task.status || task.status === "queued"))
+    || Boolean(Array.isArray((task as TaskWithBranchProgress).branchProgress) && (task as TaskWithBranchProgress).branchProgress!.length > 0)
+    || Boolean(task.plannerOverseerState && task.plannerOverseerState.state !== "idle")
+    || Boolean(showStalledReview && stalledReview)
+    || Boolean(livePrInfo || liveIssueInfo)
+    || Boolean(task.gitlabTracking?.item)
+    || Boolean(prNode)
+    || hasCardMetaBadges
+    || task.noCommitsExpected === true
+    || Boolean(task.missionId);
+  const hasHeaderActions = Boolean(isAwaitingInput && onOpenDetailWithTab)
+    || Boolean(canEdit)
+    || Boolean(task.column === "triage" && onDeleteTask)
+    || Boolean(task.column === "done" && onArchiveTask)
+    || Boolean(task.column === "archived" && onUnarchiveTask)
+    || Boolean((task.column === "done" || task.column === "archived") && onRevertTask && isRevertable)
+    || Boolean(task.column === "in-progress" && onMoveTask)
+    || Boolean(task.size)
+    || hasContextMenuActions;
 
   if (isEditing) {
     return (
@@ -2830,6 +3026,12 @@ function TaskCardComponent({
       )}
       <div className="card-header">
         <span className="card-id">{task.id}</span>
+        {hasHeaderBadges && (
+          /*
+          FNXC:TaskCardLayout 2026-07-11-00:00:
+          FN-7837 keeps the task id and right-aligned size/actions cluster in the same non-wrapping header row. Extra header badges (fast-mode, priority, oversight, decision-only, PR/GitHub, and status chips) wrap inside this middle group instead of pushing the size chip onto a misaligned second row on desktop or mobile.
+          */
+          <div className="card-header-badges" data-testid="card-header-badges">
         {isPaused && (
           <span
             className="card-status-badge paused"
@@ -2842,6 +3044,19 @@ function TaskCardComponent({
             className={`card-status-badge card-status-badge--${task.column}${isAwaitingApproval ? " awaiting-approval" : ""}${isAwaitingInput ? " awaiting-input" : ""}${ACTIVE_STATUSES.has(visualStatus) ? " pulsing" : ""}${isFailed && !isRateLimited ? " failed" : ""}${isRateLimited ? " rate-limited" : ""}${isStuck ? " stuck" : ""}`}
           >
             {isStuck ? t("tasks.stuck", "Stuck") : isAwaitingApproval ? t("tasks.awaitingApproval", "Awaiting Approval") : isAwaitingInput ? t("tasks.needsInput", "Needs input") : visualStatus === "merging-fix" ? t("tasks.statusMergingFix", "Merging fixes…") : getTaskStatusLabel(visualStatus, t)}
+          </span>
+        )}
+        {planReviewRunning && (
+          /*
+          FNXC:TaskCardPlanReviewBadge 2026-07-11-12:06:
+          The Reviewing badge is additive to the normal header status badge so operators can distinguish "planning" from active Plan Review without hiding paused/stuck/status affordances.
+          */
+          <span
+            className="card-status-badge card-status-badge--reviewing pulsing"
+            data-testid={`card-reviewing-${task.id}`}
+            title={t("tasks.planReviewingTitle", "Plan Review in progress")}
+          >
+            {t("tasks.reviewing", "Reviewing")}
           </span>
         )}
         {/*
@@ -3013,8 +3228,14 @@ function TaskCardComponent({
         {hasCardMetaBadges && (
           <div className="card-meta-badges" data-testid="card-meta-badges">
             {showPriorityBadge && (
-              <span className={`card-priority-badge card-priority-badge--${normalizedPriority}`}>
-                {normalizedPriority}
+              <span
+                className={`card-priority-badge card-priority-badge--${normalizedPriority}`}
+                title={getPriorityLabel(normalizedPriority)}
+                aria-label={getPriorityLabel(normalizedPriority)}
+              >
+                {/* FNXC:PriorityIconOnlyBadge 2026-07-12-00:00: FN-7867 makes task-card priority badges icon-only so priority text cannot widen .card-meta-badges and force wrapping; preserve the label through title, aria-label, and visually-hidden text while keeping the shared urgency color. */}
+                <PriorityBadgeIcon size={10} aria-hidden="true" style={{ color: getPriorityColorVar(normalizedPriority) }} />
+                <span className="visually-hidden">{getPriorityLabel(normalizedPriority)}</span>
               </span>
             )}
             {task.executionMode === "fast" && (
@@ -3055,6 +3276,9 @@ function TaskCardComponent({
             {abbreviateMissionTitle(missionTitle ?? task.missionId)}
           </span>
         )}
+          </div>
+        )}
+        {hasHeaderActions && (
         <div className="card-header-actions">
           {isAwaitingInput && onOpenDetailWithTab && (
             <button
@@ -3089,15 +3313,56 @@ function TaskCardComponent({
               <Trash2 size={12} />
             </button>
           )}
-          {task.column === "done" && onArchiveTask && (
-            <button
-              className="card-archive-btn"
-              onClick={handleArchiveClick}
-              title={t("tasks.archiveTask", "Archive task")}
-              aria-label={t("tasks.archiveTask", "Archive task")}
-            >
-              {t("tasks.archive", "Archive")}
-            </button>
+          {task.column === "done" && (onArchiveTask || (onRevertTask && isRevertable)) && (
+            <div className="card-send-back card-done-actions" ref={doneActionsRef}>
+              {/*
+              FNXC:BoardCardActions 2026-07-11-00:00 (FN-7839):
+              Done-card Archive + Revert are grouped behind one dropdown that mirrors the
+              in-progress "Send back" control, replacing two standalone inline buttons.
+              Revert only appears when the task is revertable (isRevertable); the trigger
+              only renders when at least one action is available so no empty shell is left.
+              Reuses .card-send-back* styling so no new one-off CSS/colors are introduced.
+              */}
+              <button
+                className="card-send-back-btn"
+                onClick={handleDoneActionsToggle}
+                title={t("tasks.doneActions", "Actions")}
+                aria-label={t("tasks.doneActions", "Actions")}
+                aria-haspopup="menu"
+                aria-expanded={showDoneActionsMenu}
+              >
+                {t("tasks.doneActions", "Actions")}
+                <ChevronDown size={10} />
+              </button>
+              {showDoneActionsMenu && (
+                <div className="card-send-back-menu" role="menu">
+                  {onArchiveTask && (
+                    <button
+                      className="card-send-back-menu-item"
+                      role="menuitem"
+                      onClick={(e) => {
+                        setShowDoneActionsMenu(false);
+                        handleArchiveClick(e);
+                      }}
+                    >
+                      {t("tasks.archive", "Archive")}
+                    </button>
+                  )}
+                  {onRevertTask && isRevertable && (
+                    <button
+                      className="card-send-back-menu-item"
+                      role="menuitem"
+                      onClick={(e) => {
+                        setShowDoneActionsMenu(false);
+                        handleRevertClick(e);
+                      }}
+                    >
+                      {t("tasks.revert", "Revert")}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           )}
           {task.column === "archived" && onUnarchiveTask && (
             <button
@@ -3111,14 +3376,15 @@ function TaskCardComponent({
           )}
           {/*
           FNXC:TaskRevert 2026-07-05-00:00 (FN-7525):
-          Inline Revert affordance for done/archived cards (parent FN-7501). Rendered
+          Inline Revert affordance for archived cards (parent FN-7501). Rendered
           only when the task actually has a landed commit to revert (`isRevertable`)
           — omitted (not disabled) here to avoid an empty button shell on cards with
           nothing to revert, matching the "omit inline / disable in menu" split called
-          out in the task spec. Reuses `card-archive-btn`'s tokenized styling via a
-          shared class so no new one-off CSS/colors are introduced.
+          out in the task spec. Done cards use the FN-7839 actions dropdown above.
+          Reuses `card-archive-btn`'s tokenized styling via a shared class so no new
+          one-off CSS/colors are introduced.
           */}
-          {(task.column === "done" || task.column === "archived") && onRevertTask && isRevertable && (
+          {task.column === "archived" && onRevertTask && isRevertable && (
             <button
               className="card-archive-btn card-revert-btn"
               onClick={handleRevertClick}
@@ -3159,6 +3425,33 @@ function TaskCardComponent({
               )}
             </div>
           )}
+          {/*
+          FNXC:TaskCardMenu 2026-07-10-12:00:
+          Visible entry point for the card's action menu (Edit/Delete/Review/New chat/Interventions…)
+          — previously right-click/long-press only and therefore undiscoverable. Opens the same
+          portaled TaskContextMenu anchored at this button. Only rendered when the menu has actions
+          (no empty shell); applies on every surface that renders TaskCard (Board columns, worktree
+          groups, dock task lists).
+          */}
+          {hasContextMenuActions && (
+            <button
+              ref={menuButtonRef}
+              type="button"
+              className="card-menu-btn"
+              onClick={handleMenuButtonClick}
+              title={t("tasks.taskActions", "Task actions")}
+              aria-label={t("tasks.taskActions", "Task actions")}
+              aria-haspopup="menu"
+              aria-expanded={contextMenuPosition != null}
+              data-testid={`card-menu-btn-${task.id}`}
+            >
+              <MoreHorizontal size={14} />
+            </button>
+          )}
+          {/*
+          FNXC:TaskCardLayout 2026-07-11-00:00 (FN-7846):
+          The size badge must be the last item in the right-aligned header-actions cluster so its right edge uses the card's `--card-padding`, matching the top margin on desktop and mobile while preserving the FN-7837 no-orphaned-second-row grouping.
+          */}
           {task.size && (
             <span className={`card-size-badge size-${task.size.toLowerCase()}`}>
               {task.size}
@@ -3188,6 +3481,7 @@ function TaskCardComponent({
             </button>
           )}
         </div>
+        )}
       </div>
       {showStalledReview && stalledReview && (
         <div className="card-stalled-review-reason" title={stalledReview.reason}>
@@ -3369,7 +3663,7 @@ function TaskCardComponent({
           </>
         );
       })()}
-      {(filesChangedButton || isGitHubImportedTask || timeIndicator || showNearDuplicateChip || showUndoOfChip || ((showTrackingIndicator || showLinkedIssueChipForImport) && githubTrackedIssue) || (task.retrySummary?.total ?? 0) > 0) && (
+      {(footerHasLeadingContent || (footerRightHasContent && !placeFooterRightInMeta)) && (
         <div className={`card-footer-row${chipFarRight ? " card-footer-row--chip-far-right" : ""}`}>
           {filesChangedButton}
           {isGitHubImportedTask && !showLinkedIssueChipForImport && (
@@ -3381,104 +3675,7 @@ function TaskCardComponent({
               <ProviderIcon provider="github" size="sm" />
             </span>
           )}
-          {(timeIndicator || showNearDuplicateChip || showUndoOfChip || ((showTrackingIndicator || showLinkedIssueChipForImport) && githubTrackedIssue) || (task.retrySummary?.total ?? 0) > 0) && (
-            <div className="card-footer-row-right">
-              {showUndoOfChip && (
-                <span
-                  className="card-undo-chip"
-                  title={t("tasks.undoOfTitle", "Created to undo {{id}}", { id: String(revertOfId) })}
-                  aria-label={t("tasks.undoOfTitle", "Created to undo {{id}}", { id: String(revertOfId) })}
-                >
-                  <span>{t("tasks.undoOf", "Undo of {{id}}", { id: String(revertOfId) })}</span>
-                </span>
-              )}
-              {showNearDuplicateChip && (
-                <>
-                  <span
-                    className="card-duplicate-chip"
-                    title={t("tasks.nearDuplicateTitle", "Potential near-duplicate of {{id}}", { id: String(task.sourceMetadata?.nearDuplicateOf) })}
-                    aria-label={t("tasks.nearDuplicateTitle", "Potential near-duplicate of {{id}}", { id: String(task.sourceMetadata?.nearDuplicateOf) })}
-                  >
-                    <span>{t("tasks.duplicateOf", "Duplicate of {{id}}", { id: String(task.sourceMetadata?.nearDuplicateOf) })}</span>
-                  </span>
-                  {onUpdateTask && (
-                    <button
-                      type="button"
-                      className="card-duplicate-keep"
-                      onClick={(e) => void handleDismissNearDuplicate(e)}
-                      title={t("tasks.keepTaskTitle", "Keep this task and dismiss duplicate warning")}
-                      aria-label={t("tasks.keepTaskTitle", "Keep this task and dismiss duplicate warning")}
-                    >
-                      {t("tasks.keep", "Keep")}
-                    </button>
-                  )}
-                </>
-              )}
-              {chipFarRight && (showTrackingIndicator || showLinkedIssueChipForImport) && githubTrackedIssue && (
-                <a
-                  className="card-github-tracking-chip card-github-tracking-link"
-                  href={githubTrackedIssue.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title={t("tasks.linkedIssueChipTitle", "Linked GitHub issue: {{owner}}/{{repo}}#{{number}}", { owner: githubTrackedIssue.owner, repo: githubTrackedIssue.repo, number: githubTrackedIssue.number })}
-                  aria-label={t("tasks.linkedIssueChipAriaLabel", "Linked GitHub issue #{{number}}", { number: githubTrackedIssue.number })}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <ProviderIcon provider="github" size="sm" />
-                  <span>{`#${githubTrackedIssue.number}`}</span>
-                </a>
-              )}
-              {(task.retrySummary?.total ?? 0) > 0 && (
-                <span
-                  className={`card-retry-badge${(retryWarningThreshold != null && (task.retrySummary?.total ?? 0) >= retryWarningThreshold) ? " card-retry-badge--error" : " card-retry-badge--warning"}`}
-                  onClick={handleOpenRetries}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      onOpenDetailWithTab?.(task, "retries");
-                    }
-                  }}
-                  aria-label={t("tasks.retriesAriaLabel", "{{count}} retries", { count: task.retrySummary?.total ?? 0 })}
-                  title={t("tasks.openRetryBreakdown", "Open retry breakdown")}
-                >
-                  <RotateCw size={11} />
-                  <span>{task.retrySummary?.total ?? 0}</span>
-                </span>
-              )}
-              {(!chipFarRight || !((showTrackingIndicator || showLinkedIssueChipForImport) && githubTrackedIssue))
-                && (showTrackingIndicator || showLinkedIssueChipForImport) && githubTrackedIssue && (
-                  <a
-                    className="card-github-tracking-chip card-github-tracking-link"
-                    href={githubTrackedIssue.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title={t("tasks.linkedIssueChipTitle", "Linked GitHub issue: {{owner}}/{{repo}}#{{number}}", { owner: githubTrackedIssue.owner, repo: githubTrackedIssue.repo, number: githubTrackedIssue.number })}
-                    aria-label={t("tasks.linkedIssueChipAriaLabel", "Linked GitHub issue #{{number}}", { number: githubTrackedIssue.number })}
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <ProviderIcon provider="github" size="sm" />
-                    <span>{`#${githubTrackedIssue.number}`}</span>
-                  </a>
-                )}
-              {/*
-              FNXC:TaskCardTimingBadge 2026-06-13-17:20:
-              The execution-time badge belongs in the bottom-right footer cluster and must match sibling footer badge sizing while preserving its existing label, title, aria text, and live-update data.
-              */}
-              {timeIndicator && (
-                <span
-                  className="card-time-indicator"
-                  title={timeIndicator.title}
-                  aria-label={timeIndicator.ariaLabel}
-                >
-                  <Clock size={12} />
-                  <span>{timeIndicator.label}</span>
-                </span>
-              )}
-            </div>
-          )}
+          {!placeFooterRightInMeta && footerRightCluster}
         </div>
       )}
       {metaRowVisible && (
@@ -3517,6 +3714,7 @@ function TaskCardComponent({
           )}
           {(queued || task.status === "queued") && task.column !== "in-progress" && <span className="queued-badge"><Clock size={12} style={{ verticalAlign: "middle" }} /> {t("tasks.queued", "Queued")}</span>}
           {showInReviewMoveControl && renderInReviewMoveControl()}
+          {placeFooterRightInMeta && footerRightCluster}
         </div>
       )}
       {(task.assignedAgentId || taskProviders.length > 0) && (

@@ -194,7 +194,8 @@ export function isFts5CorruptionError(error: unknown): boolean {
 
 // ── Schema Definition ────────────────────────────────────────────────
 
-const SCHEMA_VERSION = 141;
+const SCHEMA_VERSION = 145;
+
 
 const TASKS_FTS_AUTOMERGE = 8;
 const TASKS_FTS_CRISISMERGE = 16;
@@ -295,9 +296,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   mergeRetries INTEGER,
   workflowStepRetries INTEGER,
   resumeLimboCount INTEGER DEFAULT 0,
+  executeRequeueLoopCount INTEGER DEFAULT 0,
   graphResumeRetryCount INTEGER DEFAULT 0,
   resumeLimboTipSha TEXT,
   resumeLimboStepSignature TEXT,
+  executeRequeueLoopSignature TEXT,
   recoveryRetryCount INTEGER,
   taskDoneRetryCount INTEGER DEFAULT 0,
   worktreeSessionRetryCount INTEGER DEFAULT 0,
@@ -309,6 +312,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   error TEXT,
   summary TEXT,
   thinkingLevel TEXT,
+  validatorThinkingLevel TEXT,
+  planningThinkingLevel TEXT,
   executionMode TEXT DEFAULT 'standard',
   plannerOversightLevel TEXT,
   awaitingApprovalReason TEXT,
@@ -1689,6 +1694,7 @@ export const MIGRATION_ONLY_TABLE_SCHEMAS: Record<string, Record<string, string>
     projectId: "TEXT",
     createdBy: "TEXT",
     status: "TEXT NOT NULL DEFAULT 'active'",
+    thinkingLevel: "TEXT",
     createdAt: "TEXT NOT NULL",
     updatedAt: "TEXT NOT NULL",
   },
@@ -4322,6 +4328,7 @@ export class Database {
             projectId TEXT,
             createdBy TEXT,
             status TEXT NOT NULL DEFAULT 'active',
+            thinkingLevel TEXT,
             createdAt TEXT NOT NULL,
             updatedAt TEXT NOT NULL
           )
@@ -5682,6 +5689,56 @@ export class Database {
         }
       });
     }
+
+
+if (version < 142) {
+      /*
+       * FNXC:WorkflowLifecycle 2026-07-12-00:00:
+       * FN-7863 stores the progress-anchored execute self-requeue streak so slow
+       * execute→pause-abort→todo loops survive scheduler cadence gaps and terminalize
+       * visibly instead of burning executor slots indefinitely.
+       */
+      this.applyMigration(142, () => {
+        this.addColumnIfMissing("tasks", "executeRequeueLoopCount", "INTEGER DEFAULT 0");
+        this.addColumnIfMissing("tasks", "executeRequeueLoopSignature", "TEXT");
+      });
+    }
+
+    if (version < 143) {
+      /*
+       * FNXC:Chat-ThinkingLevel 2026-07-12-00:00:
+       * Chat Rooms persist an optional room-level reasoning-effort default for all responders; NULL keeps existing project/global default inheritance semantics and avoids modeling per-member overrides.
+       */
+      this.applyMigration(143, () => {
+        if (this.hasTable("chat_rooms")) {
+          this.addColumnIfMissing("chat_rooms", "thinkingLevel", "TEXT");
+        }
+      });
+    }
+
+    if (version < 144) {
+      /*
+       * FNXC:Chat-ThinkingLevelRepair 2026-07-12-00:00:
+       * Re-run the additive chat_rooms.thinkingLevel migration under a fresh schema version so any database that advanced past the initial add without the column converges safely.
+       */
+      this.applyMigration(144, () => {
+        if (this.hasTable("chat_rooms")) {
+          this.addColumnIfMissing("chat_rooms", "thinkingLevel", "TEXT");
+        }
+      });
+    }
+
+    if (version < 145) {
+      /*
+       * FNXC:Settings-ThinkingLevel 2026-07-13-00:27:
+       * Tasks persist optional validator/planning reasoning-effort overrides separately from shared `thinkingLevel`; rerun these additive task columns under a fresh schema version so upgraded databases converge safely.
+       */
+      this.applyMigration(145, () => {
+        this.addColumnIfMissing("tasks", "validatorThinkingLevel", "TEXT");
+        this.addColumnIfMissing("tasks", "planningThinkingLevel", "TEXT");
+      });
+    }
+
 
   }
 

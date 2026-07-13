@@ -4,14 +4,19 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { THINKING_LEVELS, type EnrichedChatSession, type ChatAttachment } from "@fusion/core";
 import { ApiError, badRequest, notFound } from "../api-error.js";
-import { resolveProjectChatContext } from "../chat-project-services.js";
+/*
+FNXC:GrokAcp 2026-07-11-18:30:
+List/create and ChatManager share resolveProjectChatContext (not getOrCreateProjectStore /
+getOrCreateScopedChatStore at this layer). Direct imports of those helpers were leftover after
+the store-alignment fix and failed lint as unused; keep manager construction on the resolved
+store/chatStore pair only.
+*/
+import { getOrCreateScopedChatManager, resolveProjectChatContext } from "../chat-project-services.js";
 import { CHAT_ALLOWED_MIME_TYPES, CHAT_MAX_ATTACHMENT_SIZE } from "./chat-attachment-config.js";
 import { rateLimit, RATE_LIMITS } from "../rate-limit.js";
 import { writeSSEEvent, type SessionBufferedEvent } from "../sse-buffer.js";
 import { TASK_PLANNER_CHAT_AGENT_ID_PREFIX } from "../chat.js";
 import type { ApiRoutesContext } from "./types.js";
-import { getOrCreateScopedChatManager, getOrCreateScopedChatStore } from "../chat-project-services.js";
-import { getOrCreateProjectStore } from "../project-store-resolver.js";
 
 interface ChatRouteDeps {
   parseLastEventId: (req: import("express").Request) => number | undefined;
@@ -113,12 +118,21 @@ export function registerChatRoutes(ctx: ApiRoutesContext, deps: ChatRouteDeps): 
       if (!options?.chatManager) throw new ApiError(503, "Chat manager not available");
       return options.chatManager;
     }
-    const projectStore = await getOrCreateProjectStore(projectId);
-    const chatStore = getOrCreateScopedChatStore(projectStore);
+    /*
+    FNXC:GrokAcp 2026-07-11-17:00:
+    Chat list/create use resolveProjectChatContext, which falls back to the host
+    default store when no engine is running for the project (nested dashboard /
+    lockfile-blocked engines). ChatManager must use that same store/chatStore
+    pair — getOrCreateProjectStore alone pointed at a different fusion dir, so
+    sessions visible in the UI 404'd on sendMessage ("Chat session not found").
+    Prefer the engine plugin runner when available; otherwise the host runner
+    (e.g. Grok ACP 0.2) so CLI runtimes still resolve.
+    */
+    const { store: scopedStore, chatStore } = await resolveScopedChatStore(projectId);
     const engine = options?.engineManager?.getEngine(projectId);
     const projectPluginRunner = engine?.getPluginRunner?.();
     const pluginRunner = projectPluginRunner ?? options?.pluginRunner;
-    return getOrCreateScopedChatManager(projectStore, chatStore, pluginRunner, Boolean(projectPluginRunner));
+    return getOrCreateScopedChatManager(scopedStore, chatStore, pluginRunner, Boolean(projectPluginRunner), engine?.getMessageStore());
   }
   const THINKING_LEVEL_SET = new Set<string>(THINKING_LEVELS);
 
@@ -461,24 +475,95 @@ export function registerChatRoutes(ctx: ApiRoutesContext, deps: ChatRouteDeps): 
 
   /**
    * PATCH /api/chat/sessions/:id
-   * Update a chat session (title, status).
-   * Body: { title?: string, status?: "active" | "archived" }
+   * Update a chat session (title, status, thinkingLevel, model, or agent target).
+   * Body: { title?: string, status?: "active" | "archived", thinkingLevel?: string | null,
+   *         modelProvider?: string | null, modelId?: string | null, agentId?: string }
+   *
+   * FNXC:Chat-ThinkingLevel 2026-07-12-19:30:
+   * FN-7775 only let a user pick a session's thinking level at creation time
+   * (POST /chat/sessions). FN-7898 lets an EXISTING model-loop session's
+   * reasoning-effort level be changed mid-conversation from the in-chat
+   * composer control, distinct from that create-time picker. `null`/`""`
+   * is an explicit clear back to the project/global default (mirrors the
+   * create-time semantics where an absent/empty thinkingLevel means
+   * "inherit"); omitting the key entirely leaves the session's stored
+   * value untouched, matching the existing title/status behavior below.
+   *
+   * FNXC:Chat-ModelSwitch 2026-07-12-20:15:
+   * FN-7908 extends this SAME route (rather than adding a new one) so the
+   * brain-icon popup introduced by FN-7898 can also retarget an active
+   * Direct chat's model or switch it to a real agent mid-conversation.
+   * modelProvider/modelId are validated as a pair via the existing
+   * validateModelPair helper (used elsewhere in this file for task-planner
+   * session creation); agentId is validated as a non-empty string. Both are
+   * forwarded to chatStore.updateSession only when present in the body so
+   * omitted keys stay untouched, matching the thinkingLevel/title/status
+   * pattern above.
    */
   router.patch("/chat/sessions/:id", rateLimit(RATE_LIMITS.mutation), async (req, res) => {
     try {
       const { chatStore } = await resolveScopedChatStore(req.query.projectId as string | undefined);
 
       const sessionId = String(req.params.id);
-      const { title, status } = req.body as { title?: string; status?: string };
+      const {
+        title,
+        status,
+        thinkingLevel: rawThinkingLevel,
+        modelProvider: rawModelProvider,
+        modelId: rawModelId,
+        agentId: rawAgentId,
+      } = req.body as {
+        title?: string;
+        status?: string;
+        thinkingLevel?: string | null;
+        modelProvider?: string | null;
+        modelId?: string | null;
+        agentId?: string;
+      };
 
       // Validate status if provided
       if (status !== undefined && status !== "active" && status !== "archived") {
         throw badRequest("status must be 'active' or 'archived'");
       }
 
+      // Normalize thinkingLevel before persisting: undefined leaves the field
+      // untouched (key omitted below), null/empty-string is an explicit clear
+      // to inherit the default, and any other value is validated against
+      // THINKING_LEVELS via the existing validateThinkingLevel helper.
+      let normalizedThinkingLevel: string | null | undefined;
+      if (rawThinkingLevel !== undefined) {
+        if (rawThinkingLevel === null || (typeof rawThinkingLevel === "string" && rawThinkingLevel.trim() === "")) {
+          normalizedThinkingLevel = null;
+        } else {
+          const validated = validateThinkingLevel(rawThinkingLevel);
+          normalizedThinkingLevel = validated ?? null;
+        }
+      }
+
+      // FNXC:Chat-ModelSwitch — modelProvider/modelId are only validated (and
+      // therefore only forwarded) when at least one of them is present in the
+      // body, so a PATCH that omits both keys entirely leaves the session's
+      // stored model target untouched instead of tripping the pair-mismatch
+      // check below.
+      const modelPairProvided = rawModelProvider !== undefined || rawModelId !== undefined;
+      const { modelProvider: normalizedModelProvider, modelId: normalizedModelId } = modelPairProvided
+        ? validateModelPair(rawModelProvider, rawModelId)
+        : {};
+
+      let normalizedAgentId: string | undefined;
+      if (rawAgentId !== undefined) {
+        if (typeof rawAgentId !== "string" || rawAgentId.trim() === "") {
+          throw badRequest("agentId must be a non-empty string");
+        }
+        normalizedAgentId = rawAgentId.trim();
+      }
+
       const session = chatStore.updateSession(sessionId, {
         ...(title !== undefined && { title: title?.trim() || null }),
         ...(status !== undefined && { status }),
+        ...(normalizedThinkingLevel !== undefined && { thinkingLevel: normalizedThinkingLevel }),
+        ...(modelPairProvided && { modelProvider: normalizedModelProvider ?? null, modelId: normalizedModelId ?? null }),
+        ...(normalizedAgentId !== undefined && { agentId: normalizedAgentId }),
       });
 
       if (!session) {

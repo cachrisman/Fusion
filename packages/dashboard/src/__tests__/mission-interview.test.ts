@@ -1009,6 +1009,40 @@ describe("mission-interview module", () => {
       );
     });
 
+    it("persists, restores, and threads thinkingLevel without forcing an unset value", async () => {
+      const store = new MockAiSessionStore();
+      setAiSessionStore(store as any);
+      mockCreateFnAgent.mockImplementation(async () => createMockAgent([createQuestionJson("q-thinking")]));
+
+      const sessionId = await createMissionInterviewSession(
+        "192.168.1.44",
+        "Thinking mission",
+        "/tmp/project",
+        MOCK_TASK_STORE,
+        undefined,
+        "anthropic",
+        "claude-sonnet",
+        "high",
+      );
+      await waitForCurrentQuestion(sessionId);
+
+      expect(JSON.parse(store.get(sessionId)?.inputPayload ?? "{}").thinkingLevel).toBe("high");
+      expect(mockCreateFnAgent).toHaveBeenLastCalledWith(expect.objectContaining({ defaultThinkingLevel: "high" }));
+
+      __resetMissionInterviewState();
+      setAiSessionStore(store as any);
+      expect(rehydrateFromStore(store as any)).toBe(1);
+      mockCreateFnAgent.mockClear();
+      mockCreateFnAgent.mockImplementation(async () => createMockAgent([createQuestionJson("q-restored")]));
+      await submitMissionInterviewResponse(sessionId, { "q-thinking": "answer" }, "/tmp/project", MOCK_TASK_STORE);
+      expect(mockCreateFnAgent).toHaveBeenLastCalledWith(expect.objectContaining({ defaultThinkingLevel: "high" }));
+
+      __resetMissionInterviewState();
+      const unsetId = await createMissionInterviewSession("192.168.1.45", "Inherit mission", "/tmp/project", MOCK_TASK_STORE);
+      await waitForCurrentQuestion(unsetId);
+      expect(mockCreateFnAgent.mock.calls.at(-1)?.[0]).not.toHaveProperty("defaultThinkingLevel");
+    });
+
     it("does not introduce unexpected model/provider override fields in createFnAgent", async () => {
       const mockAgent = createMockAgent([createQuestionJson()]);
       mockCreateFnAgent.mockImplementationOnce(async () => mockAgent);

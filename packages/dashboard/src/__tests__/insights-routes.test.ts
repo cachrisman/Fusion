@@ -15,6 +15,7 @@ const piMocks = vi.hoisted(() => ({
   createFnAgent: vi.fn(),
   promptWithFallback: vi.fn(),
   resolveMcpServersForStore: vi.fn(),
+  resolvePlanningThinkingLevel: vi.fn(),
 }));
 
 const resolverMocks = vi.hoisted(() => ({
@@ -56,6 +57,7 @@ vi.mock("@fusion/engine", () => ({
   createFnAgent: piMocks.createFnAgent,
   promptWithFallback: piMocks.promptWithFallback,
   resolveMcpServersForStore: piMocks.resolveMcpServersForStore,
+  resolvePlanningThinkingLevel: piMocks.resolvePlanningThinkingLevel,
 }));
 
 /*
@@ -206,6 +208,7 @@ describe("Insights routes", () => {
     }));
     piMocks.promptWithFallback.mockResolvedValue(undefined);
     piMocks.resolveMcpServersForStore.mockResolvedValue({ servers: [] });
+    piMocks.resolvePlanningThinkingLevel.mockImplementation((_settings: unknown, thinkingLevel?: string) => thinkingLevel);
   });
 
   afterEach(() => {
@@ -565,6 +568,56 @@ describe("Insights routes", () => {
     expect(persisted?.inputMetadata).toEqual({ source: "route-test" });
   });
 
+  it("POST /api/insights/run accepts and stores a valid thinkingLevel", async () => {
+    const res = await request(
+      app,
+      "POST",
+      "/api/insights/run",
+      JSON.stringify({ trigger: "manual", thinkingLevel: "high" }),
+      { "Content-Type": "application/json" },
+    );
+
+    expect(res.status).toBe(201);
+    const run = res.body as { id: string; inputMetadata: { metadata?: Record<string, unknown> } };
+    expect(run.inputMetadata.metadata).toMatchObject({ thinkingLevel: "high" });
+    expect(storeA.getInsightStore().getRun(run.id)?.inputMetadata?.metadata).toMatchObject({ thinkingLevel: "high" });
+    expect(piMocks.resolvePlanningThinkingLevel).toHaveBeenCalledWith(expect.any(Object), "high");
+    expect(piMocks.createFnAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        defaultThinkingLevel: "high",
+      }),
+    );
+  });
+
+  it("POST /api/insights/run rejects an invalid thinkingLevel", async () => {
+    const res = await request(
+      app,
+      "POST",
+      "/api/insights/run",
+      JSON.stringify({ trigger: "manual", thinkingLevel: "turbo" }),
+      { "Content-Type": "application/json" },
+    );
+
+    expect(res.status).toBe(400);
+    expect((res.body as { error: string }).error).toContain("Invalid thinkingLevel");
+    expect(storeA.getInsightStore().listRuns({})).toHaveLength(0);
+  });
+
+  it("POST /api/insights/run omits thinkingLevel metadata when inheriting defaults", async () => {
+    const res = await request(
+      app,
+      "POST",
+      "/api/insights/run",
+      JSON.stringify({ trigger: "manual" }),
+      { "Content-Type": "application/json" },
+    );
+
+    expect(res.status).toBe(201);
+    const run = res.body as { inputMetadata: { metadata?: Record<string, unknown> } };
+    expect(run.inputMetadata.metadata).toBeUndefined();
+    expect(piMocks.resolvePlanningThinkingLevel).toHaveBeenCalledWith(expect.any(Object), undefined);
+  });
+
   it("POST /api/insights/run marks run failed when AI execution throws", async () => {
     piMocks.promptWithFallback.mockRejectedValue(new Error("AI blew up"));
 
@@ -692,6 +745,39 @@ describe("Insights routes", () => {
       expect.objectContaining({
         defaultProvider: "openai",
         defaultModelId: "gpt-4o",
+      }),
+    );
+  });
+
+  it("POST /api/insights/runs/:id/retry preserves the original run's thinkingLevel", async () => {
+    piMocks.promptWithFallback.mockRejectedValue(new Error("HTTP 503"));
+    const failedRes = await request(
+      app,
+      "POST",
+      "/api/insights/run",
+      JSON.stringify({
+        trigger: "manual",
+        thinkingLevel: "xhigh",
+      }),
+      { "Content-Type": "application/json" },
+    );
+    expect(failedRes.status).toBe(201);
+    const failedRun = failedRes.body as { id: string; inputMetadata: { metadata?: Record<string, unknown> } };
+    expect(failedRun.inputMetadata.metadata).toMatchObject({ thinkingLevel: "xhigh" });
+
+    piMocks.promptWithFallback.mockResolvedValue(undefined);
+    piMocks.createFnAgent.mockClear();
+    piMocks.resolvePlanningThinkingLevel.mockClear();
+
+    const retriedRes = await request(app, "POST", `/api/insights/runs/${failedRun.id}/retry`, JSON.stringify({}), {
+      "Content-Type": "application/json",
+    });
+    expect(retriedRes.status).toBe(201);
+
+    expect(piMocks.resolvePlanningThinkingLevel).toHaveBeenCalledWith(expect.any(Object), "xhigh");
+    expect(piMocks.createFnAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        defaultThinkingLevel: "xhigh",
       }),
     );
   });

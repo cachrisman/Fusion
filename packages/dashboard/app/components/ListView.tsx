@@ -4,8 +4,8 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { ArrowUpDown, ArrowUp, ArrowDown, Link, Columns3, EyeOff, Eye, ChevronRight, Zap, Trash2, Pause, Play, Archive } from "lucide-react";
-import type { Task, TaskDetail, Column, ColumnId, TaskCreateInput, MergeResult, GithubIssueAction, PrInfo } from "@fusion/core";
-import { COLUMNS, DEFAULT_COLUMN, getErrorMessage, isColumn } from "@fusion/core";
+import type { Task, TaskDetail, Column, ColumnId, TaskCreateInput, MergeResult, GithubIssueAction, PrInfo, ThinkingLevel } from "@fusion/core";
+import { COLUMNS, DEFAULT_COLUMN, THINKING_LEVELS, getErrorMessage, isColumn } from "@fusion/core";
 import { resolveEffectiveAutoMerge } from "../../../core/src/task-merge";
 import { useColumnLabel } from "../i18n/labels";
 import { sortTasksForDisplayColumn } from "./taskSorting";
@@ -21,7 +21,7 @@ import type { ToastType } from "../hooks/useToast";
 import { useViewportMode } from "../hooks/useViewportMode";
 import { getScopedItem, removeScopedItem, setScopedItem } from "../utils/projectStorage";
 import { ALL_WORKFLOWS_BOARD_VIEW_ID } from "../utils/boardWorkflowSelection";
-import { getUnifiedTaskProgress } from "../utils/taskProgress";
+import { getUnifiedTaskProgress, isPlanReviewRunning } from "../utils/taskProgress";
 import { useConfirm } from "../hooks/useConfirm";
 import { extractDependencyDeleteConflict, extractLineageDeleteConflict } from "../utils/taskDelete";
 import { WorkflowSwitcher } from "./WorkflowSwitcher";
@@ -572,10 +572,21 @@ export function ListView({
     };
   }, [projectId, useSinglePaneList]);
 
+  // Bulk edit state and handlers (declared before clearSelection so every clear path resets pending lane edits)
+  const [executorModel, setExecutorModel] = useState<string>("__no_change__");
+  const [validatorModel, setValidatorModel] = useState<string>("__no_change__");
+  const [bulkThinkingLevel, setBulkThinkingLevel] = useState<string>("__no_change__");
+  const [nodeOverride, setNodeOverride] = useState<string>("__no_change__");
+
+
   const toggleBulkEdit = useCallback(() => {
     setBulkEditEnabled((prev) => {
       if (prev) {
         setSelectedTaskIds(new Set());
+        setExecutorModel("__no_change__");
+        setValidatorModel("__no_change__");
+        setBulkThinkingLevel("__no_change__");
+        setNodeOverride("__no_change__");
       }
       return !prev;
     });
@@ -597,6 +608,10 @@ export function ListView({
   // Clear selection
   const clearSelection = useCallback(() => {
     setSelectedTaskIds(new Set());
+    setExecutorModel("__no_change__");
+    setValidatorModel("__no_change__");
+    setBulkThinkingLevel("__no_change__");
+    setNodeOverride("__no_change__");
   }, []);
 
   // Toggle a column's visibility
@@ -936,9 +951,6 @@ export function ListView({
   }, [groupedTasks, isArchivedColumn, selectedTaskIds]);
 
   // Bulk edit state and handlers (must be after groupedTasks and clearSelection definition)
-  const [executorModel, setExecutorModel] = useState<string>("__no_change__");
-  const [validatorModel, setValidatorModel] = useState<string>("__no_change__");
-  const [nodeOverride, setNodeOverride] = useState<string>("__no_change__");
   const [availableNodes, setAvailableNodes] = useState<NodeInfo[]>([]);
   const [isLoadingNodes, setIsLoadingNodes] = useState(false);
   const selectedOverrideNode = useMemo(
@@ -1392,6 +1404,7 @@ export function ListView({
       validatorModelProvider?: string | null;
       validatorModelId?: string | null;
       nodeId?: string | null;
+      thinkingLevel?: ThinkingLevel | null;
     } = { taskIds };
 
     if (executorModel !== "__no_change__") {
@@ -1430,6 +1443,10 @@ export function ListView({
       }
     }
 
+    if (bulkThinkingLevel !== "__no_change__") {
+      payload.thinkingLevel = bulkThinkingLevel === "" ? null : bulkThinkingLevel as ThinkingLevel;
+    }
+
     // Check if any changes were made
     if (Object.keys(payload).length === 1) {
       addToast(t("listView.bulkNoChanges", "No changes to apply"), "info");
@@ -1447,6 +1464,7 @@ export function ListView({
         undefined,
         undefined,
         payload.nodeId,
+        payload.thinkingLevel,
         projectId,
       );
 
@@ -1460,13 +1478,14 @@ export function ListView({
       clearSelection();
       setExecutorModel("__no_change__");
       setValidatorModel("__no_change__");
+      setBulkThinkingLevel("__no_change__");
       setNodeOverride("__no_change__");
     } catch (err) {
       addToast(getErrorMessage(err) || t("listView.bulkUpdateFailed", "Failed to update models"), "error");
     } finally {
       setIsApplying(false);
     }
-  }, [selectedTaskIds, tasks, executorModel, validatorModel, nodeOverride, projectId, addToast, clearSelection, isArchivedColumn, onTasksUpdated]);
+  }, [selectedTaskIds, tasks, executorModel, validatorModel, bulkThinkingLevel, nodeOverride, projectId, addToast, clearSelection, isArchivedColumn, onTasksUpdated]);
 
   const closeContextMenu = useCallback(() => {
     setContextMenuState(null);
@@ -2349,7 +2368,7 @@ export function ListView({
       </div>
       {availableModels && availableModels.length > 0 ? (
         <div className="bulk-edit-toolbar">
-          <span className="bulk-edit-label">{t("listView.bulkEditModelsLabel", "Bulk Edit Models & Node:")}</span>
+          <span className="bulk-edit-label">{t("listView.bulkEditModelsLabel", "Bulk Edit Models, Thinking & Node:")}</span>
           <div className="bulk-edit-dropdown">
             <CustomModelDropdown
               models={availableModels}
@@ -2378,6 +2397,26 @@ export function ListView({
               onToggleModelFavorite={onToggleModelFavorite}
             />
           </div>
+          <div className="bulk-edit-dropdown">
+            {/*
+            FNXC:Settings-ThinkingLevel 2026-07-12-00:00:
+            List bulk edit needs a no-change sentinel plus a clear-to-default lane for task.thinkingLevel so operators can update reasoning effort independently from executor/reviewer model overrides.
+            */}
+            <select
+              className="select bulk-thinking-select"
+              value={bulkThinkingLevel}
+              onChange={(e) => setBulkThinkingLevel(e.target.value)}
+              aria-label={t("listView.thinkingLevel", "Thinking Level")}
+            >
+              <option value="__no_change__">{t("listView.noChange", "No change")}</option>
+              <option value="">{t("models.useDefault", "Use default")}</option>
+              {THINKING_LEVELS.map((level) => (
+                <option key={level} value={level}>
+                  {t(`models.options.${level}`, level === "xhigh" ? "Very High" : level.charAt(0).toUpperCase() + level.slice(1))}
+                </option>
+              ))}
+            </select>
+          </div>
           <div className="bulk-edit-dropdown bulk-edit-node-wrap">
             <select
               className="select bulk-node-select"
@@ -2399,7 +2438,7 @@ export function ListView({
           <button
             className="btn btn-primary btn-sm bulk-edit-apply-btn"
             onClick={handleApplyBulkUpdate}
-            disabled={isApplying || (executorModel === "__no_change__" && validatorModel === "__no_change__" && nodeOverride === "__no_change__")}
+            disabled={isApplying || (executorModel === "__no_change__" && validatorModel === "__no_change__" && bulkThinkingLevel === "__no_change__" && nodeOverride === "__no_change__")}
           >
             {isApplying ? t("listView.applying", "Applying...") : t("listView.apply", "Apply")}
           </button>
@@ -2607,6 +2646,7 @@ export function ListView({
                             !isStuckState &&
                             (task.column === "in-progress" || ACTIVE_STATUSES.has(visualStatus as string));
                           const hasStatus = typeof visualStatus === "string" && visualStatus.trim().length > 0;
+                          const planReviewRunning = isPlanReviewRunning(task);
                           const hasDependencies = Boolean(task.dependencies && task.dependencies.length > 0);
                           const taskProgress = getTaskProgress(task);
                           const hasProgress = taskProgress.hasProgress;
@@ -2668,6 +2708,15 @@ export function ListView({
                                     {isRateLimited ? t("taskStatus.rateLimited.badge", "Rate limited") : getTaskStatusLabel(visualStatus ?? "", t)}
                                   </span>
                                 ) : null}
+                                {planReviewRunning && (
+                                  /*
+                                  FNXC:TaskCardPlanReviewBadge 2026-07-11-12:10:
+                                  Grouped ListView cards must show the same active Plan Review "Reviewing" badge as TaskCard so board and list surfaces remain visually equivalent while the `plan-review` workflow step is running.
+                                  */
+                                  <span className="list-status-badge list-status-badge--reviewing pulsing">
+                                    {t("listView.reviewing", "Reviewing")}
+                                  </span>
+                                )}
                               </div>
 
                               <div className="list-card-row">
@@ -2817,6 +2866,7 @@ export function ListView({
                               !isPaused &&
                               !isStuckState &&
                               (task.column === "in-progress" || ACTIVE_STATUSES.has(visualStatus as string));
+                            const planReviewRunning = isPlanReviewRunning(task);
                             const isDragging = draggingTaskId === task.id;
 
                             return (
@@ -2891,6 +2941,15 @@ export function ListView({
                                       </span>
                                     ) : (
                                       <span className="list-status-badge">-</span>
+                                    )}
+                                    {planReviewRunning && (
+                                      /*
+                                      FNXC:TaskCardPlanReviewBadge 2026-07-11-12:11:
+                                      Ungrouped ListView table rows must render the same Reviewing badge from the shared predicate; this second status render path is easy to miss and must stay in parity with grouped rows.
+                                      */
+                                      <span className="list-status-badge list-status-badge--reviewing pulsing">
+                                        {t("listView.reviewing", "Reviewing")}
+                                      </span>
                                     )}
                                   </td>
                                 )}

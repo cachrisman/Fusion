@@ -24,8 +24,6 @@ import {
   isResearchExperimentalEnabled,
   isEphemeralAgent,
   resolveResearchSettings,
-  canAgentTakeImplementationTaskForExplicitRouting,
-  formatRoleMismatchReason,
   getTaskDuplicateLineage,
   resolveAgentProvisioningPolicy,
   TASK_PRIORITIES,
@@ -58,6 +56,7 @@ import {
   createWorkflowAuthoringTools,
   workflowListParams,
   workflowGetParams,
+  workflowValidateParams,
   workflowSelectParams,
   workflowCreateParams,
   workflowUpdateParams,
@@ -79,6 +78,60 @@ type TaskListFormatter = (
   lines: string[],
   opts?: { maxChars?: number; clamp?: TaskListClamp },
 ) => string;
+
+type AgentDiagnosticLineInput = {
+  state?: string;
+  lastError?: string;
+  pauseReason?: string;
+  metadata?: Record<string, unknown> | null;
+};
+
+function truncateAgentDiagnosticText(value: string, maxChars: number): string {
+  return value.length > maxChars ? `${value.slice(0, maxChars)}…` : value;
+}
+
+function formatAgentErrorRecoveryLine(metadata: Record<string, unknown> | null | undefined): string | null {
+  const heartbeatRaw = metadata?.heartbeatErrorRecovery;
+  const heartbeat = heartbeatRaw && typeof heartbeatRaw === "object" ? heartbeatRaw as Record<string, unknown> : null;
+  const heartbeatAttempts = typeof heartbeat?.consecutiveAttempts === "number" && Number.isFinite(heartbeat.consecutiveAttempts)
+    ? Math.max(0, Math.floor(heartbeat.consecutiveAttempts))
+    : undefined;
+
+  const durableRaw = metadata?.durableErrorRecovery;
+  const durable = durableRaw && typeof durableRaw === "object" ? durableRaw as Record<string, unknown> : null;
+  const durableAttempts = typeof durable?.attempts === "number" && Number.isFinite(durable.attempts)
+    ? Math.max(0, Math.floor(durable.attempts))
+    : undefined;
+  const attempts = Math.max(heartbeatAttempts ?? 0, durableAttempts ?? 0);
+  const hasRecoveryMetadata = heartbeatAttempts !== undefined || durableAttempts !== undefined;
+  if (!hasRecoveryMetadata) {
+    return null;
+  }
+
+  const details: string[] = [`attempts ${attempts}`];
+  if (durable?.exhausted === true) details.push("exhausted");
+  if (typeof durable?.nextRetryAt === "string") details.push(`next ${durable.nextRetryAt}`);
+  return `Error Recovery: ${details.join(", ")}`;
+}
+
+function appendAgentDiagnosticLines(parts: string[], agent: AgentDiagnosticLineInput, options: { compact: boolean }): void {
+  const shouldShowStateDetails = !options.compact || agent.state === "error" || agent.state === "paused";
+  if (!shouldShowStateDetails) {
+    return;
+  }
+
+  if (agent.lastError) {
+    const maxChars = options.compact ? 180 : 500;
+    parts.push(`Last Error: ${truncateAgentDiagnosticText(agent.lastError, maxChars)}`);
+  }
+  if (agent.pauseReason) {
+    parts.push(`Pause Reason: ${truncateAgentDiagnosticText(agent.pauseReason, 180)}`);
+  }
+  const recoveryLine = formatAgentErrorRecoveryLine(agent.metadata);
+  if (recoveryLine) {
+    parts.push(recoveryLine);
+  }
+}
 
 export function inlineTaskListFallback(
   lines: string[],
@@ -247,7 +300,7 @@ export async function validateAssignableAgentId(
   task?: Pick<Task, "id" | "column"> | null,
   override = false,
 ): Promise<string | null> {
-  const { AgentStore, isEphemeralAgent } = await import("@fusion/core");
+  const { AgentStore, isEphemeralAgent, evaluateImplementationTaskBind } = await import("@fusion/core");
   const agentStore = new AgentStore({ rootDir: getFusionDir(cwd) });
   await agentStore.init();
   const agent = await agentStore.getAgent(agentId);
@@ -257,8 +310,15 @@ export async function validateAssignableAgentId(
   if (isEphemeralAgent(agent)) {
     return `Cannot assign task to ephemeral/runtime agent ${agentId}`;
   }
-  if (task && !override && !canAgentTakeImplementationTaskForExplicitRouting(agent, task)) {
-    return formatRoleMismatchReason(agent, task);
+  if (task) {
+    // FNXC:AgentRouting 2026-07-12-12:30: issue #2015 — shared bind evaluator; override bypasses role only, never assignmentPolicy "none".
+    const verdict = evaluateImplementationTaskBind(agent, task, {
+      explicitRouting: true,
+      executorRoleOverride: override,
+    });
+    if (!verdict.allowed) {
+      return verdict.reason;
+    }
   }
   return null;
 }
@@ -665,6 +725,7 @@ async function fetchGitHubIssueViaGh(
 type EngineWorkflowToolName =
   | "fn_workflow_list"
   | "fn_workflow_get"
+  | "fn_workflow_validate"
   | "fn_workflow_create"
   | "fn_workflow_update"
   | "fn_workflow_delete"
@@ -695,6 +756,14 @@ const workflowExtensionToolSpecs: Array<{
     promptSnippet: "Fetch a Fusion workflow definition by ID",
     promptGuidelines: ["Use after fn_workflow_list to inspect the current IR before updating a workflow."],
     parameters: workflowGetParams,
+  },
+  {
+    name: "fn_workflow_validate",
+    label: "fn: Validate Workflow",
+    description: "Dry-run validate a Fusion workflow IR without creating or mutating any workflow.",
+    promptSnippet: "Validate a Fusion workflow IR without persisting it",
+    promptGuidelines: ["Use before create/update while iterating on custom workflow IR; validation failures are reported as dry-run results with no persistence."],
+    parameters: workflowValidateParams,
   },
   {
     name: "fn_workflow_create",
@@ -4996,6 +5065,11 @@ export default function kbExtension(pi: ExtensionAPI) {
         ];
 
         if (agent.title) parts.push(`Title: ${agent.title}`);
+        /*
+        FNXC:AgentHeartbeat 2026-07-12-18:20:
+        FN-7859 requires list output to explain error/paused durable agents without DB inspection, while keeping healthy-agent rows compact.
+        */
+        appendAgentDiagnosticLines(parts, agent, { compact: true });
         if (agent.soul) parts.push(`Soul: ${agent.soul.slice(0, 200)}`);
         if (agent.instructionsText) {
           const snippet = agent.instructionsText.slice(0, 100);
@@ -5164,6 +5238,11 @@ export default function kbExtension(pi: ExtensionAPI) {
 
       if (agent.title) parts.push(`Title: ${agent.title}`);
       if (agent.icon) parts.push(`Icon: ${agent.icon}`);
+      /*
+      FNXC:AgentHeartbeat 2026-07-12-18:20:
+      FN-7859 requires fn_agent_show to surface why an agent is in error/paused so operators can classify recovery state without engine logs.
+      */
+      appendAgentDiagnosticLines(parts, agent, { compact: false });
 
       if (agent.reportsTo) {
         const manager = await agentStore.getAgent(agent.reportsTo);

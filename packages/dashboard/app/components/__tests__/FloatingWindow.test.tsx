@@ -1,9 +1,28 @@
 import { render, screen, fireEvent } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { loadAllAppCss, loadStylesCss } from "../../test/cssFixture";
 import { FloatingWindow } from "../FloatingWindow";
 
 const floatingWindowCss = readFileSync("app/components/FloatingWindow.css", "utf8");
+const allAppCss = loadAllAppCss();
+const stylesCss = loadStylesCss();
+
+function cssRuleFor(css: string, selector: string): string {
+  const start = css.indexOf(`${selector} {`);
+  if (start === -1) return "";
+  const end = css.indexOf("}", start);
+  return css.slice(start, end);
+}
+
+function cssRuleContaining(css: string, selector: string, declaration: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\ /g, "\\s+");
+  const matches = css.matchAll(new RegExp(`${escaped}\\s*\\{[^}]*\\}`, "g"));
+  for (const match of matches) {
+    if (match[0].includes(declaration)) return match[0];
+  }
+  return "";
+}
 
 /*
 FNXC:FloatingWindow 2026-06-22-20:45:
@@ -56,6 +75,85 @@ describe("FloatingWindow", () => {
     expect(floatingWindowCss).not.toContain("var(--shadow-xl)");
   });
 
+  it("keeps movable mobile drag handles opted out of the pan-y touch lockdown", () => {
+    expect(allAppCss).toContain("html,");
+    expect(allAppCss).toContain("body {");
+    expect(allAppCss).toContain("touch-action: pan-y;");
+    expect(allAppCss).toContain("* {");
+    expect(allAppCss).toContain("#root {");
+
+    const movableFloatingWindowSelector = ".floating-window:not(.floating-window--chat):not(.floating-window--task-detail):not(.floating-window--workflow-editor):not(.floating-window--automation):not(.floating-window--mission-interview):not(.floating-window--file-browser):not(.floating-window--pr-create):not(.artifacts-gallery-window) .floating-window__header";
+    expect(cssRuleFor(floatingWindowCss, movableFloatingWindowSelector)).toContain("touch-action: none;");
+
+    for (const selector of [
+      ".right-dock-expand-modal__header--draggable",
+      ".terminal-header--draggable",
+    ]) {
+      expect(cssRuleFor(allAppCss, selector)).toContain("touch-action: none;");
+    }
+  });
+
+  it("keeps every tablet movable-modal drag handle on the explicit touch-action none contract", () => {
+    const tabletStylesStart = stylesCss.indexOf("@media (min-width: 769px) and (max-width: 1024px)");
+    const mobileStylesStart = stylesCss.indexOf("@media (max-width: 768px)", tabletStylesStart);
+    expect(tabletStylesStart).toBeGreaterThan(-1);
+    expect(mobileStylesStart).toBeGreaterThan(tabletStylesStart);
+
+    const tabletBlock = stylesCss.slice(tabletStylesStart, mobileStylesStart);
+    expect(tabletBlock).not.toContain("* {");
+    expect(tabletBlock).not.toContain("touch-action: pan-y;");
+
+    for (const selector of [
+      ".floating-window__header",
+      ".floating-window--headerless .task-detail-content--embedded > .modal-header",
+      ".chat-view--floating .view-header",
+      ".floating-window--workflow-editor .wf-editor-header",
+      ".floating-window--automation .automation-modal__drag-handle",
+      ".floating-window--mission-interview .mission-interview-modal__drag-handle",
+      ".floating-window--pr-create .pr-create-modal__drag-handle",
+      ".file-browser-modal-header",
+      ".artifacts-gallery-viewer-header",
+      ".terminal-header--draggable",
+      ".right-dock-expand-modal__header--draggable",
+      ".new-task-modal__header--draggable",
+      ".quick-chat-fab",
+    ]) {
+      expect(cssRuleContaining(allAppCss, selector, "touch-action: none;"), selector).toContain("touch-action: none;");
+    }
+  });
+
+  it("moves a visible-header window through the captured touch drag path", () => {
+    render(
+      <FloatingWindow
+        windowKey="touch-drag"
+        title="A very long movable floating window title that still starts drag from the ellipsized title text"
+        onClose={() => {}}
+        defaultSize={{ width: 320, height: 240 }}
+        defaultPosition={{ x: 80, y: 90 }}
+        minSize={{ width: 240, height: 180 }}
+      >
+        <div>touch drag body</div>
+      </FloatingWindow>
+    );
+
+    const panel = screen.getByTestId("floating-window-touch-drag");
+    const header = screen.getByTestId("floating-window-drag-handle-touch-drag");
+    const titleText = screen.getByText(/very long movable floating window title/i);
+    const setPointerCapture = vi.fn();
+    const releasePointerCapture = vi.fn();
+    Object.defineProperty(header, "setPointerCapture", { configurable: true, value: setPointerCapture });
+    Object.defineProperty(header, "releasePointerCapture", { configurable: true, value: releasePointerCapture });
+
+    fireEvent.pointerDown(titleText, { pointerId: 17, pointerType: "touch", clientX: 100, clientY: 120 });
+    fireEvent.pointerMove(header, { pointerId: 17, pointerType: "touch", clientX: 140, clientY: 150 });
+    fireEvent.pointerUp(header, { pointerId: 17, pointerType: "touch", clientX: 140, clientY: 150 });
+
+    expect(setPointerCapture).toHaveBeenCalledWith(17);
+    expect(releasePointerCapture).toHaveBeenCalledWith(17);
+    expect(panel.style.left).toBe("120px");
+    expect(panel.style.top).toBe("120px");
+  });
+
   it("can hide generic chrome and delegate dragging to a child header", () => {
     render(
       <FloatingWindow
@@ -80,6 +178,41 @@ describe("FloatingWindow", () => {
     for (const dir of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) {
       expect(screen.getByTestId(`floating-window-resize-${dir}`)).toBeTruthy();
     }
+  });
+
+  it("moves a headerless delegated handle through the captured tablet touch drag path", () => {
+    render(
+      <FloatingWindow
+        windowKey="artifacts-delegate"
+        title="Artifacts"
+        onClose={() => {}}
+        hideHeader
+        dragHandleSelector=".artifacts-gallery-viewer-header"
+        className="artifacts-gallery-window"
+        defaultSize={{ width: 320, height: 240 }}
+        defaultPosition={{ x: 90, y: 110 }}
+        minSize={{ width: 240, height: 180 }}
+      >
+        <div className="artifacts-gallery-viewer-header">Artifacts header</div>
+        <div aria-label="empty artifacts body" />
+      </FloatingWindow>
+    );
+
+    const panel = screen.getByTestId("floating-window-artifacts-delegate");
+    const delegatedHeader = screen.getByText("Artifacts header");
+    const setPointerCapture = vi.fn();
+    const releasePointerCapture = vi.fn();
+    Object.defineProperty(panel, "setPointerCapture", { configurable: true, value: setPointerCapture });
+    Object.defineProperty(panel, "releasePointerCapture", { configurable: true, value: releasePointerCapture });
+
+    fireEvent.pointerDown(delegatedHeader, { pointerId: 23, pointerType: "touch", clientX: 120, clientY: 140 });
+    fireEvent.pointerMove(panel, { pointerId: 23, pointerType: "touch", clientX: 150, clientY: 170 });
+    fireEvent.pointerUp(panel, { pointerId: 23, pointerType: "touch", clientX: 150, clientY: 170 });
+
+    expect(setPointerCapture).toHaveBeenCalledWith(23);
+    expect(releasePointerCapture).toHaveBeenCalledWith(23);
+    expect(panel.style.left).toBe("120px");
+    expect(panel.style.top).toBe("140px");
   });
 
   it("scopes mobile sheet sizing and hidden resize handles to task-detail pop-outs", () => {

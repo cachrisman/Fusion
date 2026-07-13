@@ -19,11 +19,11 @@
 
 import type { AgentStore, AgentHeartbeatRun, HeartbeatInvocationSource, AgentHeartbeatConfig, AgentBudgetStatus, Message, MessageStore, TaskStore, TaskDetail, AgentRole, Agent, InboxTask, RunMutationContext, Settings, AgentConfigRevision, ReflectionStore, ChatStore, ChatRoom, ChatRoomMessage, AgentMemoryInclusionMode } from "@fusion/core";
 import { AutoClaimSnapshotManager, resolveFreshAutoClaimCandidates, type AutoClaimCandidate } from "./auto-claim-snapshot.js";
-import { ApprovalRequestStore, buildExecutionMemoryInstructions, isEphemeralAgent, hasAgentIdentity, resolveEffectiveAgentPermissionPolicy, canAgentTakeImplementationTask, canAgentTakeImplementationTaskForExplicitRouting, resolvePersistAgentThinkingLog, resolveAgentMemoryInclusionMode, FUSION_RUNTIME_SELF_AWARENESS, AWAITING_APPROVAL_PAUSE_REASON } from "@fusion/core";
+import { ApprovalRequestStore, buildExecutionMemoryInstructions, isEphemeralAgent, hasAgentIdentity, resolveEffectiveAgentPermissionPolicy, canAgentTakeImplementationTask, evaluateImplementationTaskBind, resolvePersistAgentThinkingLog, resolveAgentMemoryInclusionMode, FUSION_RUNTIME_SELF_AWARENESS, AWAITING_APPROVAL_PAUSE_REASON } from "@fusion/core";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@earendil-works/pi-ai";
 import { createHash } from "node:crypto";
-import { createTaskCreateTool, createTaskLogToolWithContext, createTaskDocumentWriteTool, createTaskDocumentReadTool, createTaskReadTools, createArtifactRegisterTool, createArtifactListTool, createArtifactViewTool, createListAgentsTool, createDelegateTaskTool, createGetAgentConfigTool, createUpdateAgentConfigTool, createAgentCreateTool, createAgentDeleteTool, createSendMessageTool, createReadMessagesTool, createPostRoomMessageTool, createMemoryTools, createGoalRetrievalTools, createReadEvaluationsTool, createUpdateIdentityTool, createReflectOnPerformanceTool, createWebFetchTool, createWorkflowListTool, createWorkflowGetTool, createWorkflowSelectTool, createTaskPromoteTool, createWorkflowCreateTool, createWorkflowUpdateTool, createWorkflowDeleteTool, createWorkflowSettingsTool, createTraitListTool, createAskQuestionTool, createResearchTools, readAgentMemoryWorkspaceLongTerm, taskCreateParams } from "./agent-tools.js";
+import { createTaskCreateTool, createTaskLogToolWithContext, createTaskDocumentWriteTool, createTaskDocumentReadTool, createTaskReadTools, createArtifactRegisterTool, createArtifactListTool, createArtifactViewTool, createListAgentsTool, createDelegateTaskTool, createGetAgentConfigTool, createUpdateAgentConfigTool, createAgentCreateTool, createAgentDeleteTool, createSendMessageTool, createReadMessagesTool, createPostRoomMessageTool, createMemoryTools, createGoalRetrievalTools, createReadEvaluationsTool, createUpdateIdentityTool, createReflectOnPerformanceTool, createWebFetchTool, createWorkflowListTool, createWorkflowGetTool, createWorkflowValidateTool, createWorkflowSelectTool, createTaskPromoteTool, createWorkflowCreateTool, createWorkflowUpdateTool, createWorkflowDeleteTool, createWorkflowSettingsTool, createTraitListTool, createAskQuestionTool, createResearchTools, readAgentMemoryWorkspaceLongTerm, taskCreateParams } from "./agent-tools.js";
 import { AgentLogger } from "./agent-logger.js";
 import {
   resolveAgentInstructionsWithRatings,
@@ -34,6 +34,7 @@ import { resolveHeartbeatPromptTemplate, resolveHeartbeatScopeDisciplineMode, se
 import { buildPromptLayers, collapsePromptLayers } from "./prompt-layers.js";
 import { resolveAndEmitGoalContext } from "./goal-injection-diagnostics.js";
 import { createLogger, heartbeatLog, formatError } from "./logger.js";
+import { isOperatorActionableAgentError, isStaleWorktreeModuleResolutionError } from "./transient-error-detector.js";
 
 /**
  * FNXC:WorktreeAcquisition 2026-07-09-00:00:
@@ -51,9 +52,22 @@ import { createLogger, heartbeatLog, formatError } from "./logger.js";
  * as the cross-heartbeat counter.
  */
 const MAX_HEARTBEAT_WORKTREE_ACQUISITION_RETRIES = 3;
+
+/*
+FNXC:HeartbeatRecovery 2026-07-11-00:00:
+FN-7835 requires durable heartbeat-managed agents in error state to retry on their next heartbeat instead of staying stranded. Recovery is intentionally bounded by a consecutive-attempt budget so persistent failures park the agent instead of forming an infinite retry loop.
+
+FNXC:HeartbeatRecovery 2026-07-11-00:00:
+FN-7672 requires durable agent error recovery to stay classification-gated: only transient, non-operator-actionable lastError values may be retried automatically. Credential, quota, model-access, and permanent configuration failures must remain parked for operator action instead of burning heartbeat retries.
+*/
+export const MAX_HEARTBEAT_ERROR_RECOVERY_ATTEMPTS = 5;
+export const HEARTBEAT_ERROR_RECOVERY_METADATA_KEY = "heartbeatErrorRecovery";
+export const HEARTBEAT_ERROR_RETRY_EXHAUSTED_PAUSE_REASON = "error-retry-exhausted";
+export const HEARTBEAT_ERROR_UNRECOVERABLE_PAUSE_REASON = "error-unrecoverable";
 import { acquireTaskWorktree } from "./worktree-acquisition.js";
 import { createRunAuditor, generateSyntheticRunId, type DatabaseMutationType, type EngineRunContext } from "./run-audit.js";
 import { promptWithFallback } from "./pi.js";
+import { withRateLimitRetry } from "./rate-limit-retry.js";
 import { buildAgentGatedActionSummary } from "./permanent-agent-gating.js";
 import { createResolvedAgentSession, extractRuntimeHint, resolveHeartbeatSessionModels, resolveExecutorFallbackThinkingLevel } from "./agent-session-helpers.js";
 import { resolveMcpServersForStore } from "./mcp-resolution.js";
@@ -554,7 +568,7 @@ You have coding-capable workspace tools (read/write/edit/bash within worktree bo
 - fn_artifact_register, fn_artifact_list, and fn_artifact_view (register visual/media outputs so they appear in the dashboard Artifacts gallery: screenshots/wireframes/mockups/diagrams as type="image" via \`path\`; screen recordings as type="video" via \`path\`; HTML mockups as type="document" with mimeType="text/html" — rendered as live previews; PDFs as type="document" with mimeType="application/pdf" via \`path\`. No-task runs have no session workspace directory, so save files under the OS temp directory and pass an absolute \`path\` — relative paths are rejected in this mode)
 - fn_read_evaluations and fn_update_identity (available in no-task runs)
 - fn_reflect_on_performance when reflection is enabled for this run
-- fn_workflow_list, fn_workflow_get, fn_workflow_create, fn_workflow_update, fn_workflow_delete, fn_workflow_settings, and fn_trait_list for workflow discovery/authoring
+- fn_workflow_list, fn_workflow_get, fn_workflow_validate, fn_workflow_create, fn_workflow_update, fn_workflow_delete, fn_workflow_settings, and fn_trait_list for workflow discovery/authoring
 - fn_research_run, fn_research_list, fn_research_get, and fn_research_cancel for bounded research when configured
 - fn_ask_question to ask the dashboard user for structured clarification
 - fn_web_fetch
@@ -1657,6 +1671,12 @@ export class HeartbeatMonitor {
       resultJson?: Record<string, unknown>;
       stdoutExcerpt?: string;
       stderrExcerpt?: string;
+      /*
+      FNXC:AgentHeartbeat 2026-07-12-20:10:
+      Failure classification (recoverable vs unrecoverable park, FN-7835/FN-7859) must run on the provider error MESSAGE, never on a stack-bearing detail string: stack frames contain classifier-triggering identifiers — e.g. `at withRateLimitRetry (.../rate-limit-retry.ts)` matches the usage-limit /rate[_\s]?limit/ pattern and would misclassify EVERY failed heartbeat as usage-limit/unrecoverable. `stderrExcerpt` keeps the full detail for run-detail observability; `errorMessage` (message-only) drives classification and `agent.lastError`.
+      */
+      /** Message-only failure text used for error classification and agent.lastError; falls back to stderrExcerpt. */
+      errorMessage?: string;
       /** When true, preserve current agent state instead of forcing a terminal transition. */
       skipStateTransition?: boolean;
     }
@@ -1730,14 +1750,103 @@ export class HeartbeatMonitor {
     if (!completionResult.skipStateTransition) {
       try {
         if (completionResult.status === "failed") {
-          await this.store.updateAgentState(agentId, "error");
-          await this.store.updateAgent(agentId, { lastError: completionResult.stderrExcerpt ?? "Run failed" });
+          const latestAgent = await this.store.getAgent(agentId);
+          const errorRecoveryLimit = this.taskStore
+            ? resolveErrorRecoveryLimit(await this.taskStore.getSettings().catch((settingsErr) => {
+              heartbeatLog.warn(`Agent ${agentId} error-recovery limit lookup failed: ${settingsErr instanceof Error ? settingsErr.message : String(settingsErr)} — using default limit`);
+              return undefined;
+            }))
+            : MAX_HEARTBEAT_ERROR_RECOVERY_ATTEMPTS;
+          const retryCount = latestAgent ? readHeartbeatErrorRetryCount(latestAgent) : 0;
+          const failedError = completionResult.errorMessage ?? completionResult.stderrExcerpt ?? "Run failed";
+          const failedWithRecoverableError = isHeartbeatErrorRecoverable({ lastError: failedError });
+          const failedWithUnrecoverableError = !failedWithRecoverableError && !isStaleWorktreeModuleResolutionError(failedError);
+          /*
+          FNXC:HeartbeatRecovery 2026-07-11-19:57:
+          FN-7835's primary timer path cannot rely on a future heartbeat to perform exhaustion bookkeeping: once retryCount reaches the limit, timer eligibility intentionally stops dispatching error-state agents. Park the agent paused on the failing boundary run so the bounded retry contract is reachable in production.
+          */
+          if (
+            latestAgent
+            && isHeartbeatManaged(latestAgent)
+            && latestAgent.runtimeConfig?.enabled !== false
+            && retryCount >= errorRecoveryLimit
+            && retryCount > 0
+            && failedWithRecoverableError
+          ) {
+            await this.store.updateAgentState(agentId, "paused");
+            await this.store.updateAgent(agentId, {
+              lastError: failedError,
+              pauseReason: HEARTBEAT_ERROR_RETRY_EXHAUSTED_PAUSE_REASON,
+            });
+            heartbeatLog.warn(`Agent ${agentId} error recovery exhausted after ${retryCount}/${errorRecoveryLimit} attempts — pausing`);
+            if (this.taskStore) {
+              try {
+                const runWithSource = run as unknown as { source?: unknown };
+                const runSource = typeof runWithSource.source === "string" ? runWithSource.source : undefined;
+                const audit = createRunAuditor(this.taskStore, {
+                  runId,
+                  agentId,
+                  phase: "heartbeat",
+                  source: runSource,
+                });
+                await audit.database({
+                  type: "agent:error-retry-exhausted",
+                  target: agentId,
+                  metadata: { agentId, attempts: retryCount, limit: errorRecoveryLimit, source: runSource },
+                });
+              } catch (auditErr) {
+                heartbeatLog.warn(`Agent ${agentId} error-retry exhaustion audit failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)} — continuing`);
+              }
+            }
+          } else if (
+            latestAgent
+            && isHeartbeatManaged(latestAgent)
+            && latestAgent.runtimeConfig?.enabled !== false
+            && failedWithUnrecoverableError
+          ) {
+            /*
+            FNXC:AgentHeartbeat 2026-07-12-18:34:
+            FN-7859 keeps non-recoverable durable heartbeat failures from restart-looping, but parks them paused with an operator-visible reason instead of leaving them indefinitely in bare error.
+            */
+            await this.store.updateAgentState(agentId, "paused");
+            await this.store.updateAgent(agentId, {
+              lastError: failedError,
+              pauseReason: HEARTBEAT_ERROR_UNRECOVERABLE_PAUSE_REASON,
+            });
+            heartbeatLog.warn(`Agent ${agentId} heartbeat failed with unrecoverable error — pausing for operator action`);
+            if (this.taskStore) {
+              try {
+                const runWithSource = run as unknown as { source?: unknown };
+                const runSource = typeof runWithSource.source === "string" ? runWithSource.source : undefined;
+                const audit = createRunAuditor(this.taskStore, {
+                  runId,
+                  agentId,
+                  phase: "heartbeat",
+                  source: runSource,
+                });
+                await audit.database({
+                  type: "agent:error-parked-unrecoverable",
+                  target: agentId,
+                  metadata: { agentId, source: runSource },
+                });
+              } catch (auditErr) {
+                heartbeatLog.warn(`Agent ${agentId} unrecoverable-error park audit failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)} — continuing`);
+              }
+            }
+          } else {
+            await this.store.updateAgentState(agentId, "error");
+            await this.store.updateAgent(agentId, { lastError: failedError });
+          }
         } else if (completionResult.status === "terminated") {
           await this.store.updateAgentState(agentId, "paused");
         } else {
           // Completed successfully - back to active and clear any stale failure marker.
           await this.store.updateAgentState(agentId, "active");
-          await this.store.updateAgent(agentId, { lastError: undefined });
+          const latestAgent = await this.store.getAgent(agentId);
+          await this.store.updateAgent(agentId, {
+            lastError: undefined,
+            ...(latestAgent ? { metadata: resetHeartbeatErrorRecoveryMetadata(latestAgent) } : {}),
+          });
         }
       } catch (stateTransErr) {
         heartbeatLog.warn(`Agent ${agentId} state transition failed: ${stateTransErr instanceof Error ? stateTransErr.message : String(stateTransErr)} — continuing`);
@@ -2181,7 +2290,7 @@ export class HeartbeatMonitor {
         }
 
         // Resolve agent
-        const agent = preloadedAgent ?? await this.store.getAgent(agentId);
+        let agent = preloadedAgent ?? await this.store.getAgent(agentId);
         if (!agent) {
           heartbeatLog.warn(`Agent ${agentId} not found — completing run as failed`);
           await this.completeRun(agentId, run.id, {
@@ -2189,6 +2298,93 @@ export class HeartbeatMonitor {
             stderrExcerpt: `Agent ${agentId} not found`,
           });
           return (await this.store.getRunDetail(agentId, run.id))!;
+        }
+
+        if (agent.state === "error") {
+          const errorRecoveryLimit = resolveErrorRecoveryLimit(heartbeatModelSettings);
+          const currentRetryCount = readHeartbeatErrorRetryCount(agent);
+          const canAttemptErrorRecovery = isErrorRecoveryEligible(agent, errorRecoveryLimit);
+          const recoveryBudgetExhausted = isHeartbeatManaged(agent)
+            && agent.runtimeConfig?.enabled !== false
+            && isHeartbeatErrorRecoverable(agent)
+            && currentRetryCount >= errorRecoveryLimit;
+
+          if (canAttemptErrorRecovery) {
+            const attempt = currentRetryCount + 1;
+            const metadata = incrementHeartbeatErrorRecoveryMetadata(agent);
+            try {
+              await this.store.updateAgentState(agentId, "active");
+              await this.store.updateAgent(agentId, { lastError: undefined, metadata });
+              heartbeatLog.log(`Agent ${agentId} auto-recovered from error state for heartbeat retry attempt ${attempt}/${errorRecoveryLimit}`);
+              await audit.database({
+                type: "agent:auto-recover-error-state",
+                target: agentId,
+                metadata: { agentId, attempt, limit: errorRecoveryLimit, source },
+              });
+              agent = (await this.store.getAgent(agentId)) ?? { ...agent, state: "active", lastError: undefined, metadata };
+            } catch (recoveryErr) {
+              heartbeatLog.warn(`Agent ${agentId} error-state recovery bookkeeping failed: ${recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)} — continuing with existing state`);
+            }
+          } else if (recoveryBudgetExhausted) {
+            try {
+              await this.store.updateAgentState(agentId, "paused");
+              await this.store.updateAgent(agentId, { pauseReason: HEARTBEAT_ERROR_RETRY_EXHAUSTED_PAUSE_REASON });
+              heartbeatLog.warn(`Agent ${agentId} error recovery exhausted after ${currentRetryCount}/${errorRecoveryLimit} attempts — pausing`);
+              await audit.database({
+                type: "agent:error-retry-exhausted",
+                target: agentId,
+                metadata: { agentId, attempts: currentRetryCount, limit: errorRecoveryLimit, source },
+              });
+            } catch (exhaustionErr) {
+              heartbeatLog.warn(`Agent ${agentId} error-retry exhaustion bookkeeping failed: ${exhaustionErr instanceof Error ? exhaustionErr.message : String(exhaustionErr)} — completing run without retry`);
+            }
+            await this.completeRun(agentId, run.id, {
+              status: "completed",
+              resultJson: { reason: HEARTBEAT_ERROR_RETRY_EXHAUSTED_PAUSE_REASON, attempts: currentRetryCount, limit: errorRecoveryLimit },
+              skipStateTransition: true,
+            });
+            return (await this.store.getRunDetail(agentId, run.id))!;
+          } else if (
+            isHeartbeatManaged(agent)
+            && agent.runtimeConfig?.enabled !== false
+            && !isStaleWorktreeModuleResolutionError(agent.lastError ?? "")
+          ) {
+            /*
+            FNXC:AgentHeartbeat 2026-07-12-18:34:
+            FN-7859 treats a durable non-recoverable error as terminal-until-operator-action. The heartbeat run-entry path must park it before the timer unregisters so the agent is inspectable and not stranded in bare error.
+            */
+            try {
+              await this.store.updateAgentState(agentId, "paused");
+              await this.store.updateAgent(agentId, { pauseReason: HEARTBEAT_ERROR_UNRECOVERABLE_PAUSE_REASON });
+              heartbeatLog.warn(`Agent ${agentId} has unrecoverable heartbeat error — pausing for operator action`);
+              await audit.database({
+                type: "agent:error-parked-unrecoverable",
+                target: agentId,
+                metadata: { agentId, source },
+              });
+            } catch (parkErr) {
+              heartbeatLog.warn(`Agent ${agentId} unrecoverable error-state park failed: ${parkErr instanceof Error ? parkErr.message : String(parkErr)} — preserving run completion`);
+            }
+            await this.completeRun(agentId, run.id, {
+              status: "completed",
+              resultJson: { reason: HEARTBEAT_ERROR_UNRECOVERABLE_PAUSE_REASON, state: agent.state, recoveryEligible: false },
+              skipStateTransition: true,
+            });
+            return (await this.store.getRunDetail(agentId, run.id))!;
+          } else {
+            heartbeatLog.log(`Agent ${agentId} state is "error" but lastError is not eligible for heartbeat recovery — graceful exit`);
+            try {
+              await this.store.updateAgentState(agentId, "error");
+            } catch (restoreErr) {
+              heartbeatLog.warn(`Agent ${agentId} non-recoverable error-state restore failed: ${restoreErr instanceof Error ? restoreErr.message : String(restoreErr)} — preserving run completion`);
+            }
+            await this.completeRun(agentId, run.id, {
+              status: "completed",
+              resultJson: { reason: "invalid_state", state: agent.state, recoveryEligible: false },
+              skipStateTransition: true,
+            });
+            return (await this.store.getRunDetail(agentId, run.id))!;
+          }
         }
 
         // Check if agent has identity (used later for no-task run decisions)
@@ -2201,10 +2397,16 @@ export class HeartbeatMonitor {
         let inboxSelection: InboxTask | null = null;
 
         if (!taskId) {
-          inboxSelection = await taskStore.selectNextTaskForAgent(agentId, { id: agent.id, role: agent.role });
-          if (inboxSelection && !canAgentTakeImplementationTaskForExplicitRouting(agent, inboxSelection.task)) {
-            const hasRoleOverride = inboxSelection.task.sourceMetadata?.executorRoleOverride === true;
-            if (!hasRoleOverride) {
+          // FNXC:AgentRouting 2026-07-12-12:10: pass runtimeConfig so the inbox selector can enforce per-agent assignmentPolicy (issue #2015).
+          inboxSelection = await taskStore.selectNextTaskForAgent(agentId, { id: agent.id, role: agent.role, runtimeConfig: agent.runtimeConfig });
+          if (inboxSelection) {
+            // Defense-in-depth re-check with the shared evaluator: executorRoleOverride bypasses the role
+            // check only — assignmentPolicy "none" is never overridable (issue #2015).
+            const bindVerdict = evaluateImplementationTaskBind(agent, inboxSelection.task, {
+              explicitRouting: true,
+              executorRoleOverride: inboxSelection.task.sourceMetadata?.executorRoleOverride === true,
+            });
+            if (!bindVerdict.allowed) {
               heartbeatLog.log(
                 `Agent ${agentId} (role=${agent.role}) skipped inbox-selected task ${inboxSelection.task.id} due to executor-role assignment policy`,
               );
@@ -2858,8 +3060,9 @@ export class HeartbeatMonitor {
             toolCallCount++;
             agentLogger?.onToolEnd(name, isError, result);
           },
-          // Skill selection: use waking agent's skills (heartbeat has no role fallback)
+          // FNXC:PluginSkills 2026-07-12-00:00: Heartbeat sessions forward plugin skill body dirs with waking-agent requested names so durable agents can use plugin-provided guidance.
           ...(skillContext.skillSelectionContext ? { skillSelection: skillContext.skillSelectionContext } : {}),
+          ...(skillContext.additionalSkillPaths.length > 0 ? { additionalSkillPaths: skillContext.additionalSkillPaths } : {}),
           actionGateContext: this.buildActionGateContext(agent, taskId, run.id, heartbeatModelSettings?.defaultAgentPermissionPolicy),
           permanentAgentGating: this.buildPermanentAgentGatingContext(agent, taskId, run.id, heartbeatModelSettings?.defaultAgentPermissionPolicy),
         });
@@ -3229,7 +3432,19 @@ export class HeartbeatMonitor {
           }
 
           // Execute
-          await promptWithFallback(session, executionPrompt);
+          /*
+          FNXC:AgentHeartbeat 2026-07-12-20:10:
+          Heartbeat prompts must run under the same rate-limit + transient-auth retry wrapper as executor/triage/merger work. Claude Max OAuth tokens rotate mid-run (~8 h); the in-flight call 401s ("authentication_error: Invalid authentication credentials") even though refreshed credentials already exist, and the next attempt succeeds. Without this wrapper a routine token rotation failed the run, pushed every durable agent to `error`, and (via FN-7859 unrecoverable classification) parked them paused for operator action. Retrying in-run prevents the error state at the source; the durable-agent error-recovery budget stays the backstop for errors that escape.
+
+          FNXC:AgentHeartbeat 2026-07-12-21:05:
+          PR #2027 review (side-effect replay): the retry re-prompts the SAME session, whose transcript already contains any tool calls completed before the failure, so the model continues from its partial work rather than blindly re-executing it — the same continuation semantics executor/triage/merger rely on under this wrapper. A rotation 401 additionally fails on the turn's FIRST provider call (the stale token never reaches a tool call), so the dominant retry case has no partial work to duplicate.
+          */
+          await withRateLimitRetry(() => promptWithFallback(session, executionPrompt), {
+            onRetry: (attempt, delayMs, retryError) => {
+              const delaySec = Math.round(delayMs / 1000);
+              heartbeatLog.warn(`Agent ${agentId} heartbeat prompt hit retryable provider error — retry ${attempt} in ${delaySec}s: ${retryError.message}`);
+            },
+          });
 
           // Capture real per-session token counts from pi-coding-agent's
           // SessionStats. Falls back to a 4-chars-per-token estimate of output
@@ -3306,7 +3521,7 @@ export class HeartbeatMonitor {
 
           heartbeatLog.log(`Heartbeat completed for ${agentId} (${toolCallCount} tool calls, ${usageInput} input + ${usageOutput} output + ${usageCached} cache-read + ${usageCacheWrite} cache-write tokens)`);
         } catch (err) {
-          const errorDetail = formatError(err).detail;
+          const { message: errorMessage, detail: errorDetail } = formatError(err);
           heartbeatLog.error(`Heartbeat execution failed for ${agentId}: ${errorDetail}`);
           await flushAgentLogger();
 
@@ -3316,6 +3531,7 @@ export class HeartbeatMonitor {
             await this.completeRun(agentId, run.id, {
               status: "failed",
               stderrExcerpt: errorDetail,
+              errorMessage,
               stdoutExcerpt: stdoutExcerpt || undefined,
             });
           }
@@ -3390,6 +3606,7 @@ export class HeartbeatMonitor {
             await this.completeRun(agentId, run.id, {
               status: "failed",
               stderrExcerpt: errorDetail,
+              errorMessage,
             });
           }
         } catch (completeRunErr) {
@@ -3573,6 +3790,7 @@ export class HeartbeatMonitor {
       ...createTaskReadTools(taskStore),
       createWorkflowListTool(taskStore),
       createWorkflowGetTool(taskStore),
+      createWorkflowValidateTool(taskStore),
       createWorkflowCreateTool(taskStore, { stripApprovalFlags: true }),
       createWorkflowUpdateTool(taskStore, { stripApprovalFlags: true }),
       createWorkflowDeleteTool(taskStore),
@@ -3960,12 +4178,84 @@ function isHeartbeatManaged(agent: Agent): boolean {
   return !isEphemeralAgent(agent);
 }
 
+type HeartbeatErrorRecoveryMetadata = {
+  consecutiveAttempts: number;
+  updatedAt?: string;
+};
+
+export function resolveErrorRecoveryLimit(settings: Settings | null | undefined): number {
+  const raw = (settings as { heartbeatErrorRecoveryAttempts?: unknown } | null | undefined)?.heartbeatErrorRecoveryAttempts;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return MAX_HEARTBEAT_ERROR_RECOVERY_ATTEMPTS;
+  }
+  return Math.max(1, Math.floor(raw));
+}
+
+export function readHeartbeatErrorRetryCount(agent: { metadata?: Record<string, unknown> | null }): number {
+  /*
+  FNXC:AgentHeartbeat 2026-07-11-22:42:
+  FN-7844 requires the heartbeat timer and self-healing sweep to honor one durable-agent error-recovery budget. Read the legacy durableErrorRecovery attempt count as part of the shared budget so agents recovered by either entry path cannot receive separate retry pools.
+  */
+  const metadata = (agent.metadata ?? {}) as Record<string, unknown>;
+  const raw = metadata[HEARTBEAT_ERROR_RECOVERY_METADATA_KEY];
+  const heartbeatCount = raw && typeof raw === "object"
+    ? (raw as Record<string, unknown>).consecutiveAttempts
+    : 0;
+  const legacyRaw = metadata.durableErrorRecovery;
+  const legacyCount = legacyRaw && typeof legacyRaw === "object"
+    ? (legacyRaw as Record<string, unknown>).attempts
+    : 0;
+  const normalizedHeartbeatCount = typeof heartbeatCount === "number" && Number.isFinite(heartbeatCount) && heartbeatCount > 0
+    ? Math.floor(heartbeatCount)
+    : 0;
+  const normalizedLegacyCount = typeof legacyCount === "number" && Number.isFinite(legacyCount) && legacyCount > 0
+    ? Math.floor(legacyCount)
+    : 0;
+  return Math.max(normalizedHeartbeatCount, normalizedLegacyCount);
+}
+
+export function buildHeartbeatErrorRecoveryMetadata(agent: { metadata?: Record<string, unknown> | null }, consecutiveAttempts: number): Record<string, unknown> {
+  return {
+    ...(agent.metadata ?? {}),
+    [HEARTBEAT_ERROR_RECOVERY_METADATA_KEY]: {
+      consecutiveAttempts: Math.max(0, Math.floor(consecutiveAttempts)),
+      updatedAt: new Date().toISOString(),
+    } satisfies HeartbeatErrorRecoveryMetadata,
+  };
+}
+
+export function incrementHeartbeatErrorRecoveryMetadata(agent: { metadata?: Record<string, unknown> | null }): Record<string, unknown> {
+  return buildHeartbeatErrorRecoveryMetadata(agent, readHeartbeatErrorRetryCount(agent) + 1);
+}
+
+export function resetHeartbeatErrorRecoveryMetadata(agent: { metadata?: Record<string, unknown> | null }): Record<string, unknown> {
+  const { durableErrorRecovery: _legacyDurableErrorRecovery, ...metadata } = (agent.metadata ?? {}) as Record<string, unknown>;
+  return buildHeartbeatErrorRecoveryMetadata({ metadata }, 0);
+}
+
+export function isHeartbeatErrorRecoverable(agent: Pick<Agent, "lastError">): boolean {
+  const lastError = agent.lastError ?? "";
+  /*
+  FNXC:Reliability-ErrorClassification 2026-07-12-16:09:
+  FN-7878: a generic durable-agent heartbeat failure that manual Retry immediately fixes is recoverable by policy, even when it does not match curated transient patterns. Give unknown/session/spawn/stream blips the bounded heartbeat retry budget and re-park persistent failures as `error-retry-exhausted`; only operator-actionable auth/model/billing errors park immediately as `error-unrecoverable`. Stale worktree module-resolution errors stay out of naive retry recovery because self-healing has a dedicated stale-host/worktree suppression path.
+  */
+  return !isStaleWorktreeModuleResolutionError(lastError) && !isOperatorActionableAgentError(lastError);
+}
+
+export function isErrorRecoveryEligible(agent: Agent, limit: number): boolean {
+  return agent.state === "error"
+    && isHeartbeatManaged(agent)
+    && agent.runtimeConfig?.enabled !== false
+    && isHeartbeatErrorRecoverable(agent)
+    && readHeartbeatErrorRetryCount(agent) < Math.max(1, Math.floor(limit));
+}
+
 /**
  * HeartbeatTriggerScheduler manages timer-based heartbeat triggers for agents.
  *
  * Timers are armed only for durable agents where all of the following hold:
  * - `runtimeConfig.enabled !== false`
- * - `state ∈ {active, running, idle}`
+ * - `state ∈ {active, running, idle}` or `state === "error"` with retry budget remaining
  *
  * Any other state, or any ephemeral/task-worker agent, clears the timer.
  * State changes and heartbeat config updates are observed via AgentStore
@@ -4008,6 +4298,7 @@ export class HeartbeatTriggerScheduler {
   private callback: TriggerCallback;
   private taskStore?: TaskStore;
   private timers: Map<string, AgentTimer> = new Map();
+  private errorRecoveryLimit = MAX_HEARTBEAT_ERROR_RECOVERY_ATTEMPTS;
   private pendingAssignments: Map<string, PendingAssignment> = new Map();
   private registrationEpochs: Map<string, number> = new Map();
   private running = false;
@@ -4511,10 +4802,15 @@ export class HeartbeatTriggerScheduler {
     }
   }
 
+  private updateErrorRecoveryLimit(settings: Settings | null | undefined): number {
+    this.errorRecoveryLimit = resolveErrorRecoveryLimit(settings);
+    return this.errorRecoveryLimit;
+  }
+
   private isTimerEligibleAgent(agent: Agent): boolean {
     return isHeartbeatManaged(agent)
       && agent.runtimeConfig?.enabled !== false
-      && isTickableState(agent.state);
+      && (isTickableState(agent.state) || isErrorRecoveryEligible(agent, this.errorRecoveryLimit));
   }
 
   private getAgentTimerConfig(agent: Agent): AgentHeartbeatConfig {
@@ -4737,6 +5033,7 @@ export class HeartbeatTriggerScheduler {
         ? await this.taskStore.getSettings()
         : null;
       const staleMultiplier = this.resolveRepairStaleMultiplier(settings);
+      this.updateErrorRecoveryLimit(settings);
       const agents = await this.store.listAgents();
       let rearmedCount = 0;
       let zombieRearmedCount = 0;
@@ -4861,8 +5158,16 @@ export class HeartbeatTriggerScheduler {
         this.unregisterAgent(agentId);
         return;
       }
-      if (!isHeartbeatManaged(agent) || !isTickableState(agent.state)) {
+      if (!isHeartbeatManaged(agent) || (agent.state !== "error" && !isTickableState(agent.state))) {
         heartbeatLog.log(`Timer tick skipped for ${agentId} (state=${agent.state})`);
+        this.unregisterAgent(agentId);
+        return;
+      }
+
+      const settings = this.taskStore ? await this.taskStore.getSettings() : null;
+      const errorRecoveryLimit = this.updateErrorRecoveryLimit(settings);
+      if (agent.state === "error" && !isErrorRecoveryEligible(agent, errorRecoveryLimit)) {
+        heartbeatLog.log(`Timer tick skipped for ${agentId} (state=${agent.state}, error recovery ineligible)`);
         this.unregisterAgent(agentId);
         return;
       }
@@ -4895,7 +5200,6 @@ export class HeartbeatTriggerScheduler {
 
       // Global/engine pause guard: scheduler should not dispatch timer callbacks
       // while globally paused (hard stop) or engine paused (soft stop for timers).
-      const settings = this.taskStore ? await this.taskStore.getSettings() : null;
       if (settings?.globalPause) {
         heartbeatLog.log(`Timer tick skipped for ${agentId} (global pause active)`);
         return;

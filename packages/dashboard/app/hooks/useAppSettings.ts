@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchConfig, fetchSettings, updateSettings, updateGlobalSettings } from "../api";
 import type { GlobalSettings, ProjectSettings } from "@fusion/core";
+import type { ModelPricingOverrides } from "../../../core/src/model-pricing";
 import { setAutoReloadEnabled } from "../versionCheck";
 import { DEFAULT_DASHBOARD_KEYBOARD_SHORTCUTS, resolveDashboardKeyboardShortcuts, type DashboardKeyboardShortcutMap } from "../utils/keyboardShortcuts";
 
@@ -34,6 +35,8 @@ export interface UseAppSettingsResult {
   capacityRiskTodoThreshold: number;
   openTasksInRightSidebar: boolean;
   openMobileTasksInPopup: boolean;
+  showCostBadgeOnCards: boolean;
+  modelPricingOverrides?: ModelPricingOverrides;
   taskDetailChatFirst: boolean;
   quickChatButtonMode: QuickChatButtonMode;
   quickChatCloseOnOutsideClick: boolean;
@@ -87,6 +90,8 @@ export function useAppSettings(projectId?: string): UseAppSettingsResult {
   const [capacityRiskTodoThreshold, setCapacityRiskTodoThreshold] = useState(20);
   const [openTasksInRightSidebar, setOpenTasksInRightSidebar] = useState(false);
   const [openMobileTasksInPopup, setOpenMobileTasksInPopup] = useState(false);
+  const [showCostBadgeOnCards, setShowCostBadgeOnCards] = useState(false);
+  const [modelPricingOverrides, setModelPricingOverrides] = useState<ModelPricingOverrides | undefined>(undefined);
   const [taskDetailChatFirst, setTaskDetailChatFirst] = useState(false);
   const [quickChatButtonMode, setQuickChatButtonMode] = useState<QuickChatButtonMode>("off");
   const [quickChatCloseOnOutsideClick, setQuickChatCloseOnOutsideClick] = useState(true);
@@ -170,6 +175,12 @@ export function useAppSettings(projectId?: string): UseAppSettingsResult {
       setOpenTasksInRightSidebar(settings.openTasksInRightSidebar === true);
       setOpenMobileTasksInPopup(settings.openMobileTasksInPopup === true);
       /*
+      FNXC:TaskCardCostBadge 2026-07-11-12:15:
+      The app shell exposes the default-off card cost badge setting to the board context only after settings hydration, preserving the no-badge default for upgraded projects.
+      */
+      setShowCostBadgeOnCards(settings.showCostBadgeOnCards === true);
+      setModelPricingOverrides((settings as GlobalSettings).modelPricingOverrides);
+      /*
       FNXC:TaskDetailActivityFirst 2026-06-30-23:59:
       App-level task-detail hosts need the project setting so Activity-first is the missing/false default and Chat-first is restored only by explicit opt-in.
       */
@@ -202,6 +213,8 @@ export function useAppSettings(projectId?: string): UseAppSettingsResult {
     setDevServerEnabled(false);
     setOpenTasksInRightSidebar(false);
     setOpenMobileTasksInPopup(false);
+    setShowCostBadgeOnCards(false);
+    setModelPricingOverrides(undefined);
     setTaskDetailChatFirst(false);
     setQuickChatCloseOnOutsideClick(true);
     setDashboardKeyboardShortcuts(DEFAULT_DASHBOARD_KEYBOARD_SHORTCUTS);
@@ -335,6 +348,8 @@ export function useAppSettings(projectId?: string): UseAppSettingsResult {
     capacityRiskTodoThreshold,
     openTasksInRightSidebar,
     openMobileTasksInPopup,
+    showCostBadgeOnCards,
+    modelPricingOverrides,
     taskDetailChatFirst,
     quickChatButtonMode,
     quickChatCloseOnOutsideClick,

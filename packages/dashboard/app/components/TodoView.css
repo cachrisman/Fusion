@@ -462,24 +462,25 @@ Redesign Todos to fit the rest of the dashboard theme: full-height tokenized wor
   gap: var(--space-sm);
 }
 
+/*
+FNXC:TodosStyling 2026-07-12-00:00:
+FN-7870 removes the active-row left accent stripe and per-row border boxing so Todo sidebar list rows read as a flat, quiet stack. Active and hover states remain visible through background and text color only.
+*/
 .todo-list-item {
   min-height: 42px;
   padding: var(--space-sm);
-  border: 1px solid transparent;
   border-radius: var(--radius-md);
   color: var(--text-muted);
 }
 
 .todo-list-item:hover {
   background: var(--card-hover);
-  border-color: color-mix(in srgb, var(--border) 70%, transparent);
+  color: var(--text);
 }
 
 .todo-list-item--active {
   background: color-mix(in srgb, var(--todo) 10%, var(--surface));
-  border-color: color-mix(in srgb, var(--todo) 32%, var(--border));
   color: var(--text);
-  box-shadow: inset 3px 0 0 var(--todo);
 }
 
 .todo-list-select-btn {
@@ -537,6 +538,33 @@ Redesign Todos to fit the rest of the dashboard theme: full-height tokenized wor
   font-size: 0.8125rem;
 }
 
+/*
+FNXC:TodosStyling 2026-07-12-00:00:
+The Todo items header owns the Hide done / Show done affordance. Keep it quiet, token-sized, and wrap-safe so the same control remains visible in the wide split pane, the right-dock container stack, and the viewport mobile layout without creating an overflow-only button shell.
+*/
+.todo-hide-done-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  flex-shrink: 0;
+  white-space: nowrap;
+  color: var(--text-muted);
+  border-color: var(--border);
+  background: var(--surface);
+}
+
+.todo-hide-done-toggle[aria-pressed="true"] {
+  color: var(--todo);
+  border-color: color-mix(in srgb, var(--todo) 36%, var(--border));
+  background: color-mix(in srgb, var(--todo) 8%, var(--surface));
+}
+
+.todo-hide-done-toggle svg {
+  width: var(--space-md);
+  height: var(--space-md);
+}
+
 .todo-add-item-row {
   margin-bottom: var(--space-md);
   padding: var(--space-sm);
@@ -567,29 +595,43 @@ Redesign Todos to fit the rest of the dashboard theme: full-height tokenized wor
   gap: var(--space-sm);
 }
 
+/*
+FNXC:TodosStyling 2026-07-10-23:30:
+Modernization pass: todo items collapse from the two-row card (text row + full-width
+divided action row, which repeated 7 large buttons under every item and made each card
+~2x taller than its content) into a SINGLE compact row — checkbox + text on the left,
+the quiet action cluster right-aligned on the same line. Actions stay always visible
+(operator requirement: "visible but quiet action bars") but render muted and compact,
+sharpening to full contrast when the row is hovered or focused. The narrow-container
+stack and the 768px mobile breakpoint return to a stacked layout with the action row
+under the text because a phone-width row cannot fit text plus seven controls.
+*/
 .todo-item {
-  padding: var(--space-md);
+  flex-direction: row;
+  align-items: center;
+  padding: var(--space-xs) var(--space-sm) var(--space-xs) var(--space-md);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   background: var(--card);
-  box-shadow: var(--shadow-sm, 0 1px 2px color-mix(in srgb, var(--bg) 70%, transparent));
-  transition: background var(--transition-fast), border-color var(--transition-fast), transform var(--transition-fast);
+  min-height: 44px;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
 }
 
 .todo-item:hover {
   background: var(--surface);
   border-color: color-mix(in srgb, var(--todo) 28%, var(--border));
-  transform: translateY(-1px);
 }
 
 .todo-item-main-row {
-  align-items: flex-start;
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
 }
 
 .todo-item-checkbox {
-  width: 18px;
-  height: 18px;
-  margin-top: 2px;
+  width: 16px;
+  height: 16px;
+  margin-top: 0;
 }
 
 .todo-item-text {
@@ -603,9 +645,25 @@ Redesign Todos to fit the rest of the dashboard theme: full-height tokenized wor
 
 .todo-item-actions {
   align-items: center;
-  margin-left: calc(var(--space-lg) + var(--space-sm));
-  padding-top: var(--space-xs);
-  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-top: 0;
+  border-top: none;
+  color: var(--text-muted);
+  opacity: 0.6;
+  transition: opacity var(--transition-fast);
+}
+
+.todo-item:hover .todo-item-actions,
+.todo-item:focus-within .todo-item-actions {
+  opacity: 1;
+}
+
+.todo-item-actions .todo-icon-btn svg,
+.todo-item-reorder-btn svg {
+  width: 15px;
+  height: 15px;
 }
 
 .todo-item-reorder-btns {
@@ -632,11 +690,16 @@ NARROW container (right dock): collapse the side-by-side split into a single-pan
     gap: 0;
   }
 
-  /* Single panel at a time: full-width, owns its vertical scroll. */
-  .todo-view-sidebar,
-  .todo-view-main {
+  /*
+  FNXC:TodosStyling 2026-07-11-21:29:
+  Phone-width Todo uses a single-panel stack, so the visible LISTS or items panel must fill the full view instead of inheriting the later tablet sidebar cap. Keep this selector more specific than the viewport media rule so max-height stays uncapped while the tablet two-panel stack still reserves room for the items pane.
+  */
+  .todo-view-layout .todo-view-sidebar,
+  .todo-view-layout .todo-view-main {
     width: 100%;
     min-width: 0;
+    height: 100%;
+    max-height: none;
     flex: 1 1 auto;
     border-right: none;
     padding-right: 0;
@@ -678,8 +741,27 @@ NARROW container (right dock): collapse the side-by-side split into a single-pan
     opacity: 1;
   }
 
+  .todo-items-header {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .todo-hide-done-toggle {
+    min-height: calc(var(--space-2xl) + var(--space-xs));
+  }
+
+  /* Stack text over the action row: a phone-width row cannot fit text plus seven controls. */
+  .todo-item {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
+  }
+
   .todo-item-actions {
     margin-left: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
   .todo-add-item-row {
@@ -762,8 +844,27 @@ NARROW container (right dock): collapse the side-by-side split into a single-pan
     align-items: center;
   }
 
+  .todo-items-header {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .todo-hide-done-toggle {
+    min-height: calc(var(--space-2xl) + var(--space-xs));
+  }
+
+  /* Stack text over the action row on mobile; mirror the narrow-container stack. */
+  .todo-item {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
+  }
+
   .todo-item-actions {
     margin-left: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
   .todo-item-checkbox {

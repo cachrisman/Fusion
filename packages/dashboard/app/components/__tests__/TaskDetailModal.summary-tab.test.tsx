@@ -436,7 +436,10 @@ describe("TaskDetailModal Summary tab", () => {
     const css = readDashboardStylesSource();
     const tokenTableRule = css.match(/\.task-summary-token-table\s*\{[^}]*\}/)?.[0] ?? "";
     const modelNameRule = css.match(/\.task-summary-model-label span:last-child\s*\{[^}]*\}/)?.[0] ?? "";
-    const mobileTokenBlock = css.slice(css.indexOf("@media (max-width: 768px)"), css.indexOf("/* Spec tab layout"));
+    const tokenTableSectionStart = css.lastIndexOf("FNXC:TaskDetailSummaryTokenCost");
+    const tokenTableSectionEnd = css.indexOf("/* Spec tab layout", tokenTableSectionStart);
+    const tokenTableSection = css.slice(tokenTableSectionStart, tokenTableSectionEnd);
+    const mobileTokenBlock = tokenTableSection.slice(tokenTableSection.indexOf("@media (max-width: 768px)"));
 
     expect(css).toContain(".task-summary-token-table");
     expect(tokenTableRule).toMatch(/min-width:\s*calc\(var\(--space-2xl\)\s*\*\s*16\)/);
@@ -444,10 +447,10 @@ describe("TaskDetailModal Summary tab", () => {
     expect(modelNameRule).toContain("word-break: normal");
     expect(modelNameRule).not.toContain("overflow-wrap: anywhere");
     expect(css).toContain("@media (max-width: 768px)");
-    expect(mobileTokenBlock).toContain(".task-summary-token-table-wrap");
-    expect(mobileTokenBlock).toContain("overflow-x: visible");
-    expect(mobileTokenBlock).toContain(".task-summary-token-table td::before");
-    expect(mobileTokenBlock).toContain("min-width: 0");
+    expect(mobileTokenBlock).not.toContain(".task-summary-token-table-wrap");
+    expect(mobileTokenBlock).not.toContain("overflow-x: visible");
+    expect(mobileTokenBlock).not.toContain(".task-summary-token-table td::before");
+    expect(mobileTokenBlock).not.toContain("min-width: 0");
     expect(css).toContain("var(--color-warning)");
     expect(css).not.toMatch(/task-summary-token[^{}]*#[0-9a-fA-F]{3,8}/);
   });

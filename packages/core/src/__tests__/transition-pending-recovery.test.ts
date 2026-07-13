@@ -12,10 +12,15 @@
 //   #1409 — flag ON→OFF evacuation:
 //     * toggling workflowColumns OFF with a card in a custom column re-homes it
 //       to a legacy column, the board stays listable, and legacy moves work.
-//     * a flag-OFF store init evacuates a card left in a custom column.
+//     * store init NEVER evacuates: workflow columns are graduated/always-on at
+//       runtime, so a custom-column card must survive a restart in place (the
+//       old flag-keyed init branch evacuated healthy intake columns like
+//       Coding (Ideas)'s "ideas" into "triage" on every open, where triage
+//       auto-planned deliberately-parked cards).
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createTaskStoreTestHarness } from "./store-test-helpers.js";
+import { TaskStore } from "../store.js";
 import type { WorkflowIr } from "../workflow-ir-types.js";
 import { makeTransitionPending, serializeTransitionPending } from "../transition-types.js";
 
@@ -178,6 +183,56 @@ describe("#1409 flag ON→OFF evacuation", () => {
     await store.moveTask(task.id, "todo", { moveSource: "user" });
     await store.moveTask(task.id, "in-progress", { moveSource: "user" });
     expect((await store.getTask(task.id)).column).toBe("in-progress");
+  });
+
+  it("store init leaves a custom-column card in place when the graduated flag is absent (no flag-off-init evacuation)", async () => {
+    // The graduated workflowColumns flag is ABSENT for virtually every install
+    // (no default is emitted). Init must run the workflow-aware integrity pass,
+    // not the evacuation: a card resting in its own workflow's intake column is
+    // valid and must survive a restart untouched.
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join: joinPath } = await import("node:path");
+    const { rm: rmDir } = await import("node:fs/promises");
+    const rootDir = mkdtempSync(joinPath(tmpdir(), "kb-evac-init-"));
+    const globalDir = mkdtempSync(joinPath(tmpdir(), "kb-evac-init-global-"));
+    let diskStore = new TaskStore(rootDir, globalDir);
+    try {
+      await diskStore.init();
+      const wf = await diskStore.createWorkflowDefinition({ name: "simple-custom-init", ir: simpleCustomIr() });
+      const task = await diskStore.createTask({ description: "parked" });
+      await diskStore.selectTaskWorkflowAndReconcile(task.id, wf.id);
+      // Seed the card into its workflow's intake column directly (matches the
+      // real-world state: cards created into a custom-intake workflow rest in
+      // that intake column regardless of the retired flag's persisted value).
+      (diskStore as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => unknown } } }).db
+        .prepare(`UPDATE tasks SET "column" = 'intake' WHERE id = ?`)
+        .run(task.id);
+      expect((await diskStore.getTask(task.id)).column).toBe("intake");
+
+      // Restart the store (flag still absent) — the card must stay parked.
+      diskStore.close();
+      diskStore = new TaskStore(rootDir, globalDir);
+      await diskStore.init();
+      expect((await diskStore.getTask(task.id)).column).toBe("intake");
+
+      // Store-open provenance stamp: every init records which process opened the
+      // store so mystery mutations (e.g. a stale binary's evacuation) are
+      // attributable after the fact.
+      const stampRows = (diskStore as unknown as {
+        db: { prepare: (s: string) => { all: (...a: unknown[]) => unknown[] } };
+      }).db
+        .prepare(`SELECT metadata FROM runAuditEvents WHERE mutationType = 'store:open'`)
+        .all() as Array<{ metadata: string }>;
+      expect(stampRows.length).toBeGreaterThanOrEqual(2); // first open + reopen
+      const stamp = JSON.parse(stampRows[stampRows.length - 1].metadata) as Record<string, unknown>;
+      expect(stamp.pid).toBe(process.pid);
+      expect(typeof stamp.execPath).toBe("string");
+    } finally {
+      diskStore.close();
+      await rmDir(rootDir, { recursive: true, force: true });
+      await rmDir(globalDir, { recursive: true, force: true });
+    }
   });
 
   it("evacuateCustomColumnsToLegacy is idempotent (a second run is a no-op)", async () => {

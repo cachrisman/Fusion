@@ -1389,6 +1389,7 @@
     "stopGeneration": "Stop generation",
     "thinking": "Thinking",
     "thinkingLabel": "Thinking",
+    "thinkingLevelButton": "Thinking level",
     "thinkingStatus": "Thinking…",
     "toolArgsLabel": "args",
     "toolArgsPreview": "args: {{summary}}",
@@ -1401,7 +1402,13 @@
     "unreadMessages": "Unread messages",
     "untitledSession": "Untitled",
     "workingStatus": "Working…",
-    "you": "You"
+    "you": "You",
+    "modelAgentSection": "Model / Agent",
+    "thinkingLevelSection": "Thinking level",
+    "noModelsAvailable": "No models available",
+    "currentAgentTarget": "Current agent: {{name}}",
+    "currentModelTarget": "Current model: {{model}}",
+    "currentDefaultTarget": "Using the default chat target"
   },
   "chatRooms": {
     "error": {
@@ -1423,6 +1430,13 @@
     "versionMismatchInfix": "but this dashboard expects",
     "versionMismatchPrefix": "Your installed",
     "versionMismatchSuffix": "Update to stay in sync."
+  },
+  "storageMigrationNotice": {
+    "body": "The next Fusion version will replace the current SQLite data store with an embedded Postgres backend for data storage, and project databases will be served from the central Fusion database instead of each project's local .fusion/fusion.db SQLite file. No migration runs from this notice; it is an advance heads-up for operators who rely on the current storage layout.",
+    "dismissLabel": "Dismiss storage update notice",
+    "getHelp": "Get help",
+    "getHelpLabel": "Get help on Discord",
+    "title": "Storage update coming in the next Fusion version"
   },
   "cliBinary": {
     "binaryLabel": "Binary:",
@@ -2455,6 +2469,7 @@
     "previewTitle": "Preview for {{file}}"
   },
   "fileEditor": {
+    "autoSave": "Auto-save",
     "edit": "Edit",
     "editMode": "Edit mode",
     "editorFor": "Editor for {{filePath}}",
@@ -2462,6 +2477,7 @@
     "lineNumber": "Line #",
     "preview": "Preview",
     "previewMode": "Preview mode",
+    "toggleAutoSave": "Toggle auto-save",
     "toggleLineNumbers": "Toggle line numbers",
     "toggleOptions": "Toggle editor options",
     "toggleWordWrap": "Toggle word wrap",
@@ -5680,7 +5696,9 @@
       "title": "Appearance",
       "openTasksInRightSidebarHelp": "When enabled, board task cards open detail in the right sidebar when it is available; mobile and hidden-sidebar states keep the full task panel. Default: disabled.",
       "openMobileTasksInPopupHelp": "When enabled, ordinary board task-card and right-dock Tasks-list clicks open the existing task popup so the board or list remains visible. Deep-tab and other task opens keep their current behavior. Default: disabled.",
-      "taskDetailChatFirstHelp": "Off by default: task details list Activity first and omitted non-done opens land on Activity. Turn on to restore Chat-first order/default; explicit Chat links still work either way."
+      "taskDetailChatFirstHelp": "Off by default: task details list Activity first and omitted non-done opens land on Activity. Turn on to restore Chat-first order/default; explicit Chat links still work either way.",
+      "showCostBadgeOnCards": "Show cost badges on task cards",
+      "showCostBadgeOnCardsHelp": "Default: disabled. When enabled, board cards show derived model cost next to execution time; unavailable pricing displays — and tasks without token usage show no badge."
     },
     "auth": {
       "apiKeyCleared": "API key cleared",
@@ -6230,7 +6248,11 @@
       "gitLabPersonalAccessToken": "Personal access token (default)",
       "gitLabAuthTokenHint": "Read-only GitLab operations need read_api or api. Future write actions such as comments and auto-close need api. Project and group tokens are limited to their associated resource and role membership. No default — unset.",
       "includeTaskIdInCommitDefault": "). Default: enabled.",
-      "trailerEmail": " trailer. Default: noreply@runfusion.ai."
+      "trailerEmail": " trailer. Default: noreply@runfusion.ai.",
+      "gitRemoteThatMergedResultsArePushedTo": "Git remote that merged results are pushed to. Default: \"origin\".",
+      "pushTargetBranch": "Push target branch",
+      "sameAsIntegrationBranchDefault": "(same as integration branch — default)",
+      "pushTargetBranchHelp": "Branch on the remote that merged results are pushed to. Leave on the default to push the integration branch to its same-named remote branch; pick a listed remote branch or choose Custom… to type one that doesn't exist on the remote yet (the push creates it)."
     },
     "mergeManually": "Merge Manually",
     "mobileNav": {
@@ -6395,7 +6417,25 @@
       "whenEnabledTasksCreatedWithoutATitleBut": " When enabled, tasks created without a title but with descriptions over 200 characters will automatically get an AI-generated title (max 60 characters). The same model is also used to generate fallback merge commit message bodies when the branch's commit log is empty (e.g. squash merges with no unique commits), and GitHub tracking issue titles when a tracked task has no title yet. Default: disabled. ",
       "autoSelectModelPresetHint": "Default: disabled.",
       "prTitlePromptInstructionsHelp": "Guides the AI-generated Create PR title. Leave blank to use the default PR metadata prompt. No default — unset.",
-      "prDescriptionPromptInstructionsHelp": "Guides the AI-generated Create PR summary, changes, and testing sections. Leave blank to use the default PR metadata prompt. No default — unset."
+      "prDescriptionPromptInstructionsHelp": "Guides the AI-generated Create PR summary, changes, and testing sections. Leave blank to use the default PR metadata prompt. No default — unset.",
+      "chatHeading": "Chat",
+      "chatDescription": "Choose the default target for new Direct chats and whether New Chat should prompt or immediately use that default.",
+      "chatNewSessionMode": "New Chat behavior",
+      "chatNewSessionModePrompt": "Prompt for model each time",
+      "chatNewSessionModeAlwaysDefault": "Always use configured default",
+      "chatNewSessionModeHelp": "Prompt mode opens New Chat with this default preselected. Always-default mode skips the dialog when the configured default is complete.",
+      "chatDefaultKind": "Chat default target",
+      "chatDefaultKindModel": "Model",
+      "chatDefaultKindAgent": "Agent",
+      "chatDefaultModel": "Chat Default Model",
+      "selectChatDefaultModel": "Select a chat default model",
+      "chatDefaultModelHelp": "Model-mode New Chat uses the built-in Fusion chat agent with this provider/model pair. Leave empty to fall back to prompting.",
+      "chatDefaultAgent": "Chat Default Agent",
+      "loadingAgents": "Loading agents…",
+      "selectChatDefaultAgent": "Select a chat default agent",
+      "chatDefaultAgentEmpty": "No agents are available for this project yet.",
+      "chatDefaultAgentHelp": "Agent-mode New Chat starts a Direct chat with the selected durable agent.",
+      "chatDefaultReset": "Reset Chat default"
     },
     "remote": {
       "acceptRoutes": " Accept routes ",
@@ -6699,6 +6739,7 @@
     },
     "reset": {
       "button": "Reset Settings",
+      "buttonShort": "Reset",
       "buttonTitle": "Reset settings to their defaults",
       "dialogAriaLabel": "Reset settings",
       "dialogTitle": "Reset Settings",
@@ -7836,7 +7877,9 @@
       "summary": "Summary",
       "terminal": "Session",
       "worktreeTerminal": "Terminal",
-      "workflow": "Workflow"
+      "workflow": "Workflow",
+      "cost": "Cost"
+
     },
     "terminal": {
       "loading": "Loading terminal…"
@@ -7867,7 +7910,23 @@
     },
     "workflowRuntime": "Workflow runtime",
     "workflowTimedSteps": "Workflow timed steps",
-    "yes": "Yes"
+    "yes": "Yes",
+    "costTab": {
+      "cacheWriteTokens": "Cache write",
+      "cachedTokens": "Cached",
+      "cost": "Derived USD",
+      "costUnavailable": "No pricing for this model",
+      "description": "Derived from recorded input, output, cached, and cache-write tokens. Unpriced rows use — instead of a guessed value.",
+      "empty": "No model token usage has been recorded for this task yet.",
+      "heading": "Model cost",
+      "inputTokens": "Input",
+      "model": "Model",
+      "outputTokens": "Output",
+      "totalCost": "Total cost",
+      "totalCostLabel": "Total",
+      "totalTokens": "Total tokens",
+      "unknownModel": "(unknown)"
+    }
   },
   "taskDocuments": {
     "cancel": "Cancel",
@@ -8289,7 +8348,9 @@
     "usingDefault": "Using default",
     "viewDependency": "Click to view {{depId}}",
     "workflow": "workflow",
-    "workflowCheck": "Workflow check"
+    "workflowCheck": "Workflow check",
+    "costBadgeTitle": "Estimated cost {{amount}}",
+    "costBadgeAriaLabel": "Estimated cost {{amount}}"
   },
   "terminal": {
     "arrowKeysLabel": "Terminal arrow keys",
@@ -8304,7 +8365,6 @@
     "decreaseFontSize": "Decrease terminal font size",
     "exitLabel": "Exit: {{code}}",
     "failedToStartTerminal": "Failed to start terminal: {{error}}",
-    "helpText": "Ctrl++/- zoom • ⌨ Shortcuts panel • Esc close",
     "increaseFontSize": "Increase terminal font size",
     "initializeError": "Terminal UI failed to initialize: {{error}}",
     "newSession": "New Session",
@@ -8342,6 +8402,7 @@
   "todo": {
     "addItemPlaceholder": "Add a todo item",
     "addList": "Add list",
+    "allDoneHidden": "All items are complete. Choose Show done to view them.",
     "assignAgent": "Assign {{text}} to agent",
     "cancelItemEdit": "Cancel item edit",
     "cancelList": "Cancel list",
@@ -8370,6 +8431,7 @@
     "failedToCreateTask": "Failed to create task: {{error}}",
     "failedToLoadAgents": "Failed to load agents: {{error}}",
     "failedUpdateItem": "Failed to update item",
+    "hideDone": "Hide done",
     "failedUpdateItemToast": "Failed to update todo item",
     "itemsLabel": "Todo items",
     "lists": "Lists",
@@ -8389,6 +8451,7 @@
     "saveListRename": "Save list rename",
     "selectList": "Select list {{title}}",
     "selectListEmpty": "Select a list from the sidebar",
+    "showDone": "Show done",
     "startPlanning": "Start planning from {{text}}",
     "taskCreatedAndAssigned": "Created {{id}} and assigned to {{agent}}",
     "taskCreatedFromTodo": "Created {{id}} from todo",
@@ -8648,12 +8711,22 @@
     "widgetDefault": "Default"
   },
   "workflowNodes": {
+    "addStepAgentSteps": "Agent steps",
+    "addStepAutomation": "Automation",
+    "addStepFlowControl": "Flow control",
+    "addStepFragmentDesc": "Workflow fragment",
+    "addStepNoMatches": "No steps match “{{query}}”.",
+    "addStepSearchLabel": "Search steps",
+    "addStepSearchPlaceholder": "Search steps and templates…",
+    "addStepTitle": "Add a step",
     "advisory": "Advisory",
     "autoLayout": "Auto-layout",
     "codeNote": "Runs sandboxed TypeScript. Syntax is validated at save.",
     "codeSource": "Source (TypeScript)",
     "codeTimeout": "Timeout (ms)",
     "collapseInspector": "Collapse",
+    "conditionFailure": "failure",
+    "conditionSuccess": "success",
     "cycleBlocked": "That connection would create a cycle — only rework edges inside a for-each template may loop back",
     "deleteEdge": "Delete edge",
     "deleteNode": "Delete node",
@@ -8706,9 +8779,13 @@
     "mobileConnectTarget": "Target node",
     "mobileGraph": "Graph",
     "mobileGraphEmpty": "No graph nodes yet.",
+    "mobileGraphStyleCanvas": "Graph",
+    "mobileGraphStyleLabel": "Graph presentation",
+    "mobileGraphStyleList": "List",
     "mobileMoveDown": "Move down",
     "mobileMoveUp": "Move up",
     "mobileNodeKinds": "Node types",
+    "nodeInspector": "Node",
     "notifyCustom": "Custom",
     "notifyCustomEvent": "Custom event",
     "notifyEvent": "Event type",
@@ -8718,6 +8795,7 @@
     "parseArtifact": "Artifact",
     "parseParser": "Parser",
     "quorumN": "Quorum count (n)",
+    "readOnlyDuplicateToEdit": "Built-in structure is read-only — prompts on prompt and gate nodes can be edited here.",
     "releaseCapacity": "Downstream capacity",
     "releaseCondition": "Release condition",
     "releaseDependency": "Dependency complete",
@@ -8730,6 +8808,9 @@
     "reviewPlan": "Plan review",
     "reviewType": "Review type",
     "showInspector": "Show node details",
+    "simpleAddStep": "Add step",
+    "simpleContainerEmpty": "No steps inside yet",
+    "simpleInsertStep": "Insert step here",
     "splitNote": "Branches run concurrently from this node. Execute and merge seams are not allowed inside a branch.",
     "startEntryColumn": "Entry column",
     "startEntryColumnAuto": "— Auto (first column)",
@@ -8744,11 +8825,7 @@
     "templatesPluginSteps": "Plugin steps",
     "templatesSection": "Templates",
     "timeoutMs": "{{timeout}}ms",
-    "trivialGraphHint": "This workflow only runs start → end. Add steps from the palette above to build it out.",
-    "conditionFailure": "failure",
-    "conditionSuccess": "success",
-    "nodeInspector": "Node",
-    "readOnlyDuplicateToEdit": "Built-in structure is read-only — prompts on prompt and gate nodes can be edited here."
+    "trivialGraphHint": "This workflow only runs start → end. Add steps from the palette above to build it out."
   },
   "workflows": {
     "aiEdit": "Design with AI",
@@ -8764,6 +8841,7 @@
     "backToWorkflowList": "Back to workflows",
     "clickToEditDescription": "Click to edit description",
     "clickToRename": "Click to rename",
+    "closeEditor": "Close workflow editor",
     "created": "Created workflow \"{{name}}\"",
     "createDescription": "Description (optional)",
     "createFailed": "Failed to create workflow",
@@ -8780,6 +8858,8 @@
     "discardConfirm": "Discard",
     "discardMessage": "You have unsaved changes to this workflow. Discard them?",
     "discardTitle": "Discard unsaved changes?",
+    "duplicatedEditable": "Duplicated to \"{{name}}\" — editable",
+    "duplicateFailed": "Failed to duplicate workflow",
     "duplicateToCustomize": "Duplicate to customize",
     "emptyDescription": "Workflows orchestrate the steps and gates that run around task execution. Create one to start arranging that flow.",
     "emptyTitle": "No workflow selected",
@@ -8793,17 +8873,22 @@
     "importInvalidJson": "That file isn't valid JSON.",
     "importStripped": "Auto-approval flags were removed from imported nodes",
     "importTooltip": "Import a workflow from a JSON file",
+    "lifecycleFix": "Fix",
+    "lifecycleFixAll": "Fix all",
+    "lifecycleWarningsCount_one": "{{count}} lifecycle warning",
+    "lifecycleWarningsCount_other": "{{count}} lifecycle warnings",
+    "loadFailed": "Failed to load workflows",
+    "loading": "Loading…",
     "migrationNotice": "Your legacy workflow steps were converted — find them as templates in the palette and as the \"Migrated steps\" workflow.",
     "mobileEditorNav": "Workflow editor sections",
     "mobileSelectNote": "Select a workflow to edit.",
     "nameLabel": "Workflow name",
     "newWorkflow": "New workflow",
+    "noneYet": "No workflows yet.",
     "readOnlyBuiltin": "Built-in workflow: structure is read-only, prompts are editable.",
     "saved": "Workflow saved",
     "savedNotCompilable": "Workflow saved but cannot be compiled",
     "saveFailed": "Failed to save workflow",
-    "showCanvasEditor": "Show canvas editor",
-    "showSimpleEditor": "Show simple editor",
     "templateBlank": "Blank",
     "templateBlankDescription": "Start from an empty start → end graph.",
     "templateCopyName": "{{name}} copy",
@@ -8812,13 +8897,11 @@
     "templatePickerLabel": "Start from",
     "templateSectionBuiltin": "Built-in workflows",
     "templateSectionYours": "Your workflows",
-    "closeEditor": "Close workflow editor",
-    "duplicatedEditable": "Duplicated to \"{{name}}\" — editable",
-    "duplicateFailed": "Failed to duplicate workflow",
-    "loadFailed": "Failed to load workflows",
-    "loading": "Loading…",
-    "noneYet": "No workflows yet.",
-    "title": "Workflows"
+    "title": "Workflows",
+    "viewModeAdvanced": "Advanced",
+    "viewModeLabel": "Editor view",
+    "viewModeList": "List",
+    "viewModeSimple": "Simple"
   },
   "workflowSelector": {
     "switchActiveMessage": "This task has an active session. Switching workflows aborts it and re-homes the card into the new workflow's entry column. Continue?",

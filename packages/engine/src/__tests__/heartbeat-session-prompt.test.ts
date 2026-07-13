@@ -147,6 +147,7 @@ describe("createHeartbeatTools", () => {
       "fn_reflect_on_performance",
       "fn_workflow_list",
       "fn_workflow_get",
+        "fn_workflow_validate",
       "fn_workflow_create",
       "fn_workflow_update",
       "fn_workflow_delete",
@@ -198,7 +199,7 @@ describe("createHeartbeatTools", () => {
 
     const tools = monitor.createHeartbeatTools("agent-001", mockTaskStore, "FN-001");
 
-    expect(tools).toHaveLength(34);
+    expect(tools).toHaveLength(35);
     expect(tools[0]!.name).toBe("fn_task_create");
     expect(tools[1]!.name).toBe("fn_task_log");
     expect(tools[2]!.name).toBe("fn_task_document_write");
@@ -222,6 +223,7 @@ describe("createHeartbeatTools", () => {
       "fn_task_search",
       "fn_workflow_list",
       "fn_workflow_get",
+        "fn_workflow_validate",
       "fn_workflow_create",
       "fn_workflow_update",
       "fn_workflow_delete",
@@ -740,7 +742,9 @@ describe("Budget Governance", () => {
     });
 
     expect(store.getBudgetStatus).not.toHaveBeenCalled();
+    // FNXC:HeartbeatTests 2026-07-13: FN-7878 changed generic run failures (status=failed without unrecoverable auth/model/billing signal) from "paused" (FN-7835/FN-7859) to bare "error" so the bounded retry budget can run. Budget governance still does not engage on failure (assertion below: never paused with budget-exhausted reason). See agent-heartbeat.ts:1829-1831 else-branch.
     expect(store.updateAgentState).toHaveBeenCalledWith("agent-001", "error");
+    expect(store.updateAgentState).not.toHaveBeenCalledWith("agent-001", "paused");
     expect(store.updateAgent).not.toHaveBeenCalledWith("agent-001", { pauseReason: "budget-exhausted" });
   });
 
@@ -878,6 +882,7 @@ describe("no-task heartbeat tool surface", () => {
         "fn_artifact_view",
         "fn_workflow_list",
         "fn_workflow_get",
+        "fn_workflow_validate",
         "fn_workflow_create",
         "fn_workflow_update",
         "fn_workflow_delete",

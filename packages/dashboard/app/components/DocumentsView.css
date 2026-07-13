@@ -77,7 +77,7 @@ Artifacts controls are the first page content below the shared header, so add a 
   border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--text) 10%, transparent);
   color: inherit;
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-family: var(--font-mono);
 }
 
@@ -181,7 +181,7 @@ Artifacts controls are the first page content below the shared header, so add a 
 }
 
 .documents-view-empty-hint {
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-dim);
   margin-top: var(--space-xs);
 }
@@ -263,7 +263,7 @@ Artifacts controls are the first page content below the shared header, so add a 
 }
 
 .markdown-file-item-name {
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   color: var(--text);
 }
@@ -303,6 +303,29 @@ Artifacts controls are the first page content below the shared header, so add a 
   align-items: center;
   justify-content: space-between;
   gap: var(--space-sm);
+}
+
+/*
+FNXC:DocumentsView 2026-07-11-13:40:
+Task-document header actions group the Markdown/Plain toggle with the new Edit (and Cancel/Save while editing) buttons so the in-place CodeMirror editing controls stay in the header instead of a second toolbar. The editor container mirrors .artifacts-gallery-viewer-editor sizing so the embedded FileEditor gets real height inside the right pane.
+*/
+.documents-task-document-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-shrink: 0;
+}
+
+.documents-task-document-editor {
+  display: flex;
+  flex-direction: column;
+  min-height: 45dvh;
+  flex: 1;
+}
+
+.documents-task-document-editor .file-editor-container {
+  flex: 1;
+  min-height: 40dvh;
 }
 
 .documents-file-path-header {
@@ -360,6 +383,13 @@ Subtle view-only indicator for the project-file preview header; muted so it info
 /*
 FNXC:DocumentsView 2026-07-10-17:40:
 FN-7811 reuses the Project Files shell for Task Documents, while task-scoped sidebar groups preserve task id/title/status context before each selectable document entry. Keep these styles scoped so Project Files continues to own the generic markdown-file list visuals.
+
+FNXC:DocumentsView 2026-07-11-19:03:
+FN-7834 requires task-document groups to scan as discrete task containers, not a flat sequence of peer rows. Keep the stronger card/header hierarchy and inter-group gap scoped under .documents-task-documents-sidebar so Project Files' shared .markdown-file-item list and the Artifacts gallery remain visually unchanged.
+
+FNXC:DocumentsView 2026-07-11-21:12:
+FN-7836 requires loaded Task Documents to render visible task-card groups even when 50+ tasks exist. The sidebar is a scrolling flex column; each card must opt out of flex shrink before overflow is clipped, otherwise browser layout compresses every group into border-only lines while the DOM/text still exists.
+
 */
 .documents-task-documents-sidebar {
   display: flex;
@@ -416,23 +446,231 @@ FN-7811 reuses the Project Files shell for Task Documents, while task-scoped sid
   flex-direction: column;
   gap: var(--space-xs);
 }
+gap: var(--space-md);
+  padding: var(--space-sm);
+  background: var(--surface);
+}
+
+.documents-task-sidebar-group {
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: thin solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  box-shadow: var(--shadow-sm);
+}
+
+.documents-task-sidebar-group:last-child {
+  border-bottom: thin solid var(--border);
+}
+
+.documents-task-sidebar-group-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+  background: color-mix(in srgb, var(--todo) 8%, var(--card));
+  border-bottom: thin solid var(--border);
+}
+
+.documents-task-sidebar-title-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.documents-task-sidebar-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: 0;
+  min-width: 0;
+}
+
+.documents-task-sidebar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.documents-task-documents-sidebar .documents-task-document-list {
+  background: var(--card);
+}
+
+.documents-task-document-item {
+  border-left-color: transparent;
+  padding-inline-start: var(--space-lg);
+  background: color-mix(in srgb, var(--surface) 44%, transparent);
+}
+
+.documents-task-document-item:hover {
+  background: var(--card-hover);
+}
+
+.documents-task-document-item.markdown-file-item--selected {
+  border-left-color: var(--todo);
+  background: color-mix(in srgb, var(--todo) 14%, var(--card));
+}
+
+/*
+FNXC:DocumentsView 2026-07-11-22:04:
+FN-7845 places registered task artifacts under the same task group as documents, as peer outputs with a small subsection label and icon-bearing rows. Keep these rules scoped to the Task Documents sidebar/right pane so Project Files' shared .markdown-file-item base and the standalone Artifacts gallery remain unchanged.
+*/
+.documents-task-artifacts-subsection {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: thin solid var(--border);
+  background: color-mix(in srgb, var(--surface) 38%, transparent);
+}
+
+.documents-task-artifacts-label {
+  padding: var(--space-sm) var(--space-lg) var(--space-xs);
+  color: var(--text-dim);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.documents-task-artifact-list {
+  background: transparent;
+}
+
+.documents-task-artifact-item {
+  background: transparent;
+}
+
+.documents-task-artifact-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+  color: var(--text);
+}
+
+.documents-task-artifact-title-row .markdown-file-item-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.documents-task-artifact-viewer {
+  min-height: 0;
+}
+
+.documents-task-artifact-meta {
+  align-items: center;
+}
+
+.documents-task-artifact-open-task {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--todo);
+  cursor: pointer;
+  font: inherit;
+}
+
+.documents-task-artifact-open-task:hover {
+  text-decoration: underline;
+}
+
+.documents-task-artifact-open-task:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring-strong);
+  border-radius: var(--radius-sm);
+}
+
+.documents-task-artifact-description {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.documents-task-artifact-preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-height: 0;
+}
+
+.documents-task-artifact-media {
+  display: block;
+  width: 100%;
+  max-height: min(60dvh, 42rem);
+  object-fit: contain;
+  border: thin solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.documents-task-artifact-audio {
+  width: 100%;
+}
+
+.documents-task-artifact-pdf {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.documents-task-artifact-pdf iframe {
+  width: 100%;
+  min-height: 60dvh;
+  border: thin solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.documents-task-artifact-doc-content {
+  min-height: 45dvh;
+}
+
+.documents-task-artifact-download {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-md);
+  padding: var(--space-lg);
+  border: thin solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.documents-task-artifact-download p {
+  margin: 0;
+}
+
+/*
+FNXC:DocumentsView 2026-07-11-14:30:
+The meta line (author · revision · date) renders as its own row directly under the path+actions header row; the viewer column's gap is too tall between two related header rows, so the meta pulls itself closer to the path box it annotates.
+*/
 
 .documents-task-document-meta {
   padding: 0;
   border-bottom: none;
   flex-wrap: wrap;
+
+margin-top: calc(-1 * var(--space-sm));
+
 }
 
 .documents-group-task-id {
   font-family: var(--font-mono);
   font-size: 12px;
+  font-weight: 700;
   color: var(--text-muted);
   flex-shrink: 0;
 }
 
 .documents-group-task-title {
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 700;
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -499,7 +737,7 @@ FN-7811 reuses the Project Files shell for Task Documents, while task-scoped sid
 
 .document-mode-toggle {
   padding: var(--space-xs) var(--space-sm);
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 500;
   color: var(--text-muted);
   background: var(--card);
@@ -546,7 +784,7 @@ FN-7811 reuses the Project Files shell for Task Documents, while task-scoped sid
 
 .document-card-content-text {
   margin: 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text);
   line-height: 1.5;
   white-space: pre-wrap;

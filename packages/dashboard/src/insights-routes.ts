@@ -17,6 +17,7 @@ import type { TaskStore } from "@fusion/core";
 import {
   InsightLifecycleError,
   InsightStore,
+  THINKING_LEVELS,
   executeInsightRunLifecycle,
   resolvePlanningSettingsModel,
   retryInsightRunLifecycle,
@@ -28,6 +29,7 @@ import {
   type InsightRunListOptions,
   type InsightRunStatus,
   type Settings,
+  type ThinkingLevel,
 } from "@fusion/core";
 import {
   ApiError,
@@ -41,7 +43,7 @@ import {
   startInsightRunSweeper,
   sweepStaleInsightRuns,
 } from "./insight-run-sweeper.js";
-import { createFnAgent, promptWithFallback, resolveMcpServersForStore } from "@fusion/engine";
+import { createFnAgent, promptWithFallback, resolveMcpServersForStore, resolvePlanningThinkingLevel } from "@fusion/engine";
 
 /**
  * Re-throws an error as an ApiError, converting unknown errors to internal errors.
@@ -133,6 +135,7 @@ async function executeInsightAttempt(params: {
   settings: Settings;
   modelProvider?: string;
   modelId?: string;
+  thinkingLevel?: ThinkingLevel;
 }): Promise<{ summary: string; insightsCreated: number; insightsUpdated: number }> {
   const {
     readWorkingMemory,
@@ -157,6 +160,7 @@ async function executeInsightAttempt(params: {
   const hasCustomModel = params.modelProvider && params.modelId;
   const fallbackProvider = hasCustomModel ? settingsProvider : undefined;
   const fallbackModelId = hasCustomModel ? settingsModelId : undefined;
+  const effectiveThinkingLevel = resolvePlanningThinkingLevel(params.settings, params.thinkingLevel);
 
   const existingInsights = await readInsightsMemory(params.rootDir);
   const resolvedMcp = await resolveMcpServersForStore(params.taskStore ?? {});
@@ -178,6 +182,11 @@ async function executeInsightAttempt(params: {
     defaultModelId: finalModelId,
     fallbackProvider,
     fallbackModelId,
+    /*
+     * FNXC:Insights-ThinkingLevel 2026-07-12-19:24:
+     * Insight generation now persists a per-run reasoning-effort selection in inputMetadata.metadata.thinkingLevel and resolves it through the planning lane so manual runs and retries honor the same operator choice.
+     */
+    defaultThinkingLevel: effectiveThinkingLevel,
     systemPrompt: [
       "You extract durable project insights from working memory notes.",
       "Return only valid JSON that matches the requested schema.",
@@ -391,20 +400,33 @@ export function createInsightsRouter(store: TaskStore): Router {
       const settings = await taskStore.getSettings();
       const rawProvider = typeof req.body.modelProvider === "string" ? req.body.modelProvider.trim() : undefined;
       const rawModelId = typeof req.body.modelId === "string" ? req.body.modelId.trim() : undefined;
+      const rawThinkingLevel = typeof req.body.thinkingLevel === "string" ? req.body.thinkingLevel.trim() : undefined;
+      const thinkingLevel = rawThinkingLevel
+        ? THINKING_LEVELS.includes(rawThinkingLevel as ThinkingLevel)
+          ? rawThinkingLevel as ThinkingLevel
+          : undefined
+        : undefined;
+      if (rawThinkingLevel && !thinkingLevel) {
+        throw badRequest(`Invalid thinkingLevel: ${rawThinkingLevel}`);
+      }
       // Require both provider and model ID together — partial values are discarded
       const modelProvider = rawProvider && rawModelId ? rawProvider : undefined;
       const modelId = rawProvider && rawModelId ? rawModelId : undefined;
       const controller = new AbortController();
 
-      // Stash model selection in inputMetadata.metadata so retries can recover it
+      /*
+       * FNXC:Insights-ThinkingLevel 2026-07-12-19:24:
+       * Insight runs store the operator's model and reasoning-effort selection in inputMetadata.metadata instead of adding schema columns, because retries must recover exactly the per-run values used for generation.
+       */
       const inputMetadata = typeof req.body.inputMetadata === "object" && req.body.inputMetadata !== null
         ? { ...req.body.inputMetadata }
         : {};
-      if (modelProvider || modelId) {
+      if (modelProvider || modelId || thinkingLevel) {
         inputMetadata.metadata = {
           ...(typeof inputMetadata.metadata === "object" && inputMetadata.metadata !== null ? inputMetadata.metadata : {}),
           ...(modelProvider ? { modelProvider } : {}),
           ...(modelId ? { modelId } : {}),
+          ...(thinkingLevel ? { thinkingLevel } : {}),
         };
       }
 
@@ -440,6 +462,7 @@ export function createInsightsRouter(store: TaskStore): Router {
             settings,
             modelProvider,
             modelId,
+            thinkingLevel,
           });
         },
       });
@@ -618,13 +641,17 @@ export function createInsightsRouter(store: TaskStore): Router {
       const settings = await taskStore.getSettings();
       const controller = new AbortController();
 
-      // Recover model selection from the original run's inputMetadata
+      // Recover model and reasoning-effort selection from the original run's inputMetadata.
       const originalMetadata = existing.inputMetadata?.metadata;
       const retryModelProvider = typeof (originalMetadata as Record<string, unknown> | undefined)?.modelProvider === "string"
         ? (originalMetadata as Record<string, unknown>).modelProvider as string
         : undefined;
       const retryModelId = typeof (originalMetadata as Record<string, unknown> | undefined)?.modelId === "string"
         ? (originalMetadata as Record<string, unknown>).modelId as string
+        : undefined;
+      const retryThinkingLevel = typeof (originalMetadata as Record<string, unknown> | undefined)?.thinkingLevel === "string"
+        && THINKING_LEVELS.includes((originalMetadata as Record<string, unknown>).thinkingLevel as ThinkingLevel)
+        ? (originalMetadata as Record<string, unknown>).thinkingLevel as ThinkingLevel
         : undefined;
 
       const { run } = await retryInsightRunLifecycle({
@@ -646,6 +673,7 @@ export function createInsightsRouter(store: TaskStore): Router {
             settings,
             modelProvider: retryModelProvider,
             modelId: retryModelId,
+            thinkingLevel: retryThinkingLevel,
           });
         },
       });

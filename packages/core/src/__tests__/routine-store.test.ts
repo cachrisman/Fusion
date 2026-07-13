@@ -4,6 +4,7 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
+import type { AutomationStep } from "../automation.js";
 import type {
   Routine,
   RoutineCreateInput,
@@ -370,6 +371,51 @@ describe("RoutineStore", () => {
 
       await store.updateRoutine(routine.id, { name: "Updated" });
       expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it("round-trips and clears optional step thinkingLevel", async () => {
+      const inheritedStep: AutomationStep = {
+        id: "step-inherited",
+        type: "ai-prompt",
+        name: "Inherited thinking",
+        prompt: "Use defaults",
+      };
+      const explicitStep: AutomationStep = {
+        id: "step-explicit",
+        type: "ai-prompt",
+        name: "Explicit thinking",
+        prompt: "Think harder",
+        modelProvider: "anthropic",
+        modelId: "claude-sonnet-4-5",
+        thinkingLevel: "high",
+      };
+
+      const routine = await store.createRoutine({
+        name: "Thinking routine",
+        agentId: "test-agent",
+        trigger: { type: "manual" },
+        steps: [inheritedStep, explicitStep],
+      });
+
+      const fetched = await store.getRoutine(routine.id);
+      expect(fetched.steps![0].thinkingLevel).toBeUndefined();
+      expect(fetched.steps![1].thinkingLevel).toBe("high");
+
+      const cleared = await store.updateRoutine(routine.id, {
+        steps: [
+          { ...inheritedStep },
+          {
+            ...explicitStep,
+            thinkingLevel: undefined,
+          },
+        ],
+      });
+      expect(cleared.steps![0].thinkingLevel).toBeUndefined();
+      expect(cleared.steps![1].thinkingLevel).toBeUndefined();
+
+      const refetched = await store.getRoutine(routine.id);
+      expect(refetched.steps![0].thinkingLevel).toBeUndefined();
+      expect(refetched.steps![1].thinkingLevel).toBeUndefined();
     });
   });
 

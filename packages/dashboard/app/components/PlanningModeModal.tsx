@@ -4,12 +4,13 @@ import type { TFunction } from "i18next";
 import { useState, useCallback, useEffect, useRef, useMemo, type MouseEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Task, PlanningQuestion, PlanningSummary, TaskPriority } from "@fusion/core";
+import type { Task, PlanningQuestion, PlanningSummary, TaskPriority, ThinkingLevel } from "@fusion/core";
 import {
   DEFAULT_TASK_PRIORITY,
   PLANNING_DEEPEN_CHECKPOINT_ID,
   PLANNING_DEEPEN_PROCEED_OPTION_ID,
   TASK_PRIORITIES,
+  THINKING_LEVELS,
   getErrorMessage,
 } from "@fusion/core";
 import {
@@ -385,6 +386,7 @@ export function PlanningModeModal({ isOpen, onClose, onTaskCreated, onTasksCreat
   } = useAiSessionSync();
   const [planningModelProvider, setPlanningModelProvider] = useState<string | undefined>(undefined);
   const [planningModelId, setPlanningModelId] = useState<string | undefined>(undefined);
+  const [planningThinkingLevel, setPlanningThinkingLevel] = useState<ThinkingLevel | "">("");
   const [planningDepth, setPlanningDepth] = useState<"small" | "medium" | "large">("medium");
   const [customQuestionCount, setCustomQuestionCount] = useState("");
   const [loadedModels, setLoadedModels] = useState<ModelInfo[]>([]);
@@ -422,6 +424,7 @@ export function PlanningModeModal({ isOpen, onClose, onTaskCreated, onTasksCreat
     initialPlan: string;
     modelProvider?: string;
     modelId?: string;
+    thinkingLevel?: ThinkingLevel | "";
   } | null>(null);
 
   useModalResizePersist(modalRef, isOpen && resizePersistEnabled, "fusion:planning-modal-size");
@@ -631,6 +634,7 @@ export function PlanningModeModal({ isOpen, onClose, onTaskCreated, onTasksCreat
     refineSummaryInFlightRef.current = false;
     setPlanningModelProvider(undefined);
     setPlanningModelId(undefined);
+    setPlanningThinkingLevel("");
     setPlanningDepth("medium");
     setCustomQuestionCount("");
     currentSessionIdRef.current = null;
@@ -901,8 +905,8 @@ export function PlanningModeModal({ isOpen, onClose, onTaskCreated, onTasksCreat
       // Use streaming mode for real-time AI thinking display
       const modelOverride =
         planningModelProvider && planningModelId
-          ? { planningModelProvider, planningModelId }
-          : undefined;
+          ? { planningModelProvider, planningModelId, thinkingLevel: planningThinkingLevel || undefined }
+          : (planningThinkingLevel ? { thinkingLevel: planningThinkingLevel } : undefined);
 
       const parsedCustomQuestionCount = customQuestionCount.trim()
         ? Number.parseInt(customQuestionCount, 10)
@@ -942,6 +946,7 @@ export function PlanningModeModal({ isOpen, onClose, onTaskCreated, onTasksCreat
     planningDepth,
     planningModelId,
     planningModelProvider,
+    planningThinkingLevel,
     projectId,
   ]);
 
@@ -1046,6 +1051,7 @@ export function PlanningModeModal({ isOpen, onClose, onTaskCreated, onTasksCreat
           let savedPlan = "";
           let savedProvider: string | undefined;
           let savedModelId: string | undefined;
+          let savedThinkingLevel: ThinkingLevel | "" = "";
           try {
             const payload = session.inputPayload ? JSON.parse(session.inputPayload) : null;
             if (payload && typeof payload.initialPlan === "string") {
@@ -1055,12 +1061,16 @@ export function PlanningModeModal({ isOpen, onClose, onTaskCreated, onTasksCreat
               savedProvider = payload.modelProvider;
               savedModelId = payload.modelId;
             }
+            if (payload && THINKING_LEVELS.includes(payload.thinkingLevel as ThinkingLevel)) {
+              savedThinkingLevel = payload.thinkingLevel;
+            }
           } catch {
             // Fall through with empty text; the row will remain editable.
           }
           setInitialPlan(savedPlan);
           setPlanningModelProvider(savedProvider);
           setPlanningModelId(savedModelId);
+          setPlanningThinkingLevel(savedThinkingLevel);
           draftSessionIdRef.current = sessionId;
           lastSyncedDraftRef.current = savedPlan
             ? {
@@ -1068,6 +1078,7 @@ export function PlanningModeModal({ isOpen, onClose, onTaskCreated, onTasksCreat
                 initialPlan: savedPlan.trim(),
                 modelProvider: savedProvider,
                 modelId: savedModelId,
+                thinkingLevel: savedThinkingLevel,
               }
             : null;
           setView({ type: "initial" });
@@ -1309,7 +1320,8 @@ export function PlanningModeModal({ isOpen, onClose, onTaskCreated, onTasksCreat
         lastSyncedDraftRef.current?.sessionId === sessionId &&
         lastSyncedDraftRef.current.initialPlan === trimmedPlan &&
         lastSyncedDraftRef.current.modelProvider === planningModelProvider &&
-        lastSyncedDraftRef.current.modelId === planningModelId;
+        lastSyncedDraftRef.current.modelId === planningModelId &&
+        lastSyncedDraftRef.current.thinkingLevel === planningThinkingLevel;
       if (alreadySynced) {
         return;
       }
@@ -1321,6 +1333,7 @@ export function PlanningModeModal({ isOpen, onClose, onTaskCreated, onTasksCreat
             initialPlan: trimmedPlan,
             modelProvider: planningModelProvider && planningModelId ? planningModelProvider : undefined,
             modelId: planningModelProvider && planningModelId ? planningModelId : undefined,
+            thinkingLevel: planningThinkingLevel || undefined,
           },
           projectId,
         );
@@ -1329,12 +1342,13 @@ export function PlanningModeModal({ isOpen, onClose, onTaskCreated, onTasksCreat
           initialPlan: trimmedPlan,
           modelProvider: planningModelProvider,
           modelId: planningModelId,
+          thinkingLevel: planningThinkingLevel,
         };
       } catch {
         // best-effort draft sync; avoid blocking typing UX on transient failures
       }
     },
-    [planningModelId, planningModelProvider, projectId],
+    [planningModelId, planningModelProvider, planningThinkingLevel, projectId],
   );
 
   useEffect(() => {
@@ -1953,6 +1967,7 @@ export function PlanningModeModal({ isOpen, onClose, onTaskCreated, onTasksCreat
       setStreamingOutput("");
       setPlanningModelProvider(undefined);
       setPlanningModelId(undefined);
+      setPlanningThinkingLevel("");
       setPlanningDepth("medium");
       setCustomQuestionCount("");
       currentSessionIdRef.current = null;
@@ -2168,8 +2183,8 @@ export function PlanningModeModal({ isOpen, onClose, onTaskCreated, onTasksCreat
                         }
                         const modelOverride =
                           planningModelProvider && planningModelId
-                            ? { planningModelProvider, planningModelId }
-                            : undefined;
+                            ? { planningModelProvider, planningModelId, thinkingLevel: planningThinkingLevel || undefined }
+                            : (planningThinkingLevel ? { thinkingLevel: planningThinkingLevel } : undefined);
                         // FNXC:PlanningMode 2026-07-01-00:00: mark in-flight synchronously so debounce fires during the round-trip don't spawn duplicate drafts.
                         draftCreateInFlightRef.current = true;
                         void createPlanningDraft(content, projectId, modelOverride)
@@ -2261,7 +2276,12 @@ export function PlanningModeModal({ isOpen, onClose, onTaskCreated, onTasksCreat
                       onToggleFavorite={handleToggleFavoriteProvider}
                       favoriteModels={favoriteModels}
                       onToggleModelFavorite={handleToggleFavoriteModel}
+                      showThinkingLevel
+                      thinkingLevel={planningThinkingLevel}
+                      onThinkingLevelChange={(level) => setPlanningThinkingLevel(THINKING_LEVELS.includes(level as ThinkingLevel) ? (level as ThinkingLevel) : "")}
+                      defaultThinkingLevel="off"
                     />
+                    {/* FNXC:Planning 2026-07-12-00:00: Planning Mode now renders the inline thinking selector only after drafts/sessions can persist the selected reasoning effort in inputPayload and restore it on reopen, matching chat semantics without a dangling control. */}
                     {modelsError && (
                       <div className="form-hint form-hint-error">
                         {modelsError}{" "}

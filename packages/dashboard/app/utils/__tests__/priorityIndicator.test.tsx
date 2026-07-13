@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { ArrowDown, ArrowUp, Flag, TriangleAlert } from "lucide-react";
 import { TASK_PRIORITIES, type TaskPriority } from "@fusion/core";
-import { getPriorityIcon, getPriorityLabel, priorityIndicator } from "../priorityIndicator";
+import { getPriorityColorVar, getPriorityIcon, getPriorityLabel, priorityIndicator } from "../priorityIndicator";
 
-const expectedIndicators: Record<TaskPriority, { icon: unknown; label: string }> = {
-  low: { icon: ArrowDown, label: "Low" },
-  normal: { icon: Flag, label: "Normal" },
-  high: { icon: ArrowUp, label: "High" },
-  urgent: { icon: TriangleAlert, label: "Urgent" },
+const expectedIndicators: Record<TaskPriority, { icon: unknown; label: string; colorVar: string }> = {
+  low: { icon: ArrowDown, label: "Low", colorVar: "var(--color-info)" },
+  normal: { icon: Flag, label: "Normal", colorVar: "var(--text-muted)" },
+  high: { icon: ArrowUp, label: "High", colorVar: "var(--color-warning)" },
+  urgent: { icon: TriangleAlert, label: "Urgent", colorVar: "var(--color-error)" },
+
 };
 
 describe("priorityIndicator", () => {
@@ -16,6 +17,8 @@ describe("priorityIndicator", () => {
       expect(priorityIndicator(priority)).toEqual(expectedIndicators[priority]);
       expect(getPriorityIcon(priority)).toBe(expectedIndicators[priority].icon);
       expect(getPriorityLabel(priority)).toBe(expectedIndicators[priority].label);
+      expect(getPriorityColorVar(priority)).toBe(expectedIndicators[priority].colorVar);
+
     }
   });
 });

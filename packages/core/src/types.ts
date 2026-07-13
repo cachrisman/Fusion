@@ -2502,6 +2502,14 @@ export interface Task {
    *  Incremented by self-healing for resume-limbo detection and reset when
    *  progress is observed or recovery escalates to a fresh todo dispatch. */
   resumeLimboCount?: number;
+  /**
+   * FNXC:WorkflowLifecycle 2026-07-12-00:00:
+   * FN-7863 bounds execute-node self-requeue loops by counting consecutive requeues
+   * that preserve the same execution-progress signature. Reset this counter on real
+   * progress, forward moves, and manual retry; the executor caps it before writing
+   * terminal status:"failed" so committed work and step progress remain visible.
+   */
+  executeRequeueLoopCount?: number;
   /** Bounded auto-retry attempts for transient workflow-graph failures observed
    *  immediately after engine-restart or unpause resume. Reset by manual retry
    *  and by successful forward progress; capped by the executor before terminal
@@ -2513,6 +2521,9 @@ export interface Task {
   /** Compact execution-progress snapshot captured at the last reclaim/unpause
    *  attempt (current step + step statuses) for resume-limbo detection. */
   resumeLimboStepSignature?: string;
+  /** Compact execution-progress snapshot captured at the last execute-node
+   *  self-requeue (current step + step statuses) for FN-7863 loop detection. */
+  executeRequeueLoopSignature?: string;
   /** Number of times workflow remediation has auto-revived this task after
    *  failed pre-merge review feedback. Incremented each time the engine sends the
    *  task back with failure feedback injected. Capped only when the workflow step
@@ -2615,6 +2626,12 @@ export interface Task {
   approvedPlanFingerprint?: string;
   /** Thinking level for AI agent sessions — controls reasoning effort (off/minimal/low/medium/high) */
   thinkingLevel?: ThinkingLevel;
+  /**
+   * FNXC:Settings-ThinkingLevel 2026-07-13-00:27:
+   * Validator and planning task fields are optional per-lane reasoning-effort overrides. When unset, those lanes inherit the shared task `thinkingLevel`, then existing settings and lane fallbacks.
+   */
+  validatorThinkingLevel?: ThinkingLevel;
+  planningThinkingLevel?: ThinkingLevel;
   /** Execution mode for task implementation.
    *  - "standard": Full execution with complete review workflow (default)
    *  - "fast": Expedited execution with minimal overhead for simple tasks
@@ -2886,6 +2903,12 @@ export interface TaskCreateInput {
   planningModelId?: string;
   /** Thinking level for AI agent sessions — controls reasoning effort (off/minimal/low/medium/high) */
   thinkingLevel?: ThinkingLevel;
+  /**
+   * FNXC:Settings-ThinkingLevel 2026-07-13-00:27:
+   * Validator and planning task fields are optional per-lane reasoning-effort overrides. When unset, those lanes inherit the shared task `thinkingLevel`, then existing settings and lane fallbacks.
+   */
+  validatorThinkingLevel?: ThinkingLevel;
+  planningThinkingLevel?: ThinkingLevel;
   /** When true, trigger AI title summarization if description is long and no title provided */
   summarize?: boolean;
   /** Mission ID to link this task to (for mission hierarchy) */
@@ -4140,6 +4163,11 @@ export interface ProjectSettings {
    */
   openMobileTasksInPopup?: boolean;
   /**
+   * FNXC:TaskCardCostBadge 2026-07-11-12:15:
+   * Default-off project setting that lets operators opt board cards into showing derived read-time task cost next to the execution-time badge. Missing/false preserves existing card density and no badge shell renders unless a task has positive token usage.
+   */
+  showCostBadgeOnCards?: boolean;
+  /**
    * FNXC:TaskDetailActivityFirst 2026-06-30-23:59:
    * Default-off keeps task details Activity-first so omitted non-done opens land on the legacy `chat` Activity → Live surface. Operators can set true to restore Chat-first ordering/default while explicit Activity/Chat/Logs deep links remain stable.
    */
@@ -4223,6 +4251,21 @@ export interface ProjectSettings {
    * Optional project default-lane thinking override used when a task does not set its own thinking level.
    */
   defaultThinkingLevelOverride?: ThinkingLevel;
+  /**
+   * FNXC:ChatModels 2026-07-12-20:45:
+   * Projects can pin a default Direct-chat target as either a model pair with optional thinking level or a durable agent, then choose whether New Chat prompts with that default preselected or creates the session immediately.
+   */
+  chatNewSessionMode?: "prompt" | "always-default";
+  /** Which configured default target kind New Chat should use or preselect. */
+  chatDefaultKind?: "model" | "agent";
+  /** Durable agent id used when `chatDefaultKind === "agent"`. */
+  chatDefaultAgentId?: string;
+  /** Model provider used when `chatDefaultKind === "model"`; must be paired with `chatDefaultModelId`. */
+  chatDefaultModelProvider?: string;
+  /** Model id used when `chatDefaultKind === "model"`; must be paired with `chatDefaultModelProvider`. */
+  chatDefaultModelId?: string;
+  /** Optional thinking-level override for the model chat default; undefined inherits the resolved project/global default. */
+  chatDefaultThinkingLevel?: ThinkingLevel;
   /** Project-level AI model provider for task execution (executor agent).
    *  This is the execution lane that overrides the global `executionGlobalProvider`.
    *  Must be set together with `executionModelId`. Falls back to
@@ -7300,6 +7343,13 @@ export interface AgentHeartbeatConfig {
   enabled?: boolean;
   /** Whether this agent should auto-claim relevant unowned tasks during no-task heartbeats (default: true when unset). */
   autoClaimRelevantTasks?: boolean;
+  /**
+   * FNXC:AgentRouting 2026-07-12-11:20:
+   * Per-agent task-routing eligibility (GitHub issue Runfusion/Fusion#2015). "auto" (default) = current behavior;
+   * "explicit-only" = never auto-assigned/auto-claimed but accepts explicit delegation; "none" = never bound to
+   * implementation tasks by ANY path, including delegation with override=true. Set "none" on liaison/observer agents.
+   */
+  assignmentPolicy?: "auto" | "explicit-only" | "none";
   /** Number of auto-claim candidates to inject into no-task heartbeat prompts. Default: 5, range: 0-10. */
   autoClaimCandidatesInPrompt?: number;
   /** Per-agent override for opting engineer-role agents into no-task backlog auto-claim. Default: project setting or false. */
@@ -8074,3 +8124,19 @@ export {
 export type { ResolvedModelSelection } from "./model-resolution.js";
 export { resolveResearchSettings } from "./research-settings.js";
 export type { ResolvedResearchSettings } from "./research-settings.js";
+
+/*
+FNXC:WorkflowLifecycleAutofix 2026-07-12-13:00:
+The workflow editor recomputes lifecycle warnings client-side as the graph is
+edited (so the banner clears without a save round-trip) and offers one-click
+fixes that insert the canonical completion-summary node. Both helpers are
+pure (types + string constants only), so they are safe to re-export through
+this browser-safe alias entry.
+*/
+export { analyzeWorkflowLifecycle } from "./workflow-lifecycle-validation.js";
+export type { WorkflowLifecycleWarning, WorkflowLifecycleWarningCode } from "./workflow-lifecycle-validation.js";
+export {
+  completionSummaryNode,
+  isCompletionSummaryNode,
+  COMPLETION_SUMMARY_NODE_ID,
+} from "./builtin-completion-summary-node.js";

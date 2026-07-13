@@ -13,10 +13,11 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import * as fusionCore from "@fusion/core";
-import type { AgentState, AgentCapability, AgentUpdateInput, Artifact, ArtifactCreateInput, ArtifactWithTask, TaskDocument, TaskDocumentCreateInput, TaskStore, RunMutationContext, MessageStore, Message, SourceType, Settings, ResearchRun, ResearchRunStatus, TaskCreateInput, ReflectionStore, ApprovalRequestStore, ProjectSettings, ChatStore, WorkflowSettingDefinition, GoalStatus } from "@fusion/core";
-import { listTraits, isBuiltinWorkflowId, AgentStore, validateColumnAgentBindings, ColumnAgentBindingError, stripApprovalBypassFlags, WorkflowSettingRejectionError, resolveEffectiveSettingsById, resolveWorkflowIrById, findOrphanedSettingValues, BUILTIN_WORKFLOW_SETTINGS, MAX_TASK_LIST_TEXT_CHARS, formatCurrentTaskLine, normalizeWorkflowIcon, addNodeToIr, removeNodeFromIr, addEdgeToIr, removeEdgeFromIr, type WorkflowIrNode, type WorkflowIrEdge } from "@fusion/core";
+import type { AgentState, AgentCapability, AgentUpdateInput, Artifact, ArtifactCreateInput, ArtifactWithTask, TaskDocument, TaskDocumentCreateInput, TaskStore, RunMutationContext, MessageStore, Message, SourceType, Settings, ResearchRun, ResearchRunStatus, TaskCreateInput, ReflectionStore, ApprovalRequestStore, ProjectSettings, ChatStore, WorkflowSettingDefinition, GoalStatus, WorkflowIrNode, WorkflowIrEdge } from "@fusion/core";
+import { listTraits, isBuiltinWorkflowId, AgentStore, validateColumnAgentBindings, ColumnAgentBindingError, stripApprovalBypassFlags, WorkflowSettingRejectionError, resolveEffectiveSettingsById, resolveWorkflowIrById, findOrphanedSettingValues, BUILTIN_WORKFLOW_SETTINGS, MAX_TASK_LIST_TEXT_CHARS, formatCurrentTaskLine, normalizeWorkflowIcon, parseWorkflowIr, WorkflowIrError, assertColumnTraitsValid, ColumnTraitValidationError, addNodeToIr, removeNodeFromIr, addEdgeToIr, removeEdgeFromIr } from "@fusion/core";
+
 import { promoteHeldTask } from "./hold-release.js";
-import { DASHBOARD_USER_ID, canAgentTakeImplementationTaskForExplicitRouting, dailyMemoryPath, ensureOpenClawMemoryFiles, extractAgentProvisioningRequest, formatRoleMismatchReason, getMemoryBackendCapabilities, getProjectMemory, isEphemeralAgent, memoryLongTermPath, normalizeMessageParticipant, reconcileDeterministicDuplicate, resolveAgentProvisioningPolicy, resolveMemoryBackend, resolveResearchSettings, resolveTaskGithubTracking, runDeterministicDuplicateGuard, scheduleQmdProjectMemoryRefresh, searchProjectMemory, shouldSkipBackgroundQmdRefresh } from "@fusion/core";
+import { DASHBOARD_USER_ID, dailyMemoryPath, ensureOpenClawMemoryFiles, evaluateImplementationTaskBind, extractAgentProvisioningRequest, getMemoryBackendCapabilities, getProjectMemory, isEphemeralAgent, memoryLongTermPath, normalizeMessageParticipant, reconcileDeterministicDuplicate, resolveAgentProvisioningPolicy, resolveMemoryBackend, resolveResearchSettings, resolveTaskGithubTracking, runDeterministicDuplicateGuard, scheduleQmdProjectMemoryRefresh, searchProjectMemory, shouldSkipBackgroundQmdRefresh } from "@fusion/core";
 import { ResearchOrchestrator } from "./research-orchestrator.js";
 import { ResearchProviderRegistry } from "./research/provider-registry.js";
 import { ResearchStepRunner } from "./research-step-runner.js";
@@ -31,6 +32,7 @@ import { MessageDeliveryAutoRecoveryHandler } from "./auto-recovery-handlers/mes
 import { emitGoalRetrievalAudit } from "./goal-anchoring-audit.js";
 import { recordRetry } from "./retry-burned-logger.js";
 import { acquireWorkspaceRepoWorktree, WorkspaceRepoAcquireBusyError } from "./worktree-acquisition.js";
+import { validateCodeNodeSources } from "./code-node-runner.js";
 
 // ── Tool parameter schemas (canonical definitions) ────────────────────────
 
@@ -419,6 +421,30 @@ export const workflowCreateParams = Type.Object({
         "Set true to confirm binding a column to an agent whose permission policy is broader " +
         "(more privileged) than the project default. Required when such a binding is present; " +
         "the create is otherwise rejected naming the offending column.",
+    }),
+  ),
+});
+
+export const workflowValidateParams = Type.Object({
+  workflow_id: Type.Optional(
+    Type.String({
+      description:
+        "Workflow definition ID to dry-run validate (e.g. 'WF-003', or a 'builtin:*' id). " +
+        "Use either workflow_id or ir; validation performs no persistence.",
+    }),
+  ),
+  ir: Type.Optional(
+    Type.Unknown({
+      description:
+        "Inline workflow graph (intermediate representation) to dry-run validate. " +
+        "Use either ir or workflow_id; validation performs no persistence.",
+    }),
+  ),
+  confirm_policy_escalation: Type.Optional(
+    Type.Boolean({
+      description:
+        "Set true to confirm that validating column-agent bindings may allow a broader agent policy. " +
+        "This is checked exactly like create/update but never persists anything.",
     }),
   ),
 });
@@ -2155,6 +2181,10 @@ function hasImageSignature(data: Buffer, mimeType: string): boolean {
 function notifyArtifactRegistered(messageStore: MessageStore | undefined, artifact: Artifact, authorId: string): void {
   if (!messageStore) return;
 
+  /*
+  FNXC:ArtifactRegistry 2026-07-12-00:00:
+  Artifact-registration mailbox notifications remain best-effort and keep their stable content string, but metadata now carries mimeType so dashboard mailbox surfaces can render document/other artifact affordances from metadata without an extra artifact fetch.
+  */
   try {
     messageStore.sendMessage({
       fromType: "system",
@@ -2166,6 +2196,7 @@ function notifyArtifactRegistered(messageStore: MessageStore | undefined, artifa
         artifactId: artifact.id,
         artifactType: artifact.type,
         title: artifact.title,
+        mimeType: artifact.mimeType,
         authorId,
         taskId: artifact.taskId,
       },
@@ -2570,6 +2601,116 @@ function columnAgentBindingErrorResult(err: ColumnAgentBindingError) {
     content: [{ type: "text" as const, text: `ERROR: ${text}` }],
     details: { columnId: err.columnId, agentId: err.agentId, reason: err.reason },
     isError: true as const,
+  };
+}
+
+export type WorkflowValidateDryRunError =
+  | { type: "workflow-ir"; message: string }
+  | { type: "column-traits"; message: string; violations: unknown[] }
+  | { type: "code-node"; message: string; codeNodeErrors: unknown[] }
+  | { type: "column-agent"; message: string; columnId: string; agentId?: string; reason?: string; policyEscalation?: boolean };
+
+function workflowValidationErrorFromUnknown(err: unknown): WorkflowValidateDryRunError | undefined {
+  if (err instanceof WorkflowIrError) return { type: "workflow-ir", message: err.message };
+  if (err instanceof ColumnTraitValidationError) {
+    return { type: "column-traits", message: err.message, violations: err.violations };
+  }
+  if (err instanceof ColumnAgentBindingError) {
+    return {
+      type: "column-agent",
+      message: err.message,
+      columnId: err.columnId,
+      agentId: err.agentId,
+      reason: err.reason,
+      ...(err.reason === "policy-escalation" ? { policyEscalation: true } : {}),
+    };
+  }
+  return undefined;
+}
+
+/**
+ * FNXC:WorkflowAuthoringTools 2026-07-12-00:00:
+ * Workflow authors need a no-persistence dry run that executes the same IR, trait, code-node, and column-agent checks used before create/update persistence.
+ * Keep validation failures as successful dry-run results so agents can iterate on malformed graphs without mutating workflow rows.
+ */
+export async function validateWorkflowIrDryRun(
+  store: TaskStore,
+  ir: unknown,
+  confirmPolicyEscalation = false,
+): Promise<{ valid: true } | { valid: false; errors: WorkflowValidateDryRunError[] }> {
+  try {
+    const parsed = parseWorkflowIr(ir as Parameters<typeof parseWorkflowIr>[0]);
+    if (parsed.version === "v2") assertColumnTraitsValid(parsed.columns);
+    const codeNodeFailures = await validateCodeNodeSources({ nodes: parsed.nodes as WorkflowIrNode[] });
+    if (codeNodeFailures.length > 0) {
+      return {
+        valid: false,
+        errors: [{
+          type: "code-node",
+          message: `Workflow has ${codeNodeFailures.length} code node(s) that failed to compile`,
+          codeNodeErrors: codeNodeFailures,
+        }],
+      };
+    }
+    await assertWorkflowColumnAgentBindings(store, parsed, confirmPolicyEscalation);
+    return { valid: true };
+  } catch (err: unknown) {
+    const validationError = workflowValidationErrorFromUnknown(err);
+    if (validationError) return { valid: false, errors: [validationError] };
+    throw err;
+  }
+}
+
+export function createWorkflowValidateTool(store: TaskStore): ToolDefinition {
+  return {
+    name: "fn_workflow_validate",
+    label: "Validate Workflow",
+    description:
+      "Dry-run validate a workflow IR by workflow_id or inline ir without creating or mutating any workflow. " +
+      "Runs the same server-side IR, trait, code-node, and column-agent validation as create/update and returns typed errors.",
+    parameters: workflowValidateParams,
+    execute: async (_id: string, params: Static<typeof workflowValidateParams>) => {
+      try {
+        const workflowId = params.workflow_id?.trim();
+        if (!workflowId && params.ir === undefined) {
+          return {
+            content: [{ type: "text" as const, text: "ERROR: workflow_id or ir is required." }],
+            details: { error: "missing-input" },
+            isError: true,
+          };
+        }
+        let ir = params.ir;
+        if (workflowId) {
+          const def = await store.getWorkflowDefinition(workflowId);
+          if (!def) {
+            return {
+              content: [{ type: "text" as const, text: `ERROR: Workflow '${workflowId}' not found.` }],
+              details: { workflowId },
+              isError: true,
+            };
+          }
+          ir = def.ir;
+        }
+        const result = await validateWorkflowIrDryRun(store, ir, params.confirm_policy_escalation === true);
+        if (result.valid) {
+          return {
+            content: [{ type: "text" as const, text: "IR is valid. No workflow was created or mutated." }],
+            details: { valid: true, ...(workflowId ? { workflowId } : {}) },
+          };
+        }
+        return {
+          content: [{ type: "text" as const, text: `IR is invalid: ${result.errors.map((e) => e.message).join("; ")}` }],
+          details: { valid: false, errors: result.errors, ...(workflowId ? { workflowId } : {}) },
+        };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } catch (err: any) {
+        return {
+          content: [{ type: "text" as const, text: `ERROR: Failed to validate workflow: ${err?.message ?? err}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
   };
 }
 
@@ -3163,6 +3304,7 @@ export function createWorkflowAuthoringTools(
   return [
     createWorkflowListTool(store),
     createWorkflowGetTool(store),
+    createWorkflowValidateTool(store),
     createWorkflowSelectTool(store, currentTaskId),
     createWorkflowCreateTool(store, opts),
     createWorkflowUpdateTool(store, opts),
@@ -4267,11 +4409,21 @@ export function createDelegateTaskTool(
         };
       }
 
+      /*
+      FNXC:AgentRouting 2026-07-12-12:20:
+      Issue #2015: delegation must honor per-agent assignmentPolicy. override=true still bypasses the ROLE
+      check, but an agent with assignmentPolicy "none" (liaison guarantee) can never be delegated an
+      implementation task — no override exists for that.
+      */
       const override = params.override === true;
       const newTaskRef = { id: "<new>", column: "todo" } as const;
-      if (!override && !canAgentTakeImplementationTaskForExplicitRouting(agent, { column: newTaskRef.column })) {
+      const bindVerdict = evaluateImplementationTaskBind(agent, newTaskRef, {
+        explicitRouting: true,
+        executorRoleOverride: override,
+      });
+      if (!bindVerdict.allowed) {
         return {
-          content: [{ type: "text" as const, text: `ERROR: ${formatRoleMismatchReason(agent, newTaskRef)}` }],
+          content: [{ type: "text" as const, text: `ERROR: ${bindVerdict.reason}` }],
           details: {},
         };
       }

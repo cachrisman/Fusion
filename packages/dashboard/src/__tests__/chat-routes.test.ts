@@ -1276,6 +1276,196 @@ describe("Chat API Routes", () => {
 
       expect(response.status).toBe(404);
     });
+
+    // FN-7898: PATCH now accepts thinkingLevel to change an existing session's
+    // reasoning-effort level mid-conversation (distinct from create-time picker).
+    it("accepts a valid thinkingLevel and forwards it to updateSession", async () => {
+      const updatedSession = { ...sampleSession, thinkingLevel: "high" };
+      mockUpdateSession.mockReturnValue(updatedSession);
+
+      const response = await request(
+        app,
+        "PATCH",
+        "/api/chat/sessions/chat-abc123",
+        JSON.stringify({ thinkingLevel: "high" }),
+        { "content-type": "application/json" },
+      );
+
+      expect(response.status).toBe(200);
+      expect((response.body as any).session.thinkingLevel).toBe("high");
+      expect(mockUpdateSession).toHaveBeenCalledWith("chat-abc123", { thinkingLevel: "high" });
+    });
+
+    it("returns 400 for an unknown thinkingLevel value", async () => {
+      const response = await request(
+        app,
+        "PATCH",
+        "/api/chat/sessions/chat-abc123",
+        JSON.stringify({ thinkingLevel: "ultra" }),
+        { "content-type": "application/json" },
+      );
+
+      expect(response.status).toBe(400);
+      expect((response.body as any).error).toContain("thinkingLevel must be one of");
+      expect(mockUpdateSession).not.toHaveBeenCalled();
+    });
+
+    it("treats thinkingLevel: null as an explicit clear", async () => {
+      const updatedSession = { ...sampleSession, thinkingLevel: null };
+      mockUpdateSession.mockReturnValue(updatedSession);
+
+      const response = await request(
+        app,
+        "PATCH",
+        "/api/chat/sessions/chat-abc123",
+        JSON.stringify({ thinkingLevel: null }),
+        { "content-type": "application/json" },
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockUpdateSession).toHaveBeenCalledWith("chat-abc123", { thinkingLevel: null });
+    });
+
+    it("treats thinkingLevel: '' as an explicit clear", async () => {
+      const updatedSession = { ...sampleSession, thinkingLevel: null };
+      mockUpdateSession.mockReturnValue(updatedSession);
+
+      const response = await request(
+        app,
+        "PATCH",
+        "/api/chat/sessions/chat-abc123",
+        JSON.stringify({ thinkingLevel: "" }),
+        { "content-type": "application/json" },
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockUpdateSession).toHaveBeenCalledWith("chat-abc123", { thinkingLevel: null });
+    });
+
+    it("omitting thinkingLevel leaves it untouched (existing title/status behavior unaffected)", async () => {
+      const updatedSession = { ...sampleSession, title: "New Title" };
+      mockUpdateSession.mockReturnValue(updatedSession);
+
+      const response = await request(
+        app,
+        "PATCH",
+        "/api/chat/sessions/chat-abc123",
+        JSON.stringify({ title: "New Title" }),
+        { "content-type": "application/json" },
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockUpdateSession).toHaveBeenCalledWith("chat-abc123", { title: "New Title" });
+      const callArgs = mockUpdateSession.mock.calls[mockUpdateSession.mock.calls.length - 1][1];
+      expect(callArgs).not.toHaveProperty("thinkingLevel");
+    });
+
+    // FN-7908: PATCH now also accepts modelProvider+modelId and agentId so the
+    // brain-icon popup can retarget an active Direct chat's model or switch it
+    // to a real agent mid-conversation, reusing the existing validateModelPair helper.
+    it("accepts a modelProvider+modelId pair and forwards it to updateSession", async () => {
+      const updatedSession = { ...sampleSession, modelProvider: "anthropic", modelId: "claude-sonnet" };
+      mockUpdateSession.mockReturnValue(updatedSession);
+
+      const response = await request(
+        app,
+        "PATCH",
+        "/api/chat/sessions/chat-abc123",
+        JSON.stringify({ modelProvider: "anthropic", modelId: "claude-sonnet" }),
+        { "content-type": "application/json" },
+      );
+
+      expect(response.status).toBe(200);
+      expect((response.body as any).session.modelProvider).toBe("anthropic");
+      expect(mockUpdateSession).toHaveBeenCalledWith("chat-abc123", {
+        modelProvider: "anthropic",
+        modelId: "claude-sonnet",
+      });
+    });
+
+    it("returns 400 when only modelProvider or only modelId is provided", async () => {
+      const response = await request(
+        app,
+        "PATCH",
+        "/api/chat/sessions/chat-abc123",
+        JSON.stringify({ modelProvider: "anthropic" }),
+        { "content-type": "application/json" },
+      );
+
+      expect(response.status).toBe(400);
+      expect((response.body as any).error).toContain("modelProvider and modelId");
+      expect(mockUpdateSession).not.toHaveBeenCalled();
+    });
+
+    it("accepts a non-empty agentId and forwards it to updateSession", async () => {
+      const updatedSession = { ...sampleSession, agentId: "agent-42" };
+      mockUpdateSession.mockReturnValue(updatedSession);
+
+      const response = await request(
+        app,
+        "PATCH",
+        "/api/chat/sessions/chat-abc123",
+        JSON.stringify({ agentId: "agent-42" }),
+        { "content-type": "application/json" },
+      );
+
+      expect(response.status).toBe(200);
+      expect((response.body as any).session.agentId).toBe("agent-42");
+      expect(mockUpdateSession).toHaveBeenCalledWith("chat-abc123", { agentId: "agent-42" });
+    });
+
+    it("returns 400 for an empty-string agentId", async () => {
+      const response = await request(
+        app,
+        "PATCH",
+        "/api/chat/sessions/chat-abc123",
+        JSON.stringify({ agentId: "" }),
+        { "content-type": "application/json" },
+      );
+
+      expect(response.status).toBe(400);
+      expect((response.body as any).error).toContain("agentId");
+      expect(mockUpdateSession).not.toHaveBeenCalled();
+    });
+
+    it("switching to a model clears a prior real agentId via the sentinel, and switching to an agent clears modelProvider/modelId", async () => {
+      const updatedSession = { ...sampleSession, agentId: "__fn_agent__", modelProvider: "anthropic", modelId: "claude-sonnet" };
+      mockUpdateSession.mockReturnValue(updatedSession);
+
+      const response = await request(
+        app,
+        "PATCH",
+        "/api/chat/sessions/chat-abc123",
+        JSON.stringify({ agentId: "__fn_agent__", modelProvider: "anthropic", modelId: "claude-sonnet" }),
+        { "content-type": "application/json" },
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockUpdateSession).toHaveBeenCalledWith("chat-abc123", {
+        agentId: "__fn_agent__",
+        modelProvider: "anthropic",
+        modelId: "claude-sonnet",
+      });
+    });
+
+    it("omitting modelProvider/modelId/agentId leaves them untouched", async () => {
+      const updatedSession = { ...sampleSession, title: "New Title" };
+      mockUpdateSession.mockReturnValue(updatedSession);
+
+      const response = await request(
+        app,
+        "PATCH",
+        "/api/chat/sessions/chat-abc123",
+        JSON.stringify({ title: "New Title" }),
+        { "content-type": "application/json" },
+      );
+
+      expect(response.status).toBe(200);
+      const callArgs = mockUpdateSession.mock.calls[mockUpdateSession.mock.calls.length - 1][1];
+      expect(callArgs).not.toHaveProperty("modelProvider");
+      expect(callArgs).not.toHaveProperty("modelId");
+      expect(callArgs).not.toHaveProperty("agentId");
+    });
   });
 
   describe("DELETE /api/chat/sessions/:id", () => {
@@ -2274,9 +2464,9 @@ describe("multi-project chat routing", () => {
 
     expect(response.status).toBe(200);
     expect((response.body as any).success).toBe(false);
-    // Scoped path: getOrCreateProjectStore is called with the secondary projectId
-    expect(mockGetOrCreateProjectStore).toHaveBeenCalledWith(secondarySession.projectId);
-    // cancelGeneration was called on the scoped manager
+    // Scoped path shares resolveProjectChatContext with list/create and can reuse the host store when no project engine is running.
+    expect(mockGetOrCreateProjectStore).not.toHaveBeenCalled();
+    // cancelGeneration was called on the resolved manager.
     expect(mockCancelGeneration).toHaveBeenCalledWith(secondarySession.id);
   });
 
@@ -2309,8 +2499,8 @@ describe("multi-project chat routing", () => {
 
     expect(response.status).toBe(200);
     expect((response.body as any).sessions).toHaveLength(1);
-    // Scoped path: getOrCreateProjectStore is called for isGenerating resolution
-    expect(mockGetOrCreateProjectStore).toHaveBeenCalledWith(secondarySession.projectId);
+    // Scoped path shares resolveProjectChatContext with list/create and can reuse the host store when no project engine is running.
+    expect(mockGetOrCreateProjectStore).not.toHaveBeenCalled();
     // isGenerating defaults to false (MockChatManager has no getGeneratingSessionIds)
     expect((response.body as any).sessions[0].isGenerating).toBe(false);
   });

@@ -103,26 +103,22 @@ describe("decidePlannerRecovery", () => {
     }
   });
 
-  // FN-7692: the `reason` copy must accurately reflect whether the active
-  // auto-merge policy will advance the merge/PR unattended (advisory,
-  // non-blocking wording) or genuinely requires a human approval (blocking
-  // wording) — never the old unconditional "requires explicit confirmation
-  // before ... may run" claim, which was false whenever auto-merge would
-  // proceed on its own (observed on FN-7689). `action`/`requiresConfirmation`/
-  // `sideEffectClass` must stay byte-for-byte identical across all three
-  // `autoMergeWillProceed` states — this is messaging-only.
-  it("produces accurate advisory copy when auto-merge will proceed unattended, for both merger and pull-request stages", () => {
+  // FNXC:PlannerOversight 2026-07-11-00:00:
+  // FN-7840 changes `autoMergeWillProceed: true` from a messaging-only advisory checkpoint into a true suppression path: no await_confirmation decision, no pending confirmation, no steering comment, and no intervention entry. The false/undefined paths remain the safety valve.
+  it("suppresses the merger/pull-request confirmation when auto-merge will proceed unattended", () => {
     for (const stage of ["merger", "pull-request"] as const) {
       const decision = decidePlannerRecovery({
         snapshot: observation({ stage, signal: "failed" }),
         autoMergeWillProceed: true,
       });
-      expect(decision.action, `stage=${stage}`).toBe("await_confirmation");
-      expect(decision.requiresConfirmation, `stage=${stage}`).toBe(true);
+      expect(decision.action, `stage=${stage}`).toBe("none");
+      expect(decision.requiresConfirmation, `stage=${stage}`).toBe(false);
       expect(decision.sideEffectClass, `stage=${stage}`).toBe("merge_pr");
+      expect(decision.proposedAction, `stage=${stage}`).toBeUndefined();
       expect(decision.reason, `stage=${stage}`).not.toMatch(/requires explicit confirmation before .* may run/);
+      expect(decision.reason, `stage=${stage}`).not.toMatch(/await|advisory|does not block progress/i);
       expect(decision.reason, `stage=${stage}`).toMatch(/automatically/i);
-      expect(decision.reason, `stage=${stage}`).toMatch(/advisory/i);
+      expect(decision.reason, `stage=${stage}`).toMatch(/no confirmation checkpoint recorded/i);
     }
   });
 
@@ -143,13 +139,15 @@ describe("decidePlannerRecovery", () => {
   it("uses neutral, non-overclaiming copy when the auto-merge policy is unknown to the caller", () => {
     for (const stage of ["merger", "pull-request"] as const) {
       const decision = decidePlannerRecovery({ snapshot: observation({ stage, signal: "failed" }) });
+      expect(decision.action, `stage=${stage}`).toBe("await_confirmation");
+      expect(decision.requiresConfirmation, `stage=${stage}`).toBe(true);
       expect(decision.reason, `stage=${stage}`).not.toMatch(/requires explicit confirmation before .* may run/);
       expect(decision.reason, `stage=${stage}`).not.toMatch(/automatically/i);
       expect(decision.reason, `stage=${stage}`).not.toMatch(/will not .* until a human explicitly approves/);
     }
   });
 
-  it("keeps action/requiresConfirmation/sideEffectClass byte-for-byte unchanged across autoMergeWillProceed states (messaging-only guard)", () => {
+  it("diverges only the advisory autoMergeWillProceed=true case while preserving blocking and neutral confirmations", () => {
     for (const stage of ["merger", "pull-request"] as const) {
       const base = decidePlannerRecovery({ snapshot: observation({ stage, signal: "failed" }) });
       const proceeds = decidePlannerRecovery({
@@ -160,12 +158,18 @@ describe("decidePlannerRecovery", () => {
         snapshot: observation({ stage, signal: "failed" }),
         autoMergeWillProceed: false,
       });
-      for (const decision of [base, proceeds, blocks]) {
+
+      // FNXC:PlannerOversight 2026-07-11-00:00: FN-7840 intentionally breaks the old messaging-only invariant only for autoMergeWillProceed === true; false and undefined keep the confirmation safety valve.
+      for (const decision of [base, blocks]) {
         expect(decision.action, `stage=${stage}`).toBe("await_confirmation");
         expect(decision.requiresConfirmation, `stage=${stage}`).toBe(true);
         expect(decision.sideEffectClass, `stage=${stage}`).toBe("merge_pr");
         expect(decision.proposedAction, `stage=${stage}`).toBe(base.proposedAction);
       }
+      expect(proceeds.action, `stage=${stage}`).toBe("none");
+      expect(proceeds.requiresConfirmation, `stage=${stage}`).toBe(false);
+      expect(proceeds.sideEffectClass, `stage=${stage}`).toBe("merge_pr");
+      expect(proceeds.proposedAction, `stage=${stage}`).toBeUndefined();
     }
   });
 

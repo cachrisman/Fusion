@@ -1373,6 +1373,7 @@
     "stopGeneration": "생성 중지",
     "thinking": "생각 중",
     "thinkingLabel": "생각 중",
+    "thinkingLevelButton": "생각 수준",
     "thinkingStatus": "생각 중…",
     "toolArgsLabel": "",
     "toolArgsPreview": "",
@@ -1387,7 +1388,14 @@
     "workingStatus": "작업 중…",
     "you": "나",
     "contextWindowAria": "Estimated {{used}} of {{total}} context tokens",
-    "noMessage": ""
+    "noMessage": "",
+    "modelAgentSection": "Model / Agent",
+    "thinkingLevelSection": "Thinking level",
+    "noModelsAvailable": "No models available",
+    "currentAgentTarget": "Current agent: {{name}}",
+    "currentModelTarget": "Current model: {{model}}",
+    "currentDefaultTarget": "Using the default chat target"
+
   },
   "chatRooms": {
     "error": {
@@ -1409,6 +1417,13 @@
     "versionMismatchInfix": "하지만 이 대시보드는 다음 버전을 필요로 합니다",
     "versionMismatchPrefix": "설치된",
     "versionMismatchSuffix": "최신 버전으로 업데이트하여 동기화를 유지하세요."
+  },
+  "storageMigrationNotice": {
+    "body": "",
+    "dismissLabel": "",
+    "getHelp": "",
+    "getHelpLabel": "",
+    "title": ""
   },
   "cliBinary": {
     "binaryLabel": "",
@@ -2441,6 +2456,7 @@
     "previewTitle": "{{file}} 미리보기"
   },
   "fileEditor": {
+    "autoSave": "",
     "edit": "편집",
     "editMode": "편집 모드",
     "editorFor": "{{filePath}} 편집기",
@@ -2448,6 +2464,7 @@
     "lineNumber": "줄 번호",
     "preview": "미리보기",
     "previewMode": "미리보기 모드",
+    "toggleAutoSave": "",
     "toggleLineNumbers": "줄 번호 표시 토글",
     "toggleOptions": "편집기 옵션 토글",
     "toggleWordWrap": "자동 줄 바꿈 토글",
@@ -5666,7 +5683,9 @@
       "title": "모양",
       "openTasksInRightSidebarHelp": "",
       "openMobileTasksInPopupHelp": "",
-      "taskDetailChatFirstHelp": ""
+      "taskDetailChatFirstHelp": "",
+      "showCostBadgeOnCards": "",
+      "showCostBadgeOnCardsHelp": ""
     },
     "auth": {
       "apiKeyCleared": "API 키가 지워졌습니다",
@@ -5796,6 +5815,7 @@
     "footer": {
       "help": "도움말",
       "version": "버전 {{version}}",
+      "versionShort": "",
       "checkUpdates": "",
       "helpDiscussions": ""
     },
@@ -6205,7 +6225,11 @@
       "gitLabPersonalAccessToken": "",
       "gitLabAuthTokenHint": "",
       "includeTaskIdInCommitDefault": "",
-      "trailerEmail": ""
+      "trailerEmail": "",
+      "gitRemoteThatMergedResultsArePushedTo": "",
+      "pushTargetBranch": "",
+      "sameAsIntegrationBranchDefault": "",
+      "pushTargetBranchHelp": ""
     },
     "mergeManually": "수동으로 병합",
     "mobileNav": {
@@ -6370,7 +6394,25 @@
       "whenEnabledTasksCreatedWithoutATitleBut": "",
       "autoSelectModelPresetHint": "",
       "prTitlePromptInstructionsHelp": "",
-      "prDescriptionPromptInstructionsHelp": ""
+      "prDescriptionPromptInstructionsHelp": "",
+      "chatHeading": "Chat",
+      "chatDescription": "Choose the default target for new Direct chats and whether New Chat should prompt or immediately use that default.",
+      "chatNewSessionMode": "New Chat behavior",
+      "chatNewSessionModePrompt": "Prompt for model each time",
+      "chatNewSessionModeAlwaysDefault": "Always use configured default",
+      "chatNewSessionModeHelp": "Prompt mode opens New Chat with this default preselected. Always-default mode skips the dialog when the configured default is complete.",
+      "chatDefaultKind": "Chat default target",
+      "chatDefaultKindModel": "Model",
+      "chatDefaultKindAgent": "Agent",
+      "chatDefaultModel": "Chat Default Model",
+      "selectChatDefaultModel": "Select a chat default model",
+      "chatDefaultModelHelp": "Model-mode New Chat uses the built-in Fusion chat agent with this provider/model pair. Leave empty to fall back to prompting.",
+      "chatDefaultAgent": "Chat Default Agent",
+      "loadingAgents": "Loading agents…",
+      "selectChatDefaultAgent": "Select a chat default agent",
+      "chatDefaultAgentEmpty": "No agents are available for this project yet.",
+      "chatDefaultAgentHelp": "Agent-mode New Chat starts a Direct chat with the selected durable agent.",
+      "chatDefaultReset": "Reset Chat default"
     },
     "remote": {
       "acceptRoutes": "",
@@ -6684,6 +6726,7 @@
     },
     "reset": {
       "button": "",
+      "buttonShort": "",
       "buttonTitle": "",
       "dialogAriaLabel": "",
       "dialogTitle": "",
@@ -7766,7 +7809,8 @@
       "terminal": "세션",
       "worktreeTerminal": "터미널",
       "workflow": "워크플로",
-      "summary": "Summary"
+      "summary": "Summary",
+      "cost": ""
     },
     "terminal": {
       "loading": ""
@@ -7852,6 +7896,22 @@
       "unlinkMessage": "",
       "unlinkTitle": "",
       "unlinked": ""
+    },
+    "costTab": {
+      "cacheWriteTokens": "",
+      "cachedTokens": "",
+      "cost": "",
+      "costUnavailable": "",
+      "description": "",
+      "empty": "",
+      "heading": "",
+      "inputTokens": "",
+      "model": "",
+      "outputTokens": "",
+      "totalCost": "",
+      "totalCostLabel": "",
+      "totalTokens": "",
+      "unknownModel": ""
     }
   },
   "taskDocuments": {
@@ -8274,7 +8334,9 @@
     "revertTask": "",
     "undoOf": "",
     "undoOfTitle": "",
-    "undoTask": ""
+    "undoTask": "",
+    "costBadgeTitle": "",
+    "costBadgeAriaLabel": ""
   },
   "terminal": {
     "arrowKeysLabel": "",
@@ -8289,7 +8351,6 @@
     "decreaseFontSize": "터미널 글꼴 크기 줄이기",
     "exitLabel": "종료: {{code}}",
     "failedToStartTerminal": "터미널 시작에 실패했습니다: {{error}}",
-    "helpText": "Ctrl++/- 확대/축소 • ⌨ 단축키 패널 • Esc 닫기",
     "increaseFontSize": "터미널 글꼴 크기 늘리기",
     "initializeError": "터미널 UI 초기화에 실패했습니다: {{error}}",
     "newSession": "새 세션",
@@ -8326,6 +8387,7 @@
   },
   "todo": {
     "addItemPlaceholder": "할 일 항목 추가",
+    "allDoneHidden": "",
     "addList": "목록 추가",
     "assignAgent": "{{text}}을(를) 에이전트에 할당",
     "cancelItemEdit": "항목 편집 취소",
@@ -8355,6 +8417,7 @@
     "failedToCreateTask": "작업 생성 실패: {{error}}",
     "failedToLoadAgents": "에이전트 불러오기 실패: {{error}}",
     "failedUpdateItem": "항목 업데이트 실패",
+    "hideDone": "",
     "failedUpdateItemToast": "할 일 항목 업데이트에 실패했습니다",
     "itemsLabel": "할 일 항목",
     "lists": "목록",
@@ -8374,6 +8437,7 @@
     "saveListRename": "목록 이름 바꾸기 저장",
     "selectList": "{{title}} 목록 선택",
     "selectListEmpty": "사이드바에서 목록을 선택하세요",
+    "showDone": "",
     "startPlanning": "{{text}}에서 계획 시작",
     "taskCreatedAndAssigned": "{{id}} 생성 후 {{agent}}에 할당됨",
     "taskCreatedFromTodo": "할 일에서 {{id}} 생성됨",
@@ -8633,12 +8697,22 @@
     "widgetDefault": "기본값"
   },
   "workflowNodes": {
+    "addStepAgentSteps": "",
+    "addStepAutomation": "",
+    "addStepFlowControl": "",
+    "addStepFragmentDesc": "",
+    "addStepNoMatches": "",
+    "addStepSearchLabel": "",
+    "addStepSearchPlaceholder": "",
+    "addStepTitle": "",
     "advisory": "",
     "autoLayout": "자동 배치",
     "codeNote": "샌드박스에서 TypeScript를 실행합니다. 구문은 저장 시 검증됩니다.",
     "codeSource": "소스(TypeScript)",
     "codeTimeout": "제한 시간(ms)",
     "collapseInspector": "",
+    "conditionFailure": "",
+    "conditionSuccess": "",
     "cycleBlocked": "이 연결은 순환을 만듭니다 — for-each 템플릿 내부의 재작업 엣지만 되돌아올 수 있습니다",
     "deleteEdge": "엣지 삭제",
     "deleteNode": "노드 삭제",
@@ -8691,9 +8765,13 @@
     "mobileConnectTarget": "대상 노드",
     "mobileGraph": "",
     "mobileGraphEmpty": "",
+    "mobileGraphStyleCanvas": "",
+    "mobileGraphStyleLabel": "",
+    "mobileGraphStyleList": "",
     "mobileMoveDown": "",
     "mobileMoveUp": "",
     "mobileNodeKinds": "",
+    "nodeInspector": "",
     "notifyCustom": "",
     "notifyCustomEvent": "",
     "notifyEvent": "",
@@ -8703,6 +8781,7 @@
     "parseArtifact": "Artifact",
     "parseParser": "Parser",
     "quorumN": "정족수 개수(n)",
+    "readOnlyDuplicateToEdit": "Built-in structure is read-only — prompts on prompt and gate nodes can be edited here.",
     "releaseCapacity": "다운스트림 용량",
     "releaseCondition": "릴리스 조건",
     "releaseDependency": "종속성 완료",
@@ -8715,6 +8794,9 @@
     "reviewPlan": "Plan review",
     "reviewType": "Review type",
     "showInspector": "",
+    "simpleAddStep": "",
+    "simpleContainerEmpty": "",
+    "simpleInsertStep": "",
     "splitNote": "분기는 이 노드에서 동시에 실행됩니다. 분기 내에서는 실행 및 병합 이음새가 허용되지 않습니다.",
     "startEntryColumn": "",
     "startEntryColumnAuto": "",
@@ -8729,11 +8811,7 @@
     "templatesPluginSteps": "플러그인 단계",
     "templatesSection": "템플릿",
     "timeoutMs": "",
-    "trivialGraphHint": "이 워크플로는 시작 → 끝만 실행합니다. 위 팔레트에서 단계를 추가하여 구성하세요.",
-    "conditionFailure": "",
-    "conditionSuccess": "",
-    "nodeInspector": "",
-    "readOnlyDuplicateToEdit": "Built-in structure is read-only — prompts on prompt and gate nodes can be edited here."
+    "trivialGraphHint": "이 워크플로는 시작 → 끝만 실행합니다. 위 팔레트에서 단계를 추가하여 구성하세요."
   },
   "workflows": {
     "aiEdit": "AI로 디자인",
@@ -8749,6 +8827,7 @@
     "backToWorkflowList": "",
     "clickToEditDescription": "클릭하여 설명 편집",
     "clickToRename": "클릭하여 이름 변경",
+    "closeEditor": "",
     "created": "워크플로 \"{{name}}\"을(를) 만들었습니다",
     "createDescription": "설명 (선택 사항)",
     "createFailed": "워크플로 만들기에 실패했습니다",
@@ -8765,6 +8844,8 @@
     "discardConfirm": "버리기",
     "discardMessage": "이 워크플로에 저장하지 않은 변경 사항이 있습니다. 버릴까요?",
     "discardTitle": "저장하지 않은 변경 사항을 버릴까요?",
+    "duplicatedEditable": "",
+    "duplicateFailed": "",
     "duplicateToCustomize": "",
     "emptyDescription": "워크플로는 작업 실행 전후에 실행되는 단계와 게이트를 조율합니다. 하나 만들어 그 흐름을 구성해 보세요.",
     "emptyTitle": "선택된 워크플로 없음",
@@ -8778,17 +8859,22 @@
     "importInvalidJson": "이 파일은 유효한 JSON이 아닙니다.",
     "importStripped": "가져온 노드에서 자동 승인 플래그가 제거되었습니다",
     "importTooltip": "JSON 파일에서 워크플로 가져오기",
+    "lifecycleFix": "",
+    "lifecycleFixAll": "",
+    "lifecycleWarningsCount_one": "",
+    "lifecycleWarningsCount_other": "",
+    "loadFailed": "",
+    "loading": "",
     "migrationNotice": "이전 워크플로 단계가 변환되었습니다 — 팔레트의 템플릿과 \"마이그레이션된 단계\" 워크플로에서 찾을 수 있습니다.",
     "mobileEditorNav": "",
     "mobileSelectNote": "",
     "nameLabel": "워크플로 이름",
     "newWorkflow": "새 워크플로",
+    "noneYet": "",
     "readOnlyBuiltin": "Built-in workflow: structure is read-only, prompts are editable.",
     "saved": "",
     "savedNotCompilable": "",
     "saveFailed": "",
-    "showCanvasEditor": "",
-    "showSimpleEditor": "",
     "templateBlank": "빈 워크플로",
     "templateBlankDescription": "빈 시작 → 끝 그래프에서 시작합니다.",
     "templateCopyName": "{{name}} 복사본",
@@ -8797,13 +8883,11 @@
     "templatePickerLabel": "시작점",
     "templateSectionBuiltin": "기본 제공 워크플로",
     "templateSectionYours": "내 워크플로",
-    "closeEditor": "",
-    "duplicatedEditable": "",
-    "duplicateFailed": "",
-    "loadFailed": "",
-    "loading": "",
-    "noneYet": "",
-    "title": ""
+    "title": "",
+    "viewModeAdvanced": "",
+    "viewModeLabel": "",
+    "viewModeList": "",
+    "viewModeSimple": ""
   },
   "workflowSelector": {
     "switchActiveMessage": "",

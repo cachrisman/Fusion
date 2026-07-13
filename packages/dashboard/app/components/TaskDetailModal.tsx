@@ -44,6 +44,7 @@ import { TaskReviewTab } from "./TaskReviewTab";
 import { MergeDetails } from "./MergeDetails";
 import { TaskChangesTab } from "./TaskChangesTab";
 import { TaskSummaryTab } from "./TaskSummaryTab";
+import { TaskCostTab } from "./TaskCostTab";
 import { WorkspaceWorktreesSummary, isWorkspaceTask } from "./WorkspaceWorktreesSummary";
 import { TaskForm, type PendingImage } from "./TaskForm";
 import { useNodes } from "../hooks/useNodes";
@@ -228,7 +229,8 @@ function formatDurationCompact(ageMs: number): string {
   return `${minutes}m`;
 }
 
-type TabId = "summary" | "definition" | "chat" | "planner-chat" | "logs" | "changes" | "review" | "pr" | "comments" | "model" | "workflow" | "documents" | "stats" | "routing" | "retries" | "terminal" | "worktree-terminal" | `plugin-${string}`;
+type TabId = "summary" | "cost" | "definition" | "chat" | "planner-chat" | "logs" | "changes" | "review" | "pr" | "comments" | "model" | "workflow" | "documents" | "stats" | "routing" | "retries" | "terminal" | "worktree-terminal" | `plugin-${string}`;
+
 type ActivitySegment = "current" | "feed" | "raw-logs" | "interventions";
 
 /*
@@ -1159,11 +1161,12 @@ export function TaskDetailContent({
   );
   const showCliTab = cliTabVisibility.kind !== "hidden";
   /*
-  FNXC:TaskDetailTerminal 2026-07-10-00:00:
-  FN-7813 exposes a dedicated interactive Terminal tab only for single-worktree tasks. Workspace tasks have multiple repo roots and no single safe default shell cwd, so they intentionally hide this tab rather than falling back to the project root.
+  FNXC:TaskDetailTerminal 2026-07-11-13:20:
+  FN-7826 makes the interactive Terminal tab always available in Task Detail. The first shell opens in task.worktree when present; otherwise defaultCwd stays undefined so useTerminalSessions creates a project-root shell, including for multi-repo workspace tasks with no single worktree. Terminal sessions remain task-scoped through scopeId so they do not share the footer/global terminal namespace.
   */
   const taskWorktreeCwd = typeof task.worktree === "string" && task.worktree.trim().length > 0 ? task.worktree : undefined;
-  const showWorktreeTerminalTab = Boolean(taskWorktreeCwd) && !isWorkspaceTask(workingTask);
+  const showWorktreeTerminalTab = true;
+
   const cliPosture: SessionTerminalPosture | undefined = useMemo(() => {
     if (!cliSession) return undefined;
     const p = cliSession.autonomyPosture ?? {};
@@ -1198,10 +1201,7 @@ export function TaskDetailContent({
     if (activeTab === "terminal" && !showCliTab) setActiveTab("definition");
   }, [activeTab, showCliTab]);
 
-  // If the worktree-rooted terminal tab loses its single-worktree cwd, fall back.
-  useEffect(() => {
-    if (activeTab === "worktree-terminal" && !showWorktreeTerminalTab) setActiveTab("definition");
-  }, [activeTab, showWorktreeTerminalTab]);
+
 
   // Track mount state to avoid setting state on unmounted component
   useEffect(() => {
@@ -2806,6 +2806,11 @@ export function TaskDetailContent({
     setRefineFeedback("");
     setIsRefining(false);
   }, []);
+  /*
+  FNXC:TaskDetailRefine 2026-07-12-00:00:
+  The nested refine overlay must use the shared overlay-dismiss contract so the click/touch sequence that opens Refine never self-dismisses the freshly mounted composer, and so backdrop presses honor the global default-off modal-dismiss preference like every other dashboard modal.
+  */
+  const refineOverlayDismissProps = useOverlayDismiss(handleCloseRefineModal);
 
   const handleSubmitRefine = useCallback(async () => {
     if (!refineFeedback.trim()) {
@@ -4435,6 +4440,21 @@ export function TaskDetailContent({
             >
               {t("taskDetail.tabs.comments", "Comments")}
             </button>
+            {/* FNXC:TaskDetailCost 2026-07-11-00:00: Keep the tab strip's operator workflow as Comments → Terminal → Cost so discussion, shell context, and model spend sit together. Cost remains always reachable (unlike done-only Summary) and uses costFor via the shared taskTokenCost helper without persisting derived USD. */}
+            {showWorktreeTerminalTab && (
+              <button
+                className={`detail-tab${activeTab === "worktree-terminal" ? " detail-tab-active" : ""}`}
+                onClick={() => setActiveTab("worktree-terminal")}
+              >
+                {t("taskDetail.tabs.worktreeTerminal", "Terminal")}
+              </button>
+            )}
+            <button
+              className={`detail-tab${activeTab === "cost" ? " detail-tab-active" : ""}`}
+              onClick={() => setActiveTab("cost")}
+            >
+              {t("taskDetail.tabs.cost", "Cost")}
+            </button>
             <button
               className={`detail-tab${activeTab === "documents" ? " detail-tab-active" : ""}`}
               onClick={() => setActiveTab("documents")}
@@ -4472,14 +4492,7 @@ export function TaskDetailContent({
                 onClick={() => setActiveTab("terminal")}
               >
                 {t("taskDetail.tabs.terminal", "Session")}
-              </button>
-            )}
-            {showWorktreeTerminalTab && (
-              <button
-                className={`detail-tab${activeTab === "worktree-terminal" ? " detail-tab-active" : ""}`}
-                onClick={() => setActiveTab("worktree-terminal")}
-              >
-                {t("taskDetail.tabs.worktreeTerminal", "Terminal")}
+
               </button>
             )}
             {/* Plugin tabs */}
@@ -4536,6 +4549,10 @@ export function TaskDetailContent({
           ) : activeTab === "summary" && task.column === "done" ? (
             <div className="detail-section detail-section--summary">
               <TaskSummaryTab task={workingTask} pricingOverrides={globalSettings?.modelPricingOverrides} />
+            </div>
+          ) : activeTab === "cost" ? (
+            <div className="detail-section detail-section--cost">
+              <TaskCostTab task={workingTask} pricingOverrides={globalSettings?.modelPricingOverrides} />
             </div>
           ) : activeTab === "planner-chat" ? (
             <div className="detail-section detail-section--planner-chat">
@@ -4864,7 +4881,8 @@ export function TaskDetailContent({
                 </Suspense>
               ) : null}
             </div>
-          ) : activeTab === "worktree-terminal" && showWorktreeTerminalTab && taskWorktreeCwd ? (
+          ) : activeTab === "worktree-terminal" && showWorktreeTerminalTab ? (
+
             <div className="detail-section detail-section--worktree-terminal">
               <Suspense fallback={<div className="detail-loading"><LoadingSpinner label={t("taskDetail.terminal.loadingInteractive", "Loading interactive terminal…")} /></div>}>
                 <LazyTerminalModal
@@ -5898,14 +5916,11 @@ export function TaskDetailContent({
         {showRefineModal && (
           <div
             className="modal-overlay open detail-refine-overlay"
-            onClick={handleCloseRefineModal}
+            {...refineOverlayDismissProps}
             role="dialog"
             aria-modal="true"
           >
-            <div
-              className="modal detail-refine-modal"
-              onClick={(e) => e.stopPropagation()}
-            >
+            <div className="modal detail-refine-modal">
               <div className="modal-header">
                 <h3 className="detail-refine-title">{t("taskDetail.refine.modalTitle", "Refine")}</h3>
                 <button className="modal-close" onClick={handleCloseRefineModal} aria-label={t("common.close", "Close")}>

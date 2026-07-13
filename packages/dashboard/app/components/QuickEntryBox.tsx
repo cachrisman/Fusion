@@ -18,6 +18,8 @@ import { ProviderIcon } from "./ProviderIcon";
 import { WorkflowOptionalStepsDropdown } from "./WorkflowOptionalStepsDropdown";
 import { WorkflowIcon } from "./WorkflowIcon";
 import { getPriorityIcon, getPriorityLabel } from "../utils/priorityIndicator";
+import { getPriorityColorVar, getPriorityIcon, getPriorityLabel } from "../utils/priorityIndicator";
+
 
 const STORAGE_KEY = "kb-quick-entry-text";
 const ALLOWED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
@@ -2226,6 +2228,9 @@ export function QuickEntryBox({ onCreate, addToast, tasks = [], availableModels,
                   }}
                 >
                   <PriorityIcon size={12} aria-hidden="true" />
+{/* FNXC:PriorityColorCoding 2026-07-11-00:00: The quick-add icon-only priority trigger must preview urgency color from priorityIndicator without changing its label, test id, or picker behavior. */}
+                  <PriorityIcon size={12} aria-hidden="true" style={{ color: getPriorityColorVar(priority) }} />
+
                 </button>
               </div>
 
@@ -2246,6 +2251,9 @@ export function QuickEntryBox({ onCreate, addToast, tasks = [], availableModels,
                   <div className="dep-dropdown-search-header">{t("tasks.selectPriority", "Select priority")}</div>
                   {TASK_PRIORITIES.map((taskPriority) => {
                     const label = getPriorityLabel(taskPriority);
+
+const OptionPriorityIcon = getPriorityIcon(taskPriority);
+
                     return (
                       <div
                         key={taskPriority}
@@ -2258,6 +2266,9 @@ export function QuickEntryBox({ onCreate, addToast, tasks = [], availableModels,
                           setPriorityPickerPosition(null);
                         }}
                       >
+
+<OptionPriorityIcon size={12} aria-hidden="true" style={{ color: getPriorityColorVar(taskPriority) }} />
+
                         <span className="dep-dropdown-title">{label}</span>
                       </div>
                     );

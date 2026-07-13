@@ -2,8 +2,31 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Settings } from "@fusion/core";
+import { fetchGitRemoteBranches } from "../../../api";
 import { MovedSettingsStub } from "./MovedSettingsStub";
 import type { SectionBaseProps } from "./context";
+/*
+FNXC:MergePush 2026-07-11-23:00:
+The push-after-merge target used to be one free-text field ("origin" or "origin main"),
+which was easy to mistype and gave no discoverability of what could be pushed where. It
+is now split into a remote dropdown (the repo's configured git remotes) and a target
+branch dropdown (branches known on that remote, defaulting to the integration branch),
+while still persisting to the single `pushRemote` setting string so the engine parser
+and existing configs are unchanged. A Custom… escape hatch covers branches that don't
+exist on the remote yet (pushing creates them), and the free-text input returns as a
+fallback when no remotes are configured.
+*/
+export function parsePushRemoteSetting(pushRemote: string | undefined): { remote: string; branch: string } {
+    const tokens = (pushRemote ?? "").trim().split(/\s+/).filter(Boolean);
+    return { remote: tokens[0] ?? "origin", branch: tokens.slice(1).join(" ") };
+}
+export function composePushRemoteSetting(remote: string, branch: string): string | undefined {
+    const trimmedRemote = remote.trim() || "origin";
+    const trimmedBranch = branch.trim();
+    if (trimmedBranch) return `${trimmedRemote} ${trimmedBranch}`;
+    // Bare default remote with default branch = the setting's default — store unset.
+    return trimmedRemote === "origin" ? undefined : trimmedRemote;
+}
 function resolveMaxAutoMergeRetriesForMergeForm(value: unknown): number {
     const configured = Number(value);
     return Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 3;
@@ -33,9 +56,25 @@ export interface MergeSectionProps extends SectionBaseProps {
     integrationBranchCustomMode: boolean;
     setIntegrationBranchCustomMode: (value: boolean) => void;
     onOpenWorkflowSettings?: () => void;
+    /** Names of the repo's configured git remotes for the push-target dropdown. */
+    gitRemoteOptions?: string[];
+    projectId?: string;
 }
-export function MergeSection({ scopeBanner, form, setForm, integrationBranchOptions, integrationBranchCustomMode, setIntegrationBranchCustomMode, onOpenWorkflowSettings, }: MergeSectionProps) {
+export function MergeSection({ scopeBanner, form, setForm, integrationBranchOptions, integrationBranchCustomMode, setIntegrationBranchCustomMode, onOpenWorkflowSettings, gitRemoteOptions = [], projectId, }: MergeSectionProps) {
     const { t } = useTranslation("app");
+    const pushTarget = parsePushRemoteSetting(form.pushRemote);
+    const [pushBranchOptions, setPushBranchOptions] = useState<string[]>([]);
+    const [pushBranchCustomMode, setPushBranchCustomMode] = useState(false);
+    // Load the branches known on the selected push remote whenever it changes.
+    // Best-effort: an empty list leaves the default + Custom… options usable.
+    useEffect(() => {
+        if (!form.pushAfterMerge || gitRemoteOptions.length === 0) return;
+        let cancelled = false;
+        fetchGitRemoteBranches(pushTarget.remote, projectId)
+            .then((branches) => { if (!cancelled) setPushBranchOptions(branches); })
+            .catch(() => { if (!cancelled) setPushBranchOptions([]); });
+        return () => { cancelled = true; };
+    }, [form.pushAfterMerge, pushTarget.remote, projectId, gitRemoteOptions.length]);
     const [legacyStampCandidates, setLegacyStampCandidates] = useState<LegacyAutoMergeStampCandidate[]>([]);
     const [legacyStampLoading, setLegacyStampLoading] = useState(true);
     const [legacyStampApplying, setLegacyStampApplying] = useState(false);
@@ -435,14 +474,69 @@ export function MergeSection({ scopeBanner, form, setForm, integrationBranchOpti
         </details>
       </div>
 
-      {form.pushAfterMerge && (<div className="form-group">
+      {form.pushAfterMerge && (gitRemoteOptions.length === 0 ? (<div className="form-group">
           <label htmlFor="pushRemote">{t("settings.merge.pushRemote", "Push Remote")}</label>
           <input id="pushRemote" type="text" placeholder={t("settings.merge.origin", "origin")} value={form.pushRemote || ""} onChange={(e) => setForm((f) => ({ ...f, pushRemote: e.target.value || undefined }))}/>
           <details className="settings-option-details">
             <summary>{t("settings.merge.moreDetails", "More details")}</summary>
             <small>{t("settings.merge.gitRemoteToPushToEGOrigin", "Git remote to push to (e.g. \"origin\"). Can include branch name (e.g. \"origin main\"). Default: \"origin\".")}</small>
           </details>
-        </div>)}
+        </div>) : (<>
+          <div className="form-group">
+            <label htmlFor="pushRemote">{t("settings.merge.pushRemote", "Push Remote")}</label>
+            <select id="pushRemote" className="select" value={pushTarget.remote} onChange={(e) => {
+                // Capture eagerly: the deferred setForm updater must not read the
+                // controlled select's value after React resets it on re-render.
+                const nextRemote = e.target.value;
+                // Branches differ per remote — reset the target branch to the default.
+                setPushBranchCustomMode(false);
+                setForm((f) => ({ ...f, pushRemote: composePushRemoteSetting(nextRemote, "") }));
+            }} data-testid="push-remote-select">
+              {!gitRemoteOptions.includes(pushTarget.remote) && (<option value={pushTarget.remote}>{pushTarget.remote}</option>)}
+              {gitRemoteOptions.map((name) => (<option key={name} value={name}>{name}</option>))}
+            </select>
+            <details className="settings-option-details">
+              <summary>{t("settings.merge.moreDetails", "More details")}</summary>
+              <small>{t("settings.merge.gitRemoteThatMergedResultsArePushedTo", "Git remote that merged results are pushed to. Default: \"origin\".")}</small>
+            </details>
+          </div>
+          <div className="form-group">
+            <label htmlFor="pushRemoteBranch">{t("settings.merge.pushTargetBranch", "Push target branch")}</label>
+            {(() => {
+                const currentBranch = pushTarget.branch;
+                const branchIsKnown = currentBranch.length > 0 && pushBranchOptions.includes(currentBranch);
+                if (pushBranchCustomMode || (currentBranch.length > 0 && !branchIsKnown)) {
+                    return (<div className="form-inline-group">
+                        <input id="pushRemoteBranch" type="text" className="input" placeholder={t("settings.merge.branchName", "branch name")} value={currentBranch} onChange={(e) => {
+                            const trimmed = e.target.value.trim();
+                            setForm((f) => ({ ...f, pushRemote: composePushRemoteSetting(pushTarget.remote, trimmed) }));
+                        }} data-testid="push-remote-branch-custom-input"/>
+                        <button type="button" className="btn-link" onClick={() => {
+                            setPushBranchCustomMode(false);
+                            setForm((f) => ({ ...f, pushRemote: composePushRemoteSetting(pushTarget.remote, "") }));
+                        }} data-testid="push-remote-branch-use-dropdown">{t("settings.merge.useDropdown", " Use dropdown ")}</button>
+                    </div>);
+                }
+                const CUSTOM = "__fusion-custom__";
+                return (<select id="pushRemoteBranch" className="select" value={currentBranch} onChange={(e) => {
+                        const next = e.target.value;
+                        if (next === CUSTOM) {
+                            setPushBranchCustomMode(true);
+                            return;
+                        }
+                        setForm((f) => ({ ...f, pushRemote: composePushRemoteSetting(pushTarget.remote, next) }));
+                    }} data-testid="push-remote-branch-select">
+                  <option value="">{t("settings.merge.sameAsIntegrationBranchDefault", "(same as integration branch — default)")}</option>
+                  {pushBranchOptions.map((name) => (<option key={name} value={name}>{name}</option>))}
+                  <option value={CUSTOM}>{t("settings.merge.custom", "Custom…")}</option>
+                </select>);
+            })()}
+            <details className="settings-option-details">
+              <summary>{t("settings.merge.moreDetails", "More details")}</summary>
+              <small>{t("settings.merge.pushTargetBranchHelp", "Branch on the remote that merged results are pushed to. Leave on the default to push the integration branch to its same-named remote branch; pick a listed remote branch or choose Custom… to type one that doesn't exist on the remote yet (the push creates it).")}</small>
+            </details>
+          </div>
+        </>))}
     </>);
 }
 export default MergeSection;

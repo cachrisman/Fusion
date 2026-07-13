@@ -274,7 +274,9 @@ describe("Run Audit", () => {
     });
 
     it("returns all events when no filters provided", () => {
-      const events = store.getRunAuditEvents();
+      // Store init records a `store:open` provenance stamp, so an unfiltered read
+      // returns the five seeded events plus the stamp(s).
+      const events = store.getRunAuditEvents().filter((event) => event.mutationType !== "store:open");
       expect(events).toHaveLength(5);
     });
 

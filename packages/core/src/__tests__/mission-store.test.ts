@@ -1719,6 +1719,7 @@ describe("MissionStore", () => {
           sliceId: null,
         });
         expect(store.computeSliceStatus(slice.id)).toBe("complete");
+        expect(store.getSlice(slice.id)).toMatchObject({ status: "complete" });
       });
 
       it("reconciles stale generated fix features when a source validator run passes", () => {
@@ -1747,6 +1748,45 @@ describe("MissionStore", () => {
         expect(events).toEqual(["validator-run:completed", "stale-fix:updated"]);
         expect(store.getFeature(staleFix.id)).toMatchObject({ status: "done", loopState: "passed", lastValidatorStatus: "passed" });
         expect(store.computeSliceStatus(slice.id)).toBe("complete");
+      });
+
+      it("reconciles generated fix features whose own validator already passed", () => {
+        const mission = store.createMission({ title: "Mission" });
+        const milestone = store.addMilestone(mission.id, { title: "Milestone" });
+        const slice = store.addSlice(milestone.id, { title: "Slice" });
+        const source = store.addFeature(slice.id, { title: "Source" });
+
+        store.updateFeature(source.id, { status: "done" });
+        const failedRun = store.startValidatorRun(source.id, "task_completion");
+        store.completeValidatorRun(failedRun.id, "failed", "missing evidence");
+        const staleFix = store.createGeneratedFixFeature(source.id, failedRun.id, ["CA-source"]);
+        createTaskInDb(db, "FN-own-passed-fix", "Own passed stale fix task", undefined, { column: "todo" });
+        store.updateFeature(staleFix.id, {
+          status: "done",
+          loopState: "passed",
+          lastValidatorStatus: "passed",
+          taskId: "FN-own-passed-fix",
+        });
+        db.prepare("UPDATE tasks SET missionId = ?, sliceId = ? WHERE id = ?").run(mission.id, slice.id, "FN-own-passed-fix");
+
+        expect(db.prepare("SELECT missionId, sliceId FROM tasks WHERE id = ?").get("FN-own-passed-fix")).toEqual({
+          missionId: mission.id,
+          sliceId: slice.id,
+        });
+
+        const report = store.reconcileSupersededGeneratedFixFeatures(slice.id);
+
+        expect(report).toEqual({ supersededCount: 1, featureIds: [staleFix.id] });
+        expect(store.getFeature(staleFix.id)).toMatchObject({
+          status: "done",
+          taskId: undefined,
+          loopState: "passed",
+          lastValidatorStatus: "passed",
+        });
+        expect(db.prepare("SELECT missionId, sliceId FROM tasks WHERE id = ?").get("FN-own-passed-fix")).toEqual({
+          missionId: null,
+          sliceId: null,
+        });
       });
     });
 

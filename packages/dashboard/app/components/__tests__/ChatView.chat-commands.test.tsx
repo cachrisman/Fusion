@@ -31,6 +31,8 @@ vi.mock("../../hooks/useNavigationHistory", async (importOriginal) => {
 });
 
 vi.mock("../../api", () => ({
+  fetchSettings: vi.fn().mockResolvedValue({}),
+
   fetchModels: vi.fn().mockResolvedValue({
     models: [],
     favoriteProviders: [],

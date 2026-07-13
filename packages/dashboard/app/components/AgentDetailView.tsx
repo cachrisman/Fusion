@@ -15,7 +15,7 @@ import remarkGfm from "remark-gfm";
 import type { AgentDetail, AgentState, AgentHeartbeatRun, AgentBudgetStatus, ModelInfo, MemoryFileInfo, AgentCapability, PluginRuntimeInfo, SkillContent, AgentOnboardingSummary, AgentMailboxResponse, AgentPromptSizePoint } from "../api";
 import { fetchAgent, updateAgent, updateAgentState, deleteAgent, fetchAgentLogsWithMeta, fetchAgentRunLogs, fetchAgentChildren, fetchAgentRuns, fetchAgentRunDetail, startAgentRun, stopAgentRun, updateAgentInstructions, updateAgentSoul, updateAgentMemory, fetchAgentMemoryFiles, fetchAgentMemoryFile, saveAgentMemoryFile, fetchAgentTasks, fetchChainOfCommand, fetchAgentBudgetStatus, resetAgentBudget, fetchWorkspaceFileContent, saveWorkspaceFileContent, fetchModels, fetchPluginRuntimes, fetchAgents, fetchSettingsByScope, upgradeAgentHeartbeatProcedure, fetchSkillContent, uploadAgentAvatar, deleteAgentAvatar, fetchAgentMailbox, markMessageRead, fetchAgentPromptSizes } from "../api";
 import type { Agent } from "../api";
-import type { AgentLogEntry, Task, Message, ParticipantType, AgentPermissionPolicy, AgentPermissionPolicyRules, AgentPermission } from "@fusion/core";
+import type { AgentLogEntry, Task, Message, ParticipantType, AgentPermissionPolicy, AgentPermissionPolicyRules, AgentPermission, ThinkingLevel } from "@fusion/core";
 import { AGENT_PERMISSIONS, getErrorMessage, isEphemeralAgent } from "@fusion/core";
 import { AgentLogViewer } from "./AgentLogViewer";
 import { LoadingSpinner } from "./LoadingSpinner";
@@ -30,11 +30,13 @@ import { CustomModelDropdown } from "./CustomModelDropdown";
 import { useConfirm } from "../hooks/useConfirm";
 import { useModalResizePersist } from "../hooks/useModalResizePersist";
 import { AgentAvatar } from "./AgentAvatar";
+import { FileEditor } from "./FileEditor";
 import { AgentErrorIndicator } from "./AgentErrorDetailsModal";
 import { AgentTaskBadge } from "./AgentTaskBadge";
 import { ExperimentalAgentOnboardingModal } from "./ExperimentalAgentOnboardingModal";
 import { AgentPermissionPolicyEditor } from "./AgentPermissionPolicyEditor";
 import { useFavorites } from "../hooks/useFavorites";
+import { copyTextToClipboard } from "../utils/copyToClipboard";
 
 /**
  * Simple className utility - joins class names conditionally
@@ -641,10 +643,19 @@ export function AgentDetailView({ agentId, projectId, onClose, addToast, onChild
     return getAgentHealthStatus(agent);
   };
 
-  const copyAgentId = () => {
+  /*
+  FNXC:Clipboard 2026-07-12-00:00:
+  Direct navigator.clipboard.writeText crashes or mis-reports on non-secure origins such as mobile http://fusionstudio:4040; copyTextToClipboard centralizes the secure-context guard and execCommand fallback.
+  */
+  const copyAgentId = async () => {
     if (agent) {
-      navigator.clipboard.writeText(agent.id);
-      addToast(t("agents.idCopied", "Agent ID copied to clipboard"), "success");
+      const copied = await copyTextToClipboard(agent.id);
+      addToast(
+        copied
+          ? t("agents.idCopied", "Agent ID copied to clipboard")
+          : t("agents.idCopyFailed", "Failed to copy agent ID"),
+        copied ? "success" : "error"
+      );
     }
   };
 
@@ -2577,7 +2588,6 @@ function MemoryTab({
   const [isSaving, setIsSaving] = useState(false);
   const [justSaved, setJustSaved] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
-  const [showFilePreview, setShowFilePreview] = useState(false);
 
   const [memoryFiles, setMemoryFiles] = useState<MemoryFileInfo[]>([]);
   const [memoryFilesLoading, setMemoryFilesLoading] = useState(false);
@@ -2652,7 +2662,6 @@ function MemoryTab({
     setMemory(agent.memory ?? "");
     setJustSaved(false);
     setShowPreview(false);
-    setShowFilePreview(false);
     setFileSwitchHint("");
     setSelectedFileJustSaved(false);
     void loadMemoryFiles();
@@ -2751,12 +2760,18 @@ function MemoryTab({
             </span>
             <div className="agent-content-toolbar">
               <div className="agent-content-mode-toggle">
+                {/*
+                FNXC:AgentMemory 2026-07-11-00:20:
+                The inline-memory Edit/Preview toggle needs aria-labels distinct from the shared
+                FileEditor toolbar below (which also exposes "Edit mode"/"Preview mode"); two
+                identically-named controls in one tab are ambiguous for assistive tech.
+                */}
                 {!isReadOnly && (
                   <button
                     className={`btn btn-sm ${!showPreview ? "btn-primary" : ""}`}
                     onClick={() => setShowPreview(false)}
                     disabled={!showPreview}
-                    aria-label={t("common.editMode", "Edit mode")}
+                    aria-label={t("agents.inlineMemoryEditMode", "Inline memory edit mode")}
                   >
                     <FileEdit size={14} />
                     {t("common.edit", "Edit")}
@@ -2766,7 +2781,7 @@ function MemoryTab({
                   className={`btn btn-sm ${showPreview ? "btn-primary" : ""}`}
                   onClick={() => setShowPreview(true)}
                   disabled={showPreview}
-                  aria-label={t("common.previewMode", "Preview mode")}
+                  aria-label={t("agents.inlineMemoryPreviewMode", "Inline memory preview mode")}
                 >
                   <Eye size={14} />
                   {t("common.preview", "Preview")}
@@ -2802,6 +2817,34 @@ function MemoryTab({
             )}
             {!showPreview && (
               <span className="config-hint">{t("agents.inlineMemoryFieldHint", "This is the inline memory field on the agent JSON record. Max 50,000 characters.")}</span>
+            )}
+
+            {!showPreview && (
+              <div className="config-actions">
+                <button
+                  className="btn btn-task-create"
+                  disabled={!hasInlineChanges || isSaving || isReadOnly}
+                  onClick={() => void handleSaveInlineMemory()}
+                >
+                  {isSaving ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      {t("common.saving", "Saving…")}
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle size={16} />
+                      {t("agents.saveMemory", "Save Memory")}
+                    </>
+                  )}
+                </button>
+                {!hasInlineChanges && justSaved && (
+                  <span className="config-saved-indicator">
+                    <CheckCircle size={14} />
+                    {t("agents.memorySaved", "Memory saved")}
+                  </span>
+                )}
+              </div>
             )}
           </div>
 
@@ -2845,62 +2888,37 @@ function MemoryTab({
               <div className="config-hint config-hint--top-spacing">
                 <strong>{({ "long-term": t("agents.memoryLayerLongTerm", "Long-term"), daily: t("agents.memoryLayerDaily", "Daily"), dreams: t("agents.memoryLayerDreams", "Dreams") } as Record<string, string>)[selectedMemoryFile.layer] ?? selectedMemoryFile.layer}</strong> · {selectedLayerDescription}
                 <br />
-                {t("agents.memoryFileMeta", "{{size}} bytes · Updated {{time}}", { size: selectedMemoryFile.size.toLocaleString(), time: relativeTime(selectedMemoryFile.updatedAt, t) })}
+                {/*
+                FNXC:AgentMemory 2026-07-11-00:20:
+                i18n fix: every locale defines agents.memoryFileMeta with a {{date}} placeholder, but this
+                call passed the value as {{time}}, so the UI rendered the literal string "updated {{date}}".
+                The interpolation variable must be named `date` to match the locale files.
+                */}
+                {t("agents.memoryFileMeta", "{{size}} bytes · updated {{date}}", { size: selectedMemoryFile.size.toLocaleString(), date: relativeTime(selectedMemoryFile.updatedAt, t) })}
               </div>
             )}
 
-            <div className="agent-content-toolbar config-textarea-top-spacing">
-              <div className="agent-content-mode-toggle">
-                {!isReadOnly && (
-                  <button
-                    className={`btn btn-sm ${!showFilePreview ? "btn-primary" : ""}`}
-                    onClick={() => setShowFilePreview(false)}
-                    disabled={!showFilePreview}
-                    aria-label={t("agents.memoryFileEditMode", "Memory file edit mode")}
-                  >
-                    <FileEdit size={14} />
-                    {t("common.edit", "Edit")}
-                  </button>
-                )}
-                <button
-                  className={`btn btn-sm ${showFilePreview ? "btn-primary" : ""}`}
-                  onClick={() => setShowFilePreview(true)}
-                  disabled={showFilePreview}
-                  aria-label={t("agents.memoryFilePreviewMode", "Memory file preview mode")}
-                >
-                  <Eye size={14} />
-                  {t("common.preview", "Preview")}
-                </button>
-              </div>
-            </div>
-
-            {showFilePreview ? (
-              selectedFileContent.trim() ? (
-                <div className="agent-content-preview markdown-body">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {selectedFileContent}
-                  </ReactMarkdown>
-                </div>
-              ) : (
-                <div className="agent-content-preview agent-content-placeholder">
-                  {t("agents.memoryFileEmptyPreview", "No memory file content yet. Switch to Edit mode to add content.")}
-                </div>
-              )
-            ) : (
-              <textarea
-                className="input config-textarea-mono"
-                rows={14}
-                placeholder={t("agents.memoryFilePlaceholder", "Select a memory file to view and edit its content...")}
-                value={selectedFileContent}
-                readOnly={isReadOnly || !selectedFilePath || selectedFileLoading}
-                onChange={(e) => {
-                  setSelectedFileContent(e.target.value);
+            {/*
+            FNXC:AgentMemory 2026-07-11-00:20:
+            The memory-file editor uses the shared FileEditor (CodeMirror with the Edit/Preview/Wrap
+            toolbar) instead of a bare <textarea> with a hand-rolled Edit/Preview toggle, so agent
+            memory files get the same markdown editing experience as the project Memory view.
+            Toolbar actions stay visible to avoid the unlabeled chevron-only collapsed bar.
+            */}
+            <div className="agent-memory-file-editor config-textarea-top-spacing">
+              <FileEditor
+                content={selectedFileContent}
+                onChange={(content) => {
+                  setSelectedFileContent(content);
                   setSelectedFileDirty(true);
                   setSelectedFileJustSaved(false);
                   setFileSwitchHint("");
                 }}
+                readOnly={isReadOnly || !selectedFilePath || selectedFileLoading}
+                filePath={selectedFilePath || "MEMORY.md"}
+                forceToolbarActionsVisible
               />
-            )}
+            </div>
 
             {selectedFileLoading && (
               <span className="config-hint config-hint--inline-loader">
@@ -2914,60 +2932,39 @@ function MemoryTab({
                 {fileSwitchHint}
               </span>
             )}
-          </div>
-        </div>
 
-        <div className="config-actions">
-          {!showPreview && (
-            <button
-              className="btn btn-task-create"
-              disabled={!hasInlineChanges || isSaving || isReadOnly}
-              onClick={() => void handleSaveInlineMemory()}
-            >
-              {isSaving ? (
-                <>
-                  <Loader2 size={16} className="animate-spin" />
-                  {t("common.saving", "Saving…")}
-                </>
-              ) : (
-                <>
-                  <CheckCircle size={16} />
-                  {t("agents.saveMemory", "Save Memory")}
-                </>
+            {/*
+            FNXC:AgentMemory 2026-07-11-00:20:
+            Each memory surface owns its save action: "Save Memory File" sits directly under the
+            file editor and "Save Inline Memory" under the inline field, instead of the two
+            ambiguously-named buttons sharing one action row at the bottom of the tab.
+            */}
+            <div className="config-actions">
+              <button
+                className="btn btn-task-create"
+                disabled={!selectedFileDirty || savingSelectedFile || !selectedFilePath || isReadOnly}
+                onClick={() => void handleSaveSelectedMemoryFile()}
+              >
+                {savingSelectedFile ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" />
+                    {t("agents.savingFile", "Saving file…")}
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle size={16} />
+                    {t("agents.saveMemoryFile", "Save Memory File")}
+                  </>
+                )}
+              </button>
+              {!selectedFileDirty && selectedFileJustSaved && (
+                <span className="config-saved-indicator">
+                  <CheckCircle size={14} />
+                  {t("agents.memoryFileSaved", "Memory file saved")}
+                </span>
               )}
-            </button>
-          )}
-          {!showFilePreview && (
-            <button
-              className="btn"
-              disabled={!selectedFileDirty || savingSelectedFile || !selectedFilePath || isReadOnly}
-              onClick={() => void handleSaveSelectedMemoryFile()}
-            >
-              {savingSelectedFile ? (
-                <>
-                  <Loader2 size={16} className="animate-spin" />
-                  {t("agents.savingFile", "Saving file…")}
-                </>
-              ) : (
-                <>
-                  <CheckCircle size={16} />
-                  {t("agents.saveMemoryFile", "Save Memory File")}
-                </>
-              )}
-            </button>
-          )}
-          {!hasInlineChanges && justSaved && (
-            <span className="config-saved-indicator">
-              <CheckCircle size={14} />
-              {t("agents.memorySaved", "Memory saved")}
-            </span>
-          )}
-          {!selectedFileDirty && selectedFileJustSaved && (
-            <span className="config-saved-indicator">
-              <CheckCircle size={14} />
-              {t("agents.memoryFileSaved", "Memory file saved")}
-            </span>
-          )}
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -3330,6 +3327,17 @@ function deriveAutoClaimRelevantTasksEnabled(runtimeConfig: AgentDetail["runtime
 
 function deriveEngineerBacklogAutoClaim(runtimeConfig: AgentDetail["runtimeConfig"] | undefined): boolean {
   return runtimeConfig?.engineerBacklogAutoClaim === true;
+}
+
+/*
+FNXC:AgentRouting 2026-07-12-13:50:
+Issue #2015: operators need a per-agent switch that removes an agent from task routing. "auto" (default)
+keeps today's behavior, "explicit-only" blocks automatic assignment/auto-claim, "none" guarantees the agent
+can never be bound to implementation tasks (liaison/observer agents).
+*/
+function deriveAssignmentPolicy(runtimeConfig: AgentDetail["runtimeConfig"] | undefined): "auto" | "explicit-only" | "none" {
+  const raw = runtimeConfig?.assignmentPolicy;
+  return raw === "explicit-only" || raw === "none" ? raw : "auto";
 }
 
 function deriveRunMissedHeartbeatOnStartup(runtimeConfig: AgentDetail["runtimeConfig"] | undefined): boolean {
@@ -3701,6 +3709,7 @@ function ConfigTab({
         initial[field.key] = String(raw);
       }
     }
+    initial.thinkingLevel = typeof agent.runtimeConfig?.thinkingLevel === "string" ? agent.runtimeConfig.thinkingLevel : "off";
     return initial;
   });
 
@@ -3716,6 +3725,9 @@ function ConfigTab({
   );
   const [engineerBacklogAutoClaimEnabled, setEngineerBacklogAutoClaimEnabled] = useState<boolean>(
     () => deriveEngineerBacklogAutoClaim(agent.runtimeConfig),
+  );
+  const [assignmentPolicy, setAssignmentPolicy] = useState<"auto" | "explicit-only" | "none">(
+    () => deriveAssignmentPolicy(agent.runtimeConfig),
   );
   const [runMissedHeartbeatOnStartup, setRunMissedHeartbeatOnStartup] = useState<boolean>(
     () => deriveRunMissedHeartbeatOnStartup(agent.runtimeConfig),
@@ -4033,6 +4045,7 @@ function ConfigTab({
     if (heartbeatEnabled !== deriveHeartbeatEnabled(agent.runtimeConfig)) return true;
     if (autoClaimRelevantTasksEnabled !== deriveAutoClaimRelevantTasksEnabled(agent.runtimeConfig)) return true;
     if (engineerBacklogAutoClaimEnabled !== deriveEngineerBacklogAutoClaim(agent.runtimeConfig)) return true;
+    if (assignmentPolicy !== deriveAssignmentPolicy(agent.runtimeConfig)) return true;
     if (runMissedHeartbeatOnStartup !== deriveRunMissedHeartbeatOnStartup(agent.runtimeConfig)) return true;
     if (allowParallelExecution !== deriveAllowParallelExecution(agent.runtimeConfig)) return true;
     if (skipHeartbeatWhenIdle !== deriveSkipHeartbeatWhenIdle(agent.runtimeConfig)) return true;
@@ -4072,6 +4085,7 @@ function ConfigTab({
     if (runtimeMode !== (initialRuntimeHint ? "runtime" : "model")) return true;
     if (modelValue !== initialModelValue) return true;
     if (selectedRuntimeId !== initialRuntimeHint) return true;
+    if ((formValues.thinkingLevel || "off") !== (typeof rc.thinkingLevel === "string" ? rc.thinkingLevel : "off")) return true;
 
     return false;
   })();
@@ -4118,6 +4132,10 @@ function ConfigTab({
     setSkipHeartbeatWhenIdle(deriveSkipHeartbeatWhenIdle(agent.runtimeConfig));
     setHeartbeatScopeDiscipline(deriveHeartbeatScopeDiscipline(agent.runtimeConfig));
     setBudgetValues(deriveBudgetValues(agent.runtimeConfig));
+    setFormValues((prev) => ({
+      ...prev,
+      thinkingLevel: typeof agent.runtimeConfig?.thinkingLevel === "string" ? agent.runtimeConfig.thinkingLevel : "off",
+    }));
     setModelValue(initialModelValue);
     setSelectedRuntimeId(initialRuntimeHint);
     setRuntimeMode(initialRuntimeHint ? "runtime" : "model");
@@ -4272,6 +4290,11 @@ function ConfigTab({
     newRuntimeConfig.enabled = heartbeatEnabled;
     newRuntimeConfig.autoClaimRelevantTasks = autoClaimRelevantTasksEnabled;
     newRuntimeConfig.engineerBacklogAutoClaim = engineerBacklogAutoClaimEnabled;
+    if (assignmentPolicy === "auto") {
+      delete newRuntimeConfig.assignmentPolicy;
+    } else {
+      newRuntimeConfig.assignmentPolicy = assignmentPolicy;
+    }
     newRuntimeConfig.runMissedHeartbeatOnStartup = runMissedHeartbeatOnStartup;
     newRuntimeConfig.allowParallelExecution = allowParallelExecution;
     newRuntimeConfig.skipHeartbeatWhenIdle = skipHeartbeatWhenIdle;
@@ -4303,6 +4326,9 @@ function ConfigTab({
     } else {
       newRuntimeConfig.heartbeatPromptTemplate = heartbeatPromptTemplate;
     }
+
+    const selectedThinkingLevel = (formValues.thinkingLevel || "off") as ThinkingLevel;
+    newRuntimeConfig.thinkingLevel = selectedThinkingLevel;
 
     if (runtimeMode === "runtime") {
       if (selectedRuntimeId.trim()) {
@@ -4382,7 +4408,7 @@ function ConfigTab({
       runtimeConfig: newRuntimeConfig,
       bundleConfig: newBundleConfig,
     };
-  }, [agent.metadata, agent.runtimeConfig, allowParallelExecution, autoClaimRelevantTasksEnabled, budgetValues, bundleEntryFile, bundleExternalPath, bundleFiles, bundleMode, engineerBacklogAutoClaimEnabled, formValues, heartbeatEnabled, heartbeatPromptTemplate, heartbeatScopeDiscipline, heartbeatValues, iconValue, modelValue, nameValue, reportsToValue, roleValue, runMissedHeartbeatOnStartup, runtimeMode, selectedRuntimeId, selectedSkills, skipHeartbeatWhenIdle, titleValue, validationErrors]);
+  }, [agent.metadata, agent.runtimeConfig, allowParallelExecution, assignmentPolicy, autoClaimRelevantTasksEnabled, budgetValues, bundleEntryFile, bundleExternalPath, bundleFiles, bundleMode, engineerBacklogAutoClaimEnabled, formValues, heartbeatEnabled, heartbeatPromptTemplate, heartbeatScopeDiscipline, heartbeatValues, iconValue, modelValue, nameValue, reportsToValue, roleValue, runMissedHeartbeatOnStartup, runtimeMode, selectedRuntimeId, selectedSkills, skipHeartbeatWhenIdle, titleValue, validationErrors]);
 
   const persistSettings = useCallback(async (showValidationToast: boolean, source: "auto" | "manual") => {
     const payload = buildSavePayload();
@@ -4706,6 +4732,10 @@ function ConfigTab({
 
           {runtimeMode === "model" ? (
             <div className="config-field">
+              {/*
+              FNXC:Settings-ThinkingLevel 2026-07-12-00:00:
+              Agent Detail now lets operators change a built-in agent's persisted runtimeConfig.thinkingLevel after creation through the shared inline model-dropdown control, matching NewAgentDialog's concrete-only agent semantics.
+              */}
               <CustomModelDropdown
                 models={availableModels}
                 value={modelValue}
@@ -4720,6 +4750,11 @@ function ConfigTab({
                 onToggleFavorite={toggleFavoriteProvider}
                 favoriteModels={favoriteModels}
                 onToggleModelFavorite={toggleFavoriteModel}
+                thinkingLevel={formValues.thinkingLevel ?? ""}
+                onThinkingLevelChange={(level) => {
+                  setFormValues((prev) => ({ ...prev, thinkingLevel: level as ThinkingLevel }));
+                  void scheduleAutoSave();
+                }}
               />
             </div>
           ) : (
@@ -4878,6 +4913,24 @@ function ConfigTab({
               {t("agents.engineerBacklogAutoClaim", "Engineer Backlog Auto-Claim")}
             </label>
             <span className="config-hint">{t("agents.engineerBacklogAutoClaimHint", "Per-agent override of the project default. Allows this engineer-role agent to auto-claim unowned backlog tasks; explicit assignment and delegation are unchanged.")}</span>
+          </div>
+
+          {/* FNXC:AgentRouting 2026-07-12-13:55: issue #2015 — per-agent task-routing eligibility (liaison guarantee). */}
+          <div className="config-field">
+            <label htmlFor="hb-assignmentPolicy">{t("agents.assignmentPolicy", "Assignment Policy")}</label>
+            <select
+              id="hb-assignmentPolicy"
+              value={assignmentPolicy}
+              onChange={(e) => {
+                setAssignmentPolicy(e.target.value as "auto" | "explicit-only" | "none");
+                void scheduleAutoSave();
+              }}
+            >
+              <option value="auto">{t("agents.assignmentPolicyAuto", "Auto (default) — eligible for automatic assignment")}</option>
+              <option value="explicit-only">{t("agents.assignmentPolicyExplicitOnly", "Explicit only — never auto-assigned; accepts direct assignment/delegation")}</option>
+              <option value="none">{t("agents.assignmentPolicyNone", "None — can never receive implementation tasks")}</option>
+            </select>
+            <span className="config-hint">{t("agents.assignmentPolicyHint", "Controls whether task routing may bind work to this agent. Use \"None\" for liaison/observer agents that must never execute product tasks — no override can bypass it.")}</span>
           </div>
 
           <div className="config-field">

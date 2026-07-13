@@ -36,6 +36,7 @@ import {
 } from "../api";
 import { MessageComposer } from "./MessageComposer";
 import { MailboxMessageContent } from "./MailboxMessageContent";
+import { MailboxArtifactAttachment } from "./MailboxArtifactAttachment";
 import type { Agent } from "../api";
 import { useMobileScrollLock } from "../hooks/useMobileScrollLock";
 import { useMobileKeyboard } from "../hooks/useMobileKeyboard";
@@ -55,6 +56,7 @@ interface MailboxModalProps {
   onClose: () => void;
   projectId?: string;
   addToast?: (msg: string, type?: "success" | "error") => void;
+  onOpenTask?: (taskId: string) => void;
   agents?: Agent[];
 }
 
@@ -168,6 +170,7 @@ export function MailboxModal({
   onClose,
   projectId,
   addToast,
+  onOpenTask,
   agents = [],
 }: MailboxModalProps) {
   const { t } = useTranslation("app");
@@ -888,6 +891,15 @@ export function MailboxModal({
                           content={msg.content}
                           className="mailbox-conversation-msg-body"
                         />
+                        <MailboxArtifactAttachment
+                          artifactId={msg.metadata?.artifactId}
+                          artifactType={msg.metadata?.artifactType}
+                          title={msg.metadata?.title}
+                          mimeType={msg.metadata?.mimeType}
+                          projectId={projectId}
+                          taskId={msg.metadata?.taskId}
+                          onOpenTask={onOpenTask}
+                        />
                       </div>
                     );
                   })}
@@ -909,6 +921,15 @@ export function MailboxModal({
                     content={selectedMessage.content}
                     className="mailbox-message-body"
                     testId="mailbox-message-body"
+                  />
+                  <MailboxArtifactAttachment
+                    artifactId={selectedMessage.metadata?.artifactId}
+                    artifactType={selectedMessage.metadata?.artifactType}
+                    title={selectedMessage.metadata?.title}
+                    mimeType={selectedMessage.metadata?.mimeType}
+                    projectId={projectId}
+                    taskId={selectedMessage.metadata?.taskId}
+                    onOpenTask={onOpenTask}
                   />
                 </>
               )}

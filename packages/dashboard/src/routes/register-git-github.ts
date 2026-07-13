@@ -1077,6 +1077,36 @@ export async function getGitBranches(cwd?: string): Promise<GitBranch[]> {
   }
 }
 
+/*
+FNXC:MergePush 2026-07-11-22:40:
+The Merge settings push-target dropdown needs the branches that exist ON a given remote.
+Read local remote-tracking refs (refs/remotes/<name>/) instead of `git ls-remote` so the
+listing is instant and offline-safe; a branch created remotely since the last fetch is
+covered by the dropdown's Custom… escape hatch.
+*/
+export async function getGitRemoteBranches(remoteName: string, cwd?: string): Promise<string[]> {
+  try {
+    const output = (await runGitCommand(
+      ["for-each-ref", "--format=%(refname:short)", `refs/remotes/${remoteName}/`],
+      cwd,
+      10000,
+    )).trim();
+    const prefix = `${remoteName}/`;
+    const branches: string[] = [];
+    for (const line of output.split("\n")) {
+      const short = line.trim();
+      if (!short.startsWith(prefix)) continue;
+      const branch = short.slice(prefix.length);
+      // `<remote>/HEAD` is a symbolic pointer, not a pushable branch.
+      if (!branch || branch === "HEAD") continue;
+      branches.push(branch);
+    }
+    return branches;
+  } catch {
+    return [];
+  }
+}
+
 export interface GitWorktree {
   path: string;
   branch?: string;
@@ -3008,6 +3038,31 @@ export function registerGitGitHubRoutes(ctx: ApiRoutesContext): void {
       }
       const commits = await getAheadCommits(rootDir);
       res.json(commits);
+    } catch (err: unknown) {
+      if (err instanceof ApiError) {
+        throw err;
+      }
+      rethrowAsApiError(err);
+    }
+  });
+
+  /**
+   * GET /api/git/remotes/:name/branches
+   * Returns branch names known on a specific remote (from local remote-tracking refs).
+   * Response: string[] (e.g. ["main", "develop"]) — excludes the HEAD symbolic ref.
+   */
+  router.get("/git/remotes/:name/branches", async (req, res) => {
+    try {
+      const { store: scopedStore } = await getProjectContext(req);
+      const rootDir = resolveGitDir(req, scopedStore.getRootDir());
+      if (!(await isGitRepo(rootDir))) {
+        throw badRequest("Not a git repository");
+      }
+      const { name } = req.params;
+      if (!isValidBranchName(name)) {
+        throw badRequest("Invalid remote name");
+      }
+      res.json(await getGitRemoteBranches(name, rootDir));
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         throw err;

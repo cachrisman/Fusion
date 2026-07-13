@@ -90,7 +90,7 @@ import {
   reconcileHooksRemaining,
 } from "./transition-pending.js";
 import { BUILTIN_CODING_WORKFLOW_IR } from "./builtin-coding-workflow-ir.js";
-import type { WorkflowIr, WorkflowIrColumn, WorkflowFieldDefinition, WorkflowSettingDefinition } from "./workflow-ir-types.js";
+import type { WorkflowIr, WorkflowIrColumn, WorkflowIrV2, WorkflowFieldDefinition, WorkflowSettingDefinition } from "./workflow-ir-types.js";
 import { getWorkflowExtensionRegistry } from "./workflow-extension-registry.js";
 import type { WorkflowMovePolicyInput } from "./workflow-extension-types.js";
 import {
@@ -143,7 +143,7 @@ import { validateLocale } from "./settings-validation.js";
 import { normalizeTaskPriority } from "./task-priority.js";
 import { validateBranchGroupBranchName, filterTasksByBranchGroup } from "./branch-assignment.js";
 import { allowsAutoMergeProcessing } from "./task-merge.js";
-import { canAgentTakeImplementationTaskForExplicitRouting } from "./agent-role-policy.js";
+import { evaluateImplementationTaskBind } from "./agent-role-policy.js";
 import { GlobalSettingsStore, resolveGlobalDir } from "./global-settings.js";
 import { Database, SCHEMA_VERSION, toJson, toJsonNullable, fromJson } from "./db.js";
 import { ArchiveDatabase } from "./archive-db.js";
@@ -211,6 +211,7 @@ import {
 } from "./task-id-integrity.js";
 import {
   buildBootstrapPrompt,
+  buildRefinementSeedPrompt,
   replicationCollisionError,
   taskMatchesReplicatedCreate,
 } from "./mesh-task-replication.js";
@@ -251,9 +252,11 @@ interface TaskRow {
   workflowStepRetries: number | null;
   stuckKillCount: number | null;
   resumeLimboCount: number | null;
+  executeRequeueLoopCount: number | null;
   graphResumeRetryCount: number | null;
   resumeLimboTipSha: string | null;
   resumeLimboStepSignature: string | null;
+  executeRequeueLoopSignature: string | null;
   postReviewFixCount: number | null;
   recoveryRetryCount: number | null;
   taskDoneRetryCount: number | null;
@@ -270,6 +273,8 @@ interface TaskRow {
   error: string | null;
   summary: string | null;
   thinkingLevel: string | null;
+  validatorThinkingLevel: string | null;
+  planningThinkingLevel: string | null;
   executionMode: string | null;
   plannerOversightLevel: string | null;
   awaitingApprovalReason: string | null;
@@ -419,9 +424,11 @@ const TASK_COLUMN_DESCRIPTORS: TaskColumnDescriptor[] = [
   defineTaskColumn("workflowStepRetries", (task) => task.workflowStepRetries ?? null),
   defineTaskColumn("stuckKillCount", (task) => task.stuckKillCount ?? 0),
   defineTaskColumn("resumeLimboCount", (task) => task.resumeLimboCount ?? 0),
+  defineTaskColumn("executeRequeueLoopCount", (task) => task.executeRequeueLoopCount ?? 0),
   defineTaskColumn("graphResumeRetryCount", (task) => task.graphResumeRetryCount === undefined ? 0 : task.graphResumeRetryCount),
   defineTaskColumn("resumeLimboTipSha", (task) => task.resumeLimboTipSha ?? null),
   defineTaskColumn("resumeLimboStepSignature", (task) => task.resumeLimboStepSignature ?? null),
+  defineTaskColumn("executeRequeueLoopSignature", (task) => task.executeRequeueLoopSignature ?? null),
   defineTaskColumn("postReviewFixCount", (task) => task.postReviewFixCount ?? 0),
   defineTaskColumn("recoveryRetryCount", (task) => task.recoveryRetryCount ?? null),
   defineTaskColumn("taskDoneRetryCount", (task) => task.taskDoneRetryCount ?? 0),
@@ -438,6 +445,8 @@ const TASK_COLUMN_DESCRIPTORS: TaskColumnDescriptor[] = [
   defineTaskColumn("error", (task) => task.error ?? null),
   defineTaskColumn("summary", (task) => task.summary ?? null),
   defineTaskColumn("thinkingLevel", (task) => task.thinkingLevel ?? null),
+  defineTaskColumn("validatorThinkingLevel", (task) => task.validatorThinkingLevel ?? null),
+  defineTaskColumn("planningThinkingLevel", (task) => task.planningThinkingLevel ?? null),
   defineTaskColumn("executionMode", (task) => task.executionMode ?? null),
   defineTaskColumn("plannerOversightLevel", (task) => task.plannerOversightLevel ?? null),
   /*
@@ -1463,6 +1472,15 @@ interface MoveTaskOptions {
   preserveProgress?: boolean;
   preserveWorktree?: boolean;
   preserveStatus?: boolean;
+  /**
+   * FNXC:WorkflowLifecycle 2026-07-12-09:05:
+   * Keep `paused`/`pausedByAgentId`/`pausedReason` (and any existing
+   * `userPaused`) across a reopen-to-todo/triage move. Used by the executor's
+   * pause teardown so a user pause survives its own hard-cancel re-queue and
+   * the row stays parked until an explicit unpause (FN-7851 pause-bounce loop).
+   * Never SETS a pause — only prevents the reopen block from clearing one.
+   */
+  preservePause?: boolean;
   allocateWorktree?: (reservedNames: Set<string>) => string | null;
   moveSource?: "user" | "engine" | "scheduler";
   workflowMoveActor?: WorkflowMovePolicyInput["actor"];
@@ -2099,24 +2117,60 @@ export class TaskStore extends EventEmitter<TaskStoreEvents> {
       });
     }
 
-    // U12: workflow-columns integrity pass. When the flag is ON, audit + re-home
-    // any task whose stored column is no longer valid in its resolved workflow
-    // (KTD-1 guarantees zero rewrites for healthy legacy rows, so this is a
-    // no-op for the common case). Idempotent; non-fatal — never blocks startup.
+    /*
+    FNXC:RunAudit 2026-07-13-13:10:
+    Store-open provenance stamp. Every store open runs the init recovery passes below against
+    the SHARED project DB, and a store open by a stale binary is how the FN-7910 incident
+    happened (a pre-fix process's init evacuated Ideas cards; the run-audit row said only
+    agentId:"system", so the writer could not be identified after the fact). Stamp pid /
+    parent pid / executable / entry script / cwd / node version — ids/paths only, no prose —
+    so any future mystery mutation can be attributed to the process that opened the store.
+    Best-effort: a failed stamp never blocks startup.
+    */
     try {
-      const settings = await this.getSettingsFast();
-      if (isWorkflowColumnsCompatibilityFlagEnabled(settings)) {
-        await this.runWorkflowColumnsIntegrityPass();
-        // #1401: recover any transitionPending markers stranded by a crash
-        // between the in-txn write and the post-commit clear (they otherwise
-        // permanently inflate capacity counts for their target column).
-        await this.recoverStaleTransitionPending();
-      } else {
-        // #1409: flag-OFF init — evacuate any card stuck in a non-legacy column
-        // (e.g. the flag was toggled OFF out-of-process while a card sat in a
-        // custom column) so the board stays listable and moves work.
-        await this.evacuateCustomColumnsToLegacy("flag-off-init");
-      }
+      this.insertRunAuditEventRow({
+        agentId: "store",
+        domain: "database",
+        mutationType: "store:open",
+        target: this.rootDir,
+        metadata: {
+          pid: process.pid,
+          ppid: process.ppid,
+          execPath: process.execPath,
+          entry: process.argv[1] ?? null,
+          cwd: process.cwd(),
+          nodeVersion: process.version,
+        },
+      });
+    } catch (err) {
+      storeLog.warn("store-open provenance stamp failed during init", {
+        phase: "init:store-open-stamp",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // U12: workflow-columns integrity pass. Audit + re-home any task whose
+    // stored column is no longer valid in its resolved workflow (KTD-1
+    // guarantees zero rewrites for healthy legacy rows, so this is a no-op for
+    // the common case). Idempotent; non-fatal — never blocks startup.
+    /*
+    FNXC:WorkflowColumns 2026-07-12-22:40:
+    Workflow columns graduated to always-on at runtime (isWorkflowColumnsEnabled), so init must
+    ALWAYS run the workflow-aware integrity pass and must NEVER run the #1409 flag-OFF
+    evacuation. The retired experimental flag is absent (reads false) for virtually every
+    install, so the old flag-keyed branch ran evacuateCustomColumnsToLegacy("flag-off-init")
+    on EVERY store open: it declared healthy custom intake columns (e.g. Coding (Ideas)'s
+    "ideas") invalid and dumped their cards into "triage", where the triage service
+    auto-planned and executed work the operator had deliberately parked. The integrity pass
+    validates each card against its OWN resolved workflow, so custom-column cards are left
+    put. The evacuation now runs only on an explicit ON→OFF settings toggle.
+    */
+    try {
+      await this.runWorkflowColumnsIntegrityPass();
+      // #1401: recover any transitionPending markers stranded by a crash
+      // between the in-txn write and the post-commit clear (they otherwise
+      // permanently inflate capacity counts for their target column).
+      await this.recoverStaleTransitionPending();
     } catch (err) {
       storeLog.warn("workflowColumns integrity pass failed during init", {
         phase: "init:workflow-columns-integrity",
@@ -2170,9 +2224,11 @@ export class TaskStore extends EventEmitter<TaskStoreEvents> {
       workflowStepRetries: row.workflowStepRetries ?? undefined,
       stuckKillCount: row.stuckKillCount ?? undefined,
       resumeLimboCount: row.resumeLimboCount ?? undefined,
+      executeRequeueLoopCount: row.executeRequeueLoopCount ?? undefined,
       graphResumeRetryCount: row.graphResumeRetryCount ?? undefined,
       resumeLimboTipSha: row.resumeLimboTipSha || undefined,
       resumeLimboStepSignature: row.resumeLimboStepSignature || undefined,
+      executeRequeueLoopSignature: row.executeRequeueLoopSignature || undefined,
       postReviewFixCount: row.postReviewFixCount ?? undefined,
       recoveryRetryCount: row.recoveryRetryCount ?? undefined,
       taskDoneRetryCount: row.taskDoneRetryCount ?? undefined,
@@ -2189,6 +2245,8 @@ export class TaskStore extends EventEmitter<TaskStoreEvents> {
       error: row.error || undefined,
       summary: row.summary || undefined,
       thinkingLevel: (row.thinkingLevel || undefined) as Task["thinkingLevel"],
+      validatorThinkingLevel: (row.validatorThinkingLevel || undefined) as Task["validatorThinkingLevel"],
+      planningThinkingLevel: (row.planningThinkingLevel || undefined) as Task["planningThinkingLevel"],
       executionMode: (row.executionMode || undefined) as Task["executionMode"],
       plannerOversightLevel: (row.plannerOversightLevel || undefined) as Task["plannerOversightLevel"],
       awaitingApprovalReason: (row.awaitingApprovalReason || undefined) as Task["awaitingApprovalReason"],
@@ -2756,8 +2814,8 @@ export class TaskStore extends EventEmitter<TaskStoreEvents> {
       "modelPresetId", "modelProvider", "modelId",
       "validatorModelProvider", "validatorModelId",
       "planningModelProvider", "planningModelId",
-      "mergeRetries", "workflowStepRetries", "stuckKillCount", "resumeLimboCount", "graphResumeRetryCount", "resumeLimboTipSha", "resumeLimboStepSignature", "postReviewFixCount", "recoveryRetryCount", "taskDoneRetryCount", "worktreeSessionRetryCount", "completionHandoffLimboRecoveryCount", "verificationFailureCount", "mergeConflictBounceCount", "mergeAuditBounceCount", "mergeTransientRetryCount", "branchConflictRecoveryCount", "reviewerContextRetryCount", "reviewerFallbackRetryCount", "nextRecoveryAt",
-      "error", "summary", "thinkingLevel", "executionMode", "plannerOversightLevel", "awaitingApprovalReason", "approvedPlanFingerprint",
+      "mergeRetries", "workflowStepRetries", "stuckKillCount", "resumeLimboCount", "executeRequeueLoopCount", "graphResumeRetryCount", "resumeLimboTipSha", "resumeLimboStepSignature", "executeRequeueLoopSignature", "postReviewFixCount", "recoveryRetryCount", "taskDoneRetryCount", "worktreeSessionRetryCount", "completionHandoffLimboRecoveryCount", "verificationFailureCount", "mergeConflictBounceCount", "mergeAuditBounceCount", "mergeTransientRetryCount", "branchConflictRecoveryCount", "reviewerContextRetryCount", "reviewerFallbackRetryCount", "nextRecoveryAt",
+      "error", "summary", "thinkingLevel", "validatorThinkingLevel", "planningThinkingLevel", "executionMode", "plannerOversightLevel", "awaitingApprovalReason", "approvedPlanFingerprint",
       "tokenUsageInputTokens", "tokenUsageOutputTokens", "tokenUsageCachedTokens", "tokenUsageCacheWriteTokens", "tokenUsageTotalTokens", "tokenUsageFirstUsedAt", "tokenUsageLastUsedAt", "tokenUsageModelProvider", "tokenUsageModelId", "tokenUsagePerModel", "tokenBudgetSoftAlertedAt", "tokenBudgetHardAlertedAt", "tokenBudgetOverride",
       "createdAt", "updatedAt", "columnMovedAt", "firstExecutionAt", "cumulativeActiveMs", "columnDwellMs", "executionStartedAt", "executionCompletedAt",
       "dependencies", "steps", "customFields", "comments", "review", "reviewState", "workflowStepResults", "steeringComments",
@@ -2852,8 +2910,8 @@ export class TaskStore extends EventEmitter<TaskStoreEvents> {
       "modelPresetId", "modelProvider", "modelId",
       "validatorModelProvider", "validatorModelId",
       "planningModelProvider", "planningModelId",
-      "mergeRetries", "workflowStepRetries", "stuckKillCount", "resumeLimboCount", "graphResumeRetryCount", "resumeLimboTipSha", "resumeLimboStepSignature", "postReviewFixCount", "recoveryRetryCount", "taskDoneRetryCount", "worktreeSessionRetryCount", "completionHandoffLimboRecoveryCount", "verificationFailureCount", "mergeConflictBounceCount", "mergeAuditBounceCount", "mergeTransientRetryCount", "branchConflictRecoveryCount", "reviewerContextRetryCount", "reviewerFallbackRetryCount", "nextRecoveryAt",
-      "error", "summary", "thinkingLevel", "executionMode", "plannerOversightLevel", "awaitingApprovalReason", "approvedPlanFingerprint",
+      "mergeRetries", "workflowStepRetries", "stuckKillCount", "resumeLimboCount", "executeRequeueLoopCount", "graphResumeRetryCount", "resumeLimboTipSha", "resumeLimboStepSignature", "executeRequeueLoopSignature", "postReviewFixCount", "recoveryRetryCount", "taskDoneRetryCount", "worktreeSessionRetryCount", "completionHandoffLimboRecoveryCount", "verificationFailureCount", "mergeConflictBounceCount", "mergeAuditBounceCount", "mergeTransientRetryCount", "branchConflictRecoveryCount", "reviewerContextRetryCount", "reviewerFallbackRetryCount", "nextRecoveryAt",
+      "error", "summary", "thinkingLevel", "validatorThinkingLevel", "planningThinkingLevel", "executionMode", "plannerOversightLevel", "awaitingApprovalReason", "approvedPlanFingerprint",
       "tokenUsageInputTokens", "tokenUsageOutputTokens", "tokenUsageCachedTokens", "tokenUsageCacheWriteTokens", "tokenUsageTotalTokens", "tokenUsageFirstUsedAt", "tokenUsageLastUsedAt", "tokenUsageModelProvider", "tokenUsageModelId", "tokenUsagePerModel", "tokenBudgetSoftAlertedAt", "tokenBudgetHardAlertedAt", "tokenBudgetOverride",
       "createdAt", "updatedAt", "columnMovedAt", "firstExecutionAt", "cumulativeActiveMs", "columnDwellMs", "executionStartedAt", "executionCompletedAt",
       "dependencies", "steps", "customFields", "attachments", "steeringComments",
@@ -5121,6 +5179,8 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
       planningModelProvider: input.planningModelProvider,
       planningModelId: input.planningModelId,
       thinkingLevel: input.thinkingLevel,
+      validatorThinkingLevel: input.validatorThinkingLevel,
+      planningThinkingLevel: input.planningThinkingLevel,
       reviewLevel: input.reviewLevel,
       executionMode: input.executionMode,
       plannerOversightLevel: input.plannerOversightLevel,
@@ -5496,7 +5556,9 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
         Refinements keep the source task's explicit workflow selection, reseeded from the current workflow definition, so returning from a non-default workflow does not hide the new refinement on the default board. The task row and workflow-selection row are written in one SQLite transaction so creation cannot strand a refinement without its intended board lane.
         */
         await this.atomicCreateTaskJson(newDir, newTask, "refineTask", reservationCommit, inheritedWorkflowSelection);
-        const prompt = `# ${newTask.title}\n\n${newTask.description}\n`;
+        // Shared builder: isUnplannedSeedPrompt detects this exact shape so promoted
+        // refinements are planned instead of executing the feedback text as a spec.
+        const prompt = buildRefinementSeedPrompt(newTask.title ?? newId, newTask.description);
         const sanitizedPrompt = sanitizeFileScopeInPromptContent(prompt);
         await mkdir(newDir, { recursive: true });
         await writeFile(join(newDir, "PROMPT.md"), sanitizedPrompt.sanitized);
@@ -7223,7 +7285,7 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
 
   async selectNextTaskForAgent(
     agentId: string,
-    agent?: Pick<Agent, "id" | "role">,
+    agent?: Pick<Agent, "id" | "role"> & Partial<Pick<Agent, "runtimeConfig">>,
   ): Promise<InboxTask | null> {
     const hasExecutorRoleOverride = (task: Task): boolean => task.sourceMetadata?.executorRoleOverride === true;
     const tasks = await this.listTasks({ slim: true });
@@ -7240,9 +7302,26 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
       return aSortAt.localeCompare(bSortAt);
     };
 
+    /*
+    FNXC:AgentRouting 2026-07-12-12:05:
+    FN-7851 / issue #2015: the in-progress branch used to return unconditionally, so a task mis-bound to a
+    role-incompatible or policy-excluded agent was re-selected on every heartbeat forever (the NEXT-871 liaison
+    loop). Route BOTH branches through the shared bind evaluator. executorRoleOverride still bypasses the role
+    check but never assignmentPolicy "none" — that is the hard liaison guarantee.
+    */
+    const isBindCompatible = (task: Task): boolean => {
+      if (!agent) return true;
+      return evaluateImplementationTaskBind(agent, task, {
+        explicitRouting: true,
+        executorRoleOverride: hasExecutorRoleOverride(task),
+      }).allowed;
+    };
+
     const assignedTasks = tasks.filter((task) => task.assignedAgentId === agentId);
 
-    const inProgress = assignedTasks.filter((task) => task.column === "in-progress").sort(sortByOldestColumnMove);
+    const inProgress = assignedTasks
+      .filter((task) => task.column === "in-progress" && isBindCompatible(task))
+      .sort(sortByOldestColumnMove);
     if (inProgress.length > 0) {
       return {
         task: inProgress[0],
@@ -7251,14 +7330,7 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
       };
     }
 
-    const roleCompatibleAssignedTasks = agent
-      ? assignedTasks.filter((task) => {
-          if (task.column === "in-progress" || hasExecutorRoleOverride(task)) {
-            return true;
-          }
-          return canAgentTakeImplementationTaskForExplicitRouting(agent, task);
-        })
-      : assignedTasks;
+    const roleCompatibleAssignedTasks = assignedTasks.filter(isBindCompatible);
 
     const todoCandidates = roleCompatibleAssignedTasks.filter((task) => task.column === "todo" && task.paused !== true);
 
@@ -7827,7 +7899,21 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
         options?.recoveryRehome === true &&
         sourceIsLegacy &&
         (COLUMNS as readonly string[]).includes(toColumn);
-      if (!isEvacuation && !isLegacyRecoveryRehome) {
+      /*
+      FNXC:WorkflowColumns 2026-07-13-11:50:
+      Third recoveryRehome carve-out: a recovery move INTO a custom column the task's OWN
+      workflow declares (e.g. the integrity pass re-homing a workflow-edit orphan to a custom
+      entry column). The two carve-outs above only cover legacy targets, so on flag-absent
+      installs (this branch is the default path) every custom-target repair threw the legacy
+      "Invalid transition" Error, which rehomeOccupant swallowed as moved:false — the repair
+      silently no-oped on every store open. Recovery-only, so normal flag-OFF moves keep the
+      characterization contract byte-identical.
+      */
+      const isWorkflowDeclaredRecoveryRehome =
+        options?.recoveryRehome === true &&
+        !(COLUMNS as readonly string[]).includes(toColumn) &&
+        workflowHasColumn(this.resolveTaskWorkflowIrSync(id), toColumn);
+      if (!isEvacuation && !isLegacyRecoveryRehome && !isWorkflowDeclaredRecoveryRehome) {
         /*
         FNXC:WorkflowColumns 2026-07-05-19:30:
         Workflow columns graduated to always-on (no experimental flag emitted), so this "flag-OFF"
@@ -7912,6 +7998,7 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
           preserveResumeState: options?.preserveResumeState,
           preserveProgress: options?.preserveProgress,
           preserveWorktree: options?.preserveWorktree,
+          preservePause: options?.preservePause,
         },
         resetSteps: () => this.resetAllStepsToPending(task),
       };
@@ -7973,18 +8060,26 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
         && (toColumn === "todo" || toColumn === "triage");
 
       if (isReopenToTodoOrTriage) {
+        // FNXC:WorkflowLifecycle 2026-07-12-09:05: keep this flag-OFF inline
+        // block in sync with applyResetOnEntryEffects (default-workflow-hooks.ts)
+        // — `preservePause` keeps a pause-caused teardown move from clearing the
+        // user's park (FN-7851 pause-bounce loop).
         if (!options?.preserveStatus) {
           task.status = undefined;
           task.error = undefined;
-          task.pausedReason = undefined;
+          if (!options?.preservePause) {
+            task.pausedReason = undefined;
+          }
         }
         task.blockedBy = undefined;
         task.overlapBlockedBy = undefined;
-        task.paused = undefined;
-        task.pausedByAgentId = undefined;
+        if (!options?.preservePause) {
+          task.paused = undefined;
+          task.pausedByAgentId = undefined;
+        }
         if (moveSource === "user" && toColumn === "todo") {
           task.userPaused = true;
-        } else {
+        } else if (!options?.preservePause) {
           task.userPaused = undefined;
         }
 
@@ -8596,7 +8691,7 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
 
   async updateTask(
     id: string,
-    updates: { title?: string; description?: string; priority?: TaskPriority | null; prompt?: string; worktree?: string | null; workspaceWorktrees?: import("./types.js").Task["workspaceWorktrees"]; status?: string | null; dependencies?: string[]; steps?: import("./types.js").TaskStep[]; customFields?: Record<string, unknown>; currentStep?: number; blockedBy?: string | null; overlapBlockedBy?: string | null; assignedAgentId?: string | null; pausedByAgentId?: string | null; pausedReason?: string | null; tokenBudgetSoftAlertedAt?: string | null; worktrunkFallbackAlertedAt?: string | null; worktrunkFailure?: import("./types.js").Task["worktrunkFailure"] | null; tokenBudgetHardAlertedAt?: string | null; tokenBudgetOverride?: import("./types.js").TaskTokenBudgetOverride | null; dispatchStormCount?: number | null; lastDispatchAt?: string | null; assigneeUserId?: string | null; scopeOverride?: boolean | null; scopeOverrideReason?: string | null; scopeAutoWiden?: string[] | null; nodeId?: string | null; effectiveNodeId?: string | null; effectiveNodeSource?: string | null; checkedOutBy?: string | null; checkedOutAt?: string | null; checkoutNodeId?: string | null; checkoutRunId?: string | null; checkoutLeaseRenewedAt?: string | null; checkoutLeaseEpoch?: number | null; paused?: boolean; baseBranch?: string | null; autoMerge?: boolean | null; branch?: string | null; executionStartBranch?: string | null; baseCommitSha?: string | null; size?: "S" | "M" | "L"; reviewLevel?: number; executionMode?: import("./types.js").ExecutionMode | null; plannerOversightLevel?: import("./types.js").PlannerOversightLevel | null; awaitingApprovalReason?: import("./types.js").Task["awaitingApprovalReason"] | null; approvedPlanFingerprint?: string | null; mergeRetries?: number; workflowStepRetries?: number; stuckKillCount?: number | null; resumeLimboCount?: number | null; graphResumeRetryCount?: number | null; resumeLimboTipSha?: string | null; resumeLimboStepSignature?: string | null; postReviewFixCount?: number | null; recoveryRetryCount?: number | null; taskDoneRetryCount?: number | null; worktreeSessionRetryCount?: number | null; completionHandoffLimboRecoveryCount?: number | null; verificationFailureCount?: number | null; mergeConflictBounceCount?: number | null; mergeAuditBounceCount?: number | null; mergeTransientRetryCount?: number | null; branchConflictRecoveryCount?: number | null; reviewerContextRetryCount?: number | null; reviewerFallbackRetryCount?: number | null; nextRecoveryAt?: string | null; enabledWorkflowSteps?: string[]; noCommitsExpected?: boolean | null; modelProvider?: string | null; modelId?: string | null; validatorModelProvider?: string | null; validatorModelId?: string | null; planningModelProvider?: string | null; planningModelId?: string | null; thinkingLevel?: string | null; error?: string | null; summary?: string | null; sessionFile?: string | null; firstExecutionAt?: string | null; cumulativeActiveMs?: number | null; executionStartedAt?: string | null; executionCompletedAt?: string | null; review?: import("./types.js").TaskReview | null; reviewState?: import("./types.js").TaskReviewState | null; workflowStepResults?: import("./types.js").WorkflowStepResult[] | null; mergeDetails?: import("./types.js").MergeDetails | null; sourceIssue?: import("./types.js").TaskSourceIssue | null; sourceMetadataPatch?: Record<string, unknown> | null; githubTracking?: import("./types.js").TaskGithubTracking | null; gitlabTracking?: (Omit<import("./types.js").TaskGitLabTracking, "item"> & { item?: import("./types.js").TaskGitLabTrackedItem | null }) | null; tokenUsage?: import("./types.js").TaskTokenUsage | null; modifiedFiles?: string[] | null; workflowTransitionNotification?: import("./types.js").Task["workflowTransitionNotification"] | null; missionId?: string | null; sliceId?: string | null },
+    updates: { title?: string; description?: string; priority?: TaskPriority | null; prompt?: string; worktree?: string | null; workspaceWorktrees?: import("./types.js").Task["workspaceWorktrees"]; status?: string | null; dependencies?: string[]; steps?: import("./types.js").TaskStep[]; customFields?: Record<string, unknown>; currentStep?: number; blockedBy?: string | null; overlapBlockedBy?: string | null; assignedAgentId?: string | null; pausedByAgentId?: string | null; pausedReason?: string | null; tokenBudgetSoftAlertedAt?: string | null; worktrunkFallbackAlertedAt?: string | null; worktrunkFailure?: import("./types.js").Task["worktrunkFailure"] | null; tokenBudgetHardAlertedAt?: string | null; tokenBudgetOverride?: import("./types.js").TaskTokenBudgetOverride | null; dispatchStormCount?: number | null; lastDispatchAt?: string | null; assigneeUserId?: string | null; scopeOverride?: boolean | null; scopeOverrideReason?: string | null; scopeAutoWiden?: string[] | null; nodeId?: string | null; effectiveNodeId?: string | null; effectiveNodeSource?: string | null; checkedOutBy?: string | null; checkedOutAt?: string | null; checkoutNodeId?: string | null; checkoutRunId?: string | null; checkoutLeaseRenewedAt?: string | null; checkoutLeaseEpoch?: number | null; paused?: boolean; baseBranch?: string | null; autoMerge?: boolean | null; branch?: string | null; executionStartBranch?: string | null; baseCommitSha?: string | null; size?: "S" | "M" | "L"; reviewLevel?: number; executionMode?: import("./types.js").ExecutionMode | null; plannerOversightLevel?: import("./types.js").PlannerOversightLevel | null; awaitingApprovalReason?: import("./types.js").Task["awaitingApprovalReason"] | null; approvedPlanFingerprint?: string | null; mergeRetries?: number; workflowStepRetries?: number; stuckKillCount?: number | null; resumeLimboCount?: number | null; executeRequeueLoopCount?: number | null; graphResumeRetryCount?: number | null; resumeLimboTipSha?: string | null; resumeLimboStepSignature?: string | null; executeRequeueLoopSignature?: string | null; postReviewFixCount?: number | null; recoveryRetryCount?: number | null; taskDoneRetryCount?: number | null; worktreeSessionRetryCount?: number | null; completionHandoffLimboRecoveryCount?: number | null; verificationFailureCount?: number | null; mergeConflictBounceCount?: number | null; mergeAuditBounceCount?: number | null; mergeTransientRetryCount?: number | null; branchConflictRecoveryCount?: number | null; reviewerContextRetryCount?: number | null; reviewerFallbackRetryCount?: number | null; nextRecoveryAt?: string | null; enabledWorkflowSteps?: string[]; noCommitsExpected?: boolean | null; modelProvider?: string | null; modelId?: string | null; validatorModelProvider?: string | null; validatorModelId?: string | null; planningModelProvider?: string | null; planningModelId?: string | null; thinkingLevel?: string | null; validatorThinkingLevel?: string | null; planningThinkingLevel?: string | null; error?: string | null; summary?: string | null; sessionFile?: string | null; firstExecutionAt?: string | null; cumulativeActiveMs?: number | null; executionStartedAt?: string | null; executionCompletedAt?: string | null; review?: import("./types.js").TaskReview | null; reviewState?: import("./types.js").TaskReviewState | null; workflowStepResults?: import("./types.js").WorkflowStepResult[] | null; mergeDetails?: import("./types.js").MergeDetails | null; sourceIssue?: import("./types.js").TaskSourceIssue | null; sourceMetadataPatch?: Record<string, unknown> | null; githubTracking?: import("./types.js").TaskGithubTracking | null; gitlabTracking?: (Omit<import("./types.js").TaskGitLabTracking, "item"> & { item?: import("./types.js").TaskGitLabTrackedItem | null }) | null; tokenUsage?: import("./types.js").TaskTokenUsage | null; modifiedFiles?: string[] | null; workflowTransitionNotification?: import("./types.js").Task["workflowTransitionNotification"] | null; missionId?: string | null; sliceId?: string | null },
     runContext?: RunMutationContext,
   ): Promise<Task> {
     /*
@@ -9342,6 +9437,11 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
       } else if (updates.resumeLimboCount !== undefined) {
         task.resumeLimboCount = updates.resumeLimboCount;
       }
+      if (updates.executeRequeueLoopCount === null) {
+        task.executeRequeueLoopCount = undefined;
+      } else if (updates.executeRequeueLoopCount !== undefined) {
+        task.executeRequeueLoopCount = updates.executeRequeueLoopCount;
+      }
       if (updates.graphResumeRetryCount === null) {
         task.graphResumeRetryCount = null;
       } else if (updates.graphResumeRetryCount !== undefined) {
@@ -9356,6 +9456,11 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
         task.resumeLimboStepSignature = undefined;
       } else if (updates.resumeLimboStepSignature !== undefined) {
         task.resumeLimboStepSignature = updates.resumeLimboStepSignature;
+      }
+      if (updates.executeRequeueLoopSignature === null) {
+        task.executeRequeueLoopSignature = undefined;
+      } else if (updates.executeRequeueLoopSignature !== undefined) {
+        task.executeRequeueLoopSignature = updates.executeRequeueLoopSignature;
       }
       if (updates.postReviewFixCount === null) {
         task.postReviewFixCount = undefined;
@@ -9470,6 +9575,16 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
         task.thinkingLevel = undefined;
       } else if (updates.thinkingLevel !== undefined) {
         task.thinkingLevel = updates.thinkingLevel as import("./types.js").ThinkingLevel;
+      }
+      if (updates.validatorThinkingLevel === null) {
+        task.validatorThinkingLevel = undefined;
+      } else if (updates.validatorThinkingLevel !== undefined) {
+        task.validatorThinkingLevel = updates.validatorThinkingLevel as import("./types.js").ThinkingLevel;
+      }
+      if (updates.planningThinkingLevel === null) {
+        task.planningThinkingLevel = undefined;
+      } else if (updates.planningThinkingLevel !== undefined) {
+        task.planningThinkingLevel = updates.planningThinkingLevel as import("./types.js").ThinkingLevel;
       }
       if (updates.executionMode === null) {
         task.executionMode = undefined;
@@ -9695,6 +9810,7 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
           previousPrompt = "";
         }
         const validation = validateNewlyIntroducedFileScope(previousPrompt, updates.prompt);
+
         if (validation.invalid.length > 0) {
           throw new InvalidFileScopeError(id, validation.invalid);
         }
@@ -16396,18 +16512,63 @@ ${stepsSection}`;
     let rehomed = 0;
     let skippedTerminal = 0;
 
+    /*
+    FNXC:WorkflowColumns 2026-07-13-11:40:
+    This pass runs at EVERY store open (workflow columns are graduated/always-on), so it must
+    stay cheap on healthy DBs: select only id+column (the pass reads nothing else per row —
+    the old per-task full-row hydrate paid N JSON parses for a two-column need) and memoize
+    the resolved IR per selection workflow id (a board has a handful of workflows; the old
+    per-task resolveTaskWorkflowIrSync re-parsed/rebuilt the same IR N times).
+    */
     const rows = this.db
-      .prepare(`SELECT id FROM tasks WHERE "deletedAt" IS NULL`)
-      .all() as Array<{ id: string }>;
+      .prepare(`SELECT id, "column" AS col FROM tasks WHERE "deletedAt" IS NULL`)
+      .all() as Array<{ id: string; col: string }>;
 
     const registry = getTraitRegistry();
 
-    for (const { id } of rows) {
+    const irCache = new Map<string, WorkflowIr>();
+    const resolveIrCached = (workflowId: string | undefined): WorkflowIr => {
+      const key = workflowId ?? "__default__";
+      let ir = irCache.get(key);
+      if (!ir) {
+        ir = this.resolveWorkflowIrByIdSync(workflowId);
+        irCache.set(key, ir);
+      }
+      return ir;
+    };
+
+    // Lazily built union of every column id declared by a known workflow
+    // (built-in catalog + custom definitions) — only needed for the rare
+    // invalid-column rows, never on the healthy fast path.
+    let knownColumnIds: Set<string> | null = null;
+    const knownWorkflowColumnIds = (): Set<string> => {
+      if (knownColumnIds) return knownColumnIds;
+      knownColumnIds = new Set<string>();
+      const collect = (ir: WorkflowIr | string | undefined): void => {
+        if (!ir) return;
+        try {
+          const parsed = typeof ir === "string" ? parseWorkflowIr(ir) : ir;
+          if (parsed.version === "v2") {
+            for (const column of (parsed as WorkflowIrV2).columns) knownColumnIds!.add(column.id);
+          }
+        } catch {
+          // A corrupt definition contributes no columns; the guard stays conservative.
+        }
+      };
+      for (const builtin of BUILTIN_WORKFLOWS) collect(builtin.ir);
+      try {
+        const definitionRows = this.db.prepare("SELECT ir FROM workflows").all() as Array<{ ir: string }>;
+        for (const definitionRow of definitionRows) collect(definitionRow.ir);
+      } catch {
+        // Missing table (older DBs) — builtins alone still cover the common case.
+      }
+      return knownColumnIds;
+    };
+
+    for (const { id, col: currentColumn } of rows) {
       scanned += 1;
-      const task = this.readTaskFromDb(id, { includeDeleted: false });
-      if (!task) continue;
-      const ir = this.resolveTaskWorkflowIrSync(id);
-      const currentColumn = task.column;
+      const selection = this.getTaskWorkflowSelection(id);
+      const ir = resolveIrCached(selection?.workflowId);
 
       // Already valid in its resolved workflow — nothing to do (the common case;
       // this is why the pass is idempotent and a no-op for healthy DBs).
@@ -16428,6 +16589,41 @@ ${stepsSection}`;
         currentColumn === "archived";
       if (isTerminal) {
         skippedTerminal += 1;
+        continue;
+      }
+
+      /*
+      FNXC:WorkflowColumns 2026-07-13-11:45:
+      Mis-mapping guard: when the task resolved to the DEFAULT workflow only because its
+      selection row is missing or points at an unknown/deleted workflow, and the stored column
+      IS declared by some known workflow, the row is mis-mapped — not column-orphaned.
+      Physically re-homing it would drop a deliberately parked card (e.g. Coding (Ideas)
+      "ideas") into the default intake "triage", where the triage service auto-plans and
+      executes it. Leave the card put and audit the no-action decision; the dashboard's
+      suspect-mapping refetch and operators repair the selection instead.
+      */
+      const selectionResolves = selection
+        ? (isBuiltinWorkflowId(selection.workflowId)
+          ? Boolean(getBuiltinWorkflow(selection.workflowId))
+          : Boolean(this.db.prepare("SELECT 1 FROM workflows WHERE id = ?").get(selection.workflowId)))
+        : false;
+      if (!selectionResolves && knownWorkflowColumnIds().has(currentColumn)) {
+        this.recordRunAuditEvent({
+          taskId: id,
+          agentId: "system",
+          runId: `workflow-reconcile-integrity-${id}-${Date.now()}`,
+          domain: "database",
+          mutationType: "task:workflow-reconcile",
+          target: id,
+          metadata: {
+            integrityPass: true,
+            invalidColumn: currentColumn,
+            misMappedSelection: true,
+            reason: "workflow-edit-rehome",
+            fromColumn: currentColumn,
+            moved: false,
+          },
+        });
         continue;
       }
 
@@ -16855,8 +17051,10 @@ ${stepsSection}`;
   }
 
   private resolveTaskWorkflowIrSync(taskId: string): WorkflowIr {
-    const selection = this.getTaskWorkflowSelection(taskId);
-    const workflowId = selection?.workflowId;
+    return this.resolveWorkflowIrByIdSync(this.getTaskWorkflowSelection(taskId)?.workflowId);
+  }
+
+  private resolveWorkflowIrByIdSync(workflowId: string | undefined): WorkflowIr {
     /*
      * FNXC:WorkflowBuiltins 2026-06-29-02:18:
      * The built-in id `builtin:coding` now points at the stepwise final-review workflow. No-selection tasks must resolve through the built-in catalog, otherwise dashboard/operator defaults say "Coding" while the engine silently executes legacy coding.

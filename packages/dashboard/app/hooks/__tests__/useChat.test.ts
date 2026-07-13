@@ -5,7 +5,7 @@
 
 import { act, fireEvent, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useChat } from "../useChat";
+import { FN_AGENT_ID, useChat } from "../useChat";
 import * as apiModule from "../../api";
 import { getChatPendingMessageKey } from "../chatPendingMessageStorage";
 import * as swrCacheModule from "../../utils/swrCache";
@@ -84,6 +84,7 @@ function makeMessage(overrides: Partial<ChatMessage> & Pick<ChatMessage, "id" | 
     content: overrides.content,
     thinkingOutput: overrides.thinkingOutput ?? null,
     metadata: overrides.metadata ?? null,
+    attachments: overrides.attachments,
     createdAt: overrides.createdAt ?? "2026-04-08T00:00:00.000Z",
   };
 }
@@ -103,7 +104,15 @@ type StreamAppendHandlers = {
   onThinking: (delta: string) => void;
   onToolStart: (data: { toolName: string; args?: Record<string, unknown> }) => void;
   onToolEnd: (data: { toolName: string; isError: boolean; result?: unknown }) => void;
+  onDone?: (data: { messageId?: string; message?: ChatMessage; accumulated: { text: string; thinking: string; toolCalls: unknown[]; fallbackInfo?: unknown } }) => void;
 };
+
+function cacheMessages(projectId: string, sessionId: string, messages: ChatMessage[]) {
+  localStorage.setItem(
+    `${swrCacheModule.SWR_CACHE_KEYS.CHAT_MESSAGES_PREFIX}${projectId}:${sessionId}`,
+    JSON.stringify({ savedAt: Date.now(), data: messages }),
+  );
+}
 
 const setDocumentVisibilityState = (state: DocumentVisibilityState) => {
   Object.defineProperty(document, "visibilityState", {
@@ -1011,6 +1020,278 @@ describe("useChat", () => {
     expect(result.current.sessions[0]?.title).toBe("Keep me");
     expect(result.current.activeSession?.title).toBe("Keep me");
     expect(addToast).toHaveBeenCalledWith("Failed to rename conversation", "error");
+  });
+
+  describe("setSessionModel", () => {
+    it("switches an active session to a model optimistically and reconciles with the server", async () => {
+      const session = makeSession({ id: "session-001", agentId: "agent-001", modelProvider: null, modelId: null });
+      const updatedSession = makeSession({
+        id: "session-001",
+        agentId: FN_AGENT_ID,
+        modelProvider: "openai",
+        modelId: "gpt-4o",
+        updatedAt: "2026-04-09T00:00:00.000Z",
+      });
+      const deferred = createDeferredPromise<{ session: ChatSession }>();
+      mockFetchChatSessions.mockResolvedValueOnce({ sessions: [session] });
+      mockFetchChatMessages.mockResolvedValue({ messages: [] });
+      mockUpdateChatSession.mockReturnValueOnce(deferred.promise);
+
+      const { result } = renderHook(() => useChat("proj-123"));
+
+      await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+
+      act(() => {
+        result.current.selectSession("session-001", session);
+      });
+
+      await waitFor(() => expect(result.current.activeSession?.id).toBe("session-001"));
+
+      await act(async () => {
+        void result.current.setSessionModel("session-001", { modelProvider: "openai", modelId: "gpt-4o" });
+      });
+
+      expect(mockUpdateChatSession).toHaveBeenCalledWith(
+        "session-001",
+        { agentId: FN_AGENT_ID, modelProvider: "openai", modelId: "gpt-4o" },
+        "proj-123",
+      );
+      expect(result.current.sessions[0]).toMatchObject({ agentId: FN_AGENT_ID, modelProvider: "openai", modelId: "gpt-4o" });
+      expect(result.current.activeSession).toMatchObject({ agentId: FN_AGENT_ID, modelProvider: "openai", modelId: "gpt-4o" });
+
+      await act(async () => {
+        deferred.resolve({ session: updatedSession });
+        await deferred.promise;
+      });
+
+      expect(result.current.sessions[0]).toMatchObject({
+        agentId: FN_AGENT_ID,
+        modelProvider: "openai",
+        modelId: "gpt-4o",
+        updatedAt: "2026-04-09T00:00:00.000Z",
+      });
+      expect(result.current.activeSession).toMatchObject({
+        agentId: FN_AGENT_ID,
+        modelProvider: "openai",
+        modelId: "gpt-4o",
+        updatedAt: "2026-04-09T00:00:00.000Z",
+      });
+    });
+
+    it("switches an active session to an agent optimistically and clears the model pair", async () => {
+      const session = makeSession({ id: "session-001", agentId: FN_AGENT_ID, modelProvider: "anthropic", modelId: "claude-sonnet-4-5" });
+      const updatedSession = makeSession({ id: "session-001", agentId: "agent-specialist", modelProvider: null, modelId: null });
+      const deferred = createDeferredPromise<{ session: ChatSession }>();
+      mockFetchChatSessions.mockResolvedValueOnce({ sessions: [session] });
+      mockFetchChatMessages.mockResolvedValue({ messages: [] });
+      mockUpdateChatSession.mockReturnValueOnce(deferred.promise);
+
+      const { result } = renderHook(() => useChat("proj-123"));
+
+      await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+
+      act(() => {
+        result.current.selectSession("session-001", session);
+      });
+
+      await waitFor(() => expect(result.current.activeSession?.id).toBe("session-001"));
+
+      await act(async () => {
+        void result.current.setSessionModel("session-001", { agentId: "agent-specialist" });
+      });
+
+      expect(mockUpdateChatSession).toHaveBeenCalledWith(
+        "session-001",
+        { agentId: "agent-specialist", modelProvider: null, modelId: null },
+        "proj-123",
+      );
+      expect(result.current.sessions[0]).toMatchObject({ agentId: "agent-specialist", modelProvider: null, modelId: null });
+      expect(result.current.activeSession).toMatchObject({ agentId: "agent-specialist", modelProvider: null, modelId: null });
+
+      await act(async () => {
+        deferred.resolve({ session: updatedSession });
+        await deferred.promise;
+      });
+    });
+
+    it("rolls back sessions/activeSession and surfaces an error toast on failure", async () => {
+      const addToast = vi.fn();
+      const session = makeSession({ id: "session-001", agentId: FN_AGENT_ID, modelProvider: "anthropic", modelId: "claude-sonnet-4-5" });
+      mockFetchChatSessions.mockResolvedValueOnce({ sessions: [session] });
+      mockFetchChatMessages.mockResolvedValue({ messages: [] });
+      mockUpdateChatSession.mockRejectedValueOnce(new Error("model failed"));
+
+      const { result } = renderHook(() => useChat("proj-123", addToast));
+
+      await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+
+      act(() => {
+        result.current.selectSession("session-001", session);
+      });
+
+      await waitFor(() => expect(result.current.activeSession?.modelId).toBe("claude-sonnet-4-5"));
+
+      await act(async () => {
+        await expect(result.current.setSessionModel("session-001", { agentId: "agent-specialist" })).rejects.toThrow("model failed");
+      });
+
+      expect(mockUpdateChatSession).toHaveBeenCalledWith(
+        "session-001",
+        { agentId: "agent-specialist", modelProvider: null, modelId: null },
+        "proj-123",
+      );
+      expect(result.current.sessions[0]).toMatchObject({ agentId: FN_AGENT_ID, modelProvider: "anthropic", modelId: "claude-sonnet-4-5" });
+      expect(result.current.activeSession).toMatchObject({ agentId: FN_AGENT_ID, modelProvider: "anthropic", modelId: "claude-sonnet-4-5" });
+      expect(addToast).toHaveBeenCalledWith("Failed to update chat model", "error");
+    });
+
+    it("updates only the matching sessions entry when the session is not active", async () => {
+      const activeSessionSeed = makeSession({ id: "session-active", agentId: "agent-001" });
+      const otherSession = makeSession({ id: "session-other", agentId: "agent-002", modelProvider: null, modelId: null });
+      const deferred = createDeferredPromise<{ session: ChatSession }>();
+      mockFetchChatSessions.mockResolvedValueOnce({ sessions: [activeSessionSeed, otherSession] });
+      mockFetchChatMessages.mockResolvedValue({ messages: [] });
+      mockUpdateChatSession.mockReturnValueOnce(deferred.promise);
+
+      const { result } = renderHook(() => useChat("proj-123"));
+
+      await waitFor(() => expect(result.current.sessions).toHaveLength(2));
+
+      act(() => {
+        result.current.selectSession("session-active", activeSessionSeed);
+      });
+
+      await waitFor(() => expect(result.current.activeSession?.id).toBe("session-active"));
+
+      await act(async () => {
+        void result.current.setSessionModel("session-other", { modelProvider: "openai", modelId: "gpt-4o-mini" });
+      });
+
+      expect(mockUpdateChatSession).toHaveBeenCalledWith(
+        "session-other",
+        { agentId: FN_AGENT_ID, modelProvider: "openai", modelId: "gpt-4o-mini" },
+        "proj-123",
+      );
+      expect(result.current.sessions.find((s) => s.id === "session-other")).toMatchObject({
+        agentId: FN_AGENT_ID,
+        modelProvider: "openai",
+        modelId: "gpt-4o-mini",
+      });
+      expect(result.current.activeSession).toMatchObject({ id: "session-active", agentId: "agent-001" });
+
+      await act(async () => {
+        deferred.resolve({ session: makeSession({ ...otherSession, agentId: FN_AGENT_ID, modelProvider: "openai", modelId: "gpt-4o-mini" }) });
+        await deferred.promise;
+      });
+    });
+  });
+
+  // FN-7898: setSessionThinkingLevel lets an existing session's reasoning-effort level be
+  // changed mid-conversation via the in-chat composer control; mirrors renameSession's
+  // optimistic-update-with-rollback contract.
+  describe("setSessionThinkingLevel", () => {
+    it("updates sessions and activeSession optimistically, then reconciles with the server response", async () => {
+      const session = makeSession({ id: "session-001", agentId: "agent-001", thinkingLevel: null });
+      const updatedSession = makeSession({
+        id: "session-001",
+        agentId: "agent-001",
+        thinkingLevel: "high",
+        updatedAt: "2026-04-09T00:00:00.000Z",
+      });
+      const deferred = createDeferredPromise<{ session: ChatSession }>();
+      mockFetchChatSessions.mockResolvedValueOnce({ sessions: [session] });
+      mockFetchChatMessages.mockResolvedValue({ messages: [] });
+      mockUpdateChatSession.mockReturnValueOnce(deferred.promise);
+
+      const { result } = renderHook(() => useChat("proj-123"));
+
+      await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+
+      act(() => {
+        result.current.selectSession("session-001", session);
+      });
+
+      await waitFor(() => expect(result.current.activeSession?.id).toBe("session-001"));
+
+      await act(async () => {
+        void result.current.setSessionThinkingLevel("session-001", "high");
+      });
+
+      expect(mockUpdateChatSession).toHaveBeenCalledWith("session-001", { thinkingLevel: "high" }, "proj-123");
+      expect(result.current.sessions[0]?.thinkingLevel).toBe("high");
+      expect(result.current.activeSession?.thinkingLevel).toBe("high");
+
+      await act(async () => {
+        deferred.resolve({ session: updatedSession });
+        await deferred.promise;
+      });
+
+      expect(result.current.sessions[0]?.thinkingLevel).toBe("high");
+      expect(result.current.sessions[0]?.updatedAt).toBe("2026-04-09T00:00:00.000Z");
+      expect(result.current.activeSession?.thinkingLevel).toBe("high");
+      expect(result.current.activeSession?.updatedAt).toBe("2026-04-09T00:00:00.000Z");
+    });
+
+    it("rolls back sessions/activeSession and surfaces an error toast on failure", async () => {
+      const addToast = vi.fn();
+      const session = makeSession({ id: "session-001", agentId: "agent-001", thinkingLevel: "low" });
+      mockFetchChatSessions.mockResolvedValueOnce({ sessions: [session] });
+      mockFetchChatMessages.mockResolvedValue({ messages: [] });
+      mockUpdateChatSession.mockRejectedValueOnce(new Error("update failed"));
+
+      const { result } = renderHook(() => useChat("proj-123", addToast));
+
+      await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+
+      act(() => {
+        result.current.selectSession("session-001", session);
+      });
+
+      await waitFor(() => expect(result.current.activeSession?.thinkingLevel).toBe("low"));
+
+      await act(async () => {
+        await expect(result.current.setSessionThinkingLevel("session-001", "xhigh")).rejects.toThrow("update failed");
+      });
+
+      expect(mockUpdateChatSession).toHaveBeenCalledWith("session-001", { thinkingLevel: "xhigh" }, "proj-123");
+      expect(result.current.sessions[0]?.thinkingLevel).toBe("low");
+      expect(result.current.activeSession?.thinkingLevel).toBe("low");
+      expect(addToast).toHaveBeenCalledWith("Failed to update thinking level", "error");
+    });
+
+    it("updates only the matching sessions entry when the session is not active", async () => {
+      const activeSessionSeed = makeSession({ id: "session-active", agentId: "agent-001", thinkingLevel: "low" });
+      const otherSession = makeSession({ id: "session-other", agentId: "agent-002", thinkingLevel: null });
+      const deferred = createDeferredPromise<{ session: ChatSession }>();
+      mockFetchChatSessions.mockResolvedValueOnce({ sessions: [activeSessionSeed, otherSession] });
+      mockFetchChatMessages.mockResolvedValue({ messages: [] });
+      mockUpdateChatSession.mockReturnValueOnce(deferred.promise);
+
+      const { result } = renderHook(() => useChat("proj-123"));
+
+      await waitFor(() => expect(result.current.sessions).toHaveLength(2));
+
+      act(() => {
+        result.current.selectSession("session-active", activeSessionSeed);
+      });
+
+      await waitFor(() => expect(result.current.activeSession?.id).toBe("session-active"));
+
+      await act(async () => {
+        void result.current.setSessionThinkingLevel("session-other", "medium");
+      });
+
+      expect(mockUpdateChatSession).toHaveBeenCalledWith("session-other", { thinkingLevel: "medium" }, "proj-123");
+      const otherEntry = result.current.sessions.find((s) => s.id === "session-other");
+      expect(otherEntry?.thinkingLevel).toBe("medium");
+      expect(result.current.activeSession?.id).toBe("session-active");
+      expect(result.current.activeSession?.thinkingLevel).toBe("low");
+
+      await act(async () => {
+        deferred.resolve({ session: makeSession({ ...otherSession, thinkingLevel: "medium" }) });
+        await deferred.promise;
+      });
+    });
   });
 
   it("deletes a session", async () => {
@@ -3512,6 +3793,206 @@ describe("useChat", () => {
       });
     });
 
+    it("FN-7853 keeps cached prior thread stable when stale mid-turn load resolves empty", async () => {
+      const generatingSession = {
+        ...makeSession({ id: "session-mid-turn-stable", agentId: "agent-001", title: "Mid turn stable" }),
+        isGenerating: true,
+        inFlightGeneration: {
+          status: "generating" as const,
+          streamingText: "working",
+          streamingThinking: "thinking",
+          toolCalls: [],
+          replayFromEventId: 201,
+          updatedAt: "2026-04-08T00:00:00.000Z",
+        },
+      };
+      const priorThread = [
+        makeMessage({ id: "msg-001", sessionId: generatingSession.id, role: "user", content: "First question" }),
+        makeMessage({ id: "msg-002", sessionId: generatingSession.id, role: "assistant", content: "First answer" }),
+        makeMessage({ id: "msg-003", sessionId: generatingSession.id, role: "user", content: "Second question" }),
+        makeMessage({ id: "msg-004", sessionId: generatingSession.id, role: "assistant", content: "Second answer" }),
+      ];
+      const staleFetch = createDeferredPromise<{ messages: ChatMessage[] }>();
+      let attachedHandlers: StreamAppendHandlers | undefined;
+
+      cacheMessages("proj-123", generatingSession.id, priorThread);
+      mockGetScopedItem.mockImplementation((key) => key === "kb-chat-active-session" ? generatingSession.id : undefined);
+      mockFetchChatSessions.mockResolvedValueOnce({ sessions: [generatingSession] });
+      mockFetchChatMessages.mockReturnValue(staleFetch.promise);
+      mockAttachChatStream.mockImplementation((_sessionId, handlers) => {
+        attachedHandlers = handlers;
+        return { close: vi.fn(), isConnected: () => true };
+      });
+
+      const { result } = renderHook(() => useChat("proj-123"));
+
+      await waitFor(() => {
+        expect(result.current.isStreaming).toBe(true);
+        expect(result.current.streamingText).toBe("working");
+        expect(result.current.messages.map((message) => message.content)).toEqual([
+          "First question",
+          "First answer",
+          "Second question",
+          "Second answer",
+        ]);
+      });
+
+      const expectPriorThreadStable = () => {
+        const contents = result.current.messages.map((message) => message.content);
+        expect(contents).toEqual(expect.arrayContaining([
+          "First question",
+          "First answer",
+          "Second question",
+          "Second answer",
+        ]));
+      };
+
+      act(() => {
+        subscribeHandler["chat:session:updated"]?.({
+          data: JSON.stringify({
+            ...generatingSession,
+            inFlightGeneration: { ...generatingSession.inFlightGeneration, streamingText: "working harder", replayFromEventId: 202 },
+          }),
+        } as MessageEvent);
+      });
+      expectPriorThreadStable();
+
+      vi.useFakeTimers();
+      act(() => {
+        attachedHandlers?.onToolStart({ toolName: "read", args: { path: "README.md" } });
+        attachedHandlers?.onText(" now");
+        attachedHandlers?.onToolEnd({ toolName: "read", isError: false, result: "ok" });
+      });
+      act(() => {
+        vi.advanceTimersToNextTimer();
+      });
+      expectPriorThreadStable();
+
+      act(() => {
+        subscribeHandler["chat:message:added"]?.({
+          data: JSON.stringify(makeMessage({
+            id: "msg-005",
+            sessionId: generatingSession.id,
+            role: "user",
+            content: "Follow-up question",
+          })),
+        } as MessageEvent);
+      });
+      expectPriorThreadStable();
+
+      await act(async () => {
+        staleFetch.resolve({ messages: [] });
+        await staleFetch.promise;
+      });
+
+      expectPriorThreadStable();
+      expect(result.current.isStreaming).toBe(true);
+
+      vi.useRealTimers();
+    });
+
+    it("FN-7853 keeps prior thread stable during the client's own streaming send turn", async () => {
+      const session = makeSession({ id: "session-live-send", agentId: "agent-001", title: "Live send" });
+      const priorThreadNewestFirst = [
+        makeMessage({ id: "msg-004", sessionId: session.id, role: "assistant", content: "Second answer" }),
+        makeMessage({ id: "msg-003", sessionId: session.id, role: "user", content: "Second question" }),
+        makeMessage({ id: "msg-002", sessionId: session.id, role: "assistant", content: "First answer" }),
+        makeMessage({ id: "msg-001", sessionId: session.id, role: "user", content: "First question" }),
+      ];
+      let streamHandlers: StreamAppendHandlers | undefined;
+
+      mockFetchChatSessions.mockResolvedValueOnce({ sessions: [session] });
+      mockFetchChatSession.mockResolvedValue({ session });
+      mockFetchChatMessages.mockResolvedValue({ messages: priorThreadNewestFirst });
+      mockStreamChatResponse.mockImplementation((_sessionId, _content, handlers) => {
+        streamHandlers = handlers;
+        return { close: vi.fn(), isConnected: () => true };
+      });
+
+      const { result } = renderHook(() => useChat("proj-123"));
+
+      await waitFor(() => {
+        expect(result.current.sessions).toHaveLength(1);
+      });
+
+      act(() => {
+        result.current.selectSession(session.id);
+      });
+
+      await waitFor(() => {
+        expect(result.current.messages.map((message) => message.content)).toEqual([
+          "First question",
+          "First answer",
+          "Second question",
+          "Second answer",
+        ]);
+      });
+
+      act(() => {
+        result.current.sendMessage("Third question");
+      });
+
+      expect(result.current.messages.map((message) => message.content)).toEqual([
+        "First question",
+        "First answer",
+        "Second question",
+        "Second answer",
+        "Third question",
+      ]);
+      expect(result.current.isStreaming).toBe(true);
+
+      vi.useFakeTimers();
+      act(() => {
+        streamHandlers?.onText("Partial answer");
+        subscribeHandler["chat:session:updated"]?.({
+          data: JSON.stringify({
+            ...session,
+            isGenerating: true,
+            inFlightGeneration: {
+              status: "generating" as const,
+              streamingText: "Partial answer",
+              streamingThinking: "",
+              toolCalls: [],
+              replayFromEventId: 301,
+              updatedAt: "2026-04-08T00:00:00.000Z",
+            },
+          }),
+        } as MessageEvent);
+        subscribeHandler["chat:message:added"]?.({
+          data: JSON.stringify(makeMessage({ id: "msg-ignored-assistant", sessionId: session.id, role: "assistant", content: "Duplicate assistant" })),
+        } as MessageEvent);
+      });
+      act(() => {
+        vi.advanceTimersToNextTimer();
+      });
+
+      expect(result.current.messages.map((message) => message.content)).toEqual([
+        "First question",
+        "First answer",
+        "Second question",
+        "Second answer",
+        "Third question",
+      ]);
+      expect(result.current.streamingText).toBe("Partial answer");
+
+      act(() => {
+        streamHandlers?.onDone?.({
+          messageId: "msg-final-live-send",
+          accumulated: { text: "Final live answer", thinking: "", toolCalls: [] },
+        });
+      });
+
+      expect(result.current.messages.map((message) => message.content)).toEqual([
+        "First question",
+        "First answer",
+        "Second question",
+        "Second answer",
+        "Third question",
+        "Partial answer",
+      ]);
+      vi.useRealTimers();
+    });
+
     it("FN-6496 loads prior thread during chat:session:updated in-flight attach", async () => {
       const session = makeSession({ id: "session-001", agentId: "agent-001", title: "Existing" });
       const priorThreadNewestFirst = [
@@ -4035,6 +4516,165 @@ describe("useChat", () => {
 
       await waitFor(() => {
         expect(result.current.messages).toHaveLength(1);
+      });
+    });
+
+    it("reconciles persisted user attachment echo during streaming without refetch or duplicate", async () => {
+      mockFetchChatSessions.mockResolvedValueOnce({
+        sessions: [makeSession({ id: "session-001", agentId: "agent-001" })],
+      });
+      mockFetchChatMessages.mockResolvedValueOnce({ messages: [] });
+
+      mockStreamChatResponse.mockImplementation((_sessionId, _content, _handlers) => ({ close: vi.fn(), isConnected: () => true }));
+
+      const { result } = renderHook(() => useChat("proj-123"));
+      await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+
+      act(() => {
+        result.current.selectSession("session-001");
+      });
+
+      await waitFor(() => expect(result.current.activeSession?.id).toBe("session-001"));
+      const fetchCountAfterSelect = mockFetchChatMessages.mock.calls.length;
+      const uploadedFiles = [
+        new File(["image-bytes"], "screenshot.png", { type: "image/png" }),
+        new File(["notes"], "notes.txt", { type: "text/plain" }),
+      ];
+
+      act(() => {
+        result.current.sendMessage("Hi", uploadedFiles);
+      });
+
+      await waitFor(() => {
+        expect(result.current.isStreaming).toBe(true);
+        const userMessages = result.current.messages.filter((message) => message.role === "user");
+        expect(userMessages).toHaveLength(1);
+        expect(userMessages[0]?.id.startsWith("temp-")).toBe(true);
+        expect(userMessages[0]?.attachments).toBeUndefined();
+      });
+
+      const persistedAttachments = [
+        {
+          id: "att-image-001",
+          filename: "2026-07-12T00-00-00_screenshot.png",
+          originalName: "screenshot.png",
+          mimeType: "image/png",
+          size: 11,
+          createdAt: "2026-07-12T00:00:00.000Z",
+        },
+        {
+          id: "att-file-001",
+          filename: "2026-07-12T00-00-00_notes.txt",
+          originalName: "notes.txt",
+          mimeType: "text/plain",
+          size: 5,
+          createdAt: "2026-07-12T00:00:00.000Z",
+        },
+      ];
+      const persistedEcho = makeMessage({
+        id: "msg-user-001",
+        sessionId: "session-001",
+        role: "user",
+        content: "Hi",
+        attachments: persistedAttachments,
+      });
+
+      act(() => {
+        subscribeHandler["chat:message:added"]?.({
+          data: JSON.stringify(persistedEcho),
+        } as MessageEvent);
+      });
+
+      await waitFor(() => {
+        const userMessages = result.current.messages.filter((message) => message.role === "user");
+        expect(userMessages).toHaveLength(1);
+        expect(userMessages[0]?.id).toBe("msg-user-001");
+        expect(userMessages[0]?.attachments).toEqual(persistedAttachments);
+      });
+      expect(mockFetchChatMessages).toHaveBeenCalledTimes(fetchCountAfterSelect);
+    });
+
+    it("reconciles attachment-only persisted user echo during streaming", async () => {
+      mockFetchChatSessions.mockResolvedValueOnce({
+        sessions: [makeSession({ id: "session-001", agentId: "agent-001" })],
+      });
+      mockFetchChatMessages.mockResolvedValueOnce({ messages: [] });
+      mockStreamChatResponse.mockImplementation((_sessionId, _content, _handlers) => ({ close: vi.fn(), isConnected: () => true }));
+
+      const { result } = renderHook(() => useChat("proj-123"));
+      await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+      act(() => result.current.selectSession("session-001"));
+      await waitFor(() => expect(result.current.activeSession?.id).toBe("session-001"));
+
+      act(() => {
+        result.current.sendMessage("", [new File(["image-bytes"], "screenshot.png", { type: "image/png" })]);
+      });
+      await waitFor(() => expect(result.current.isStreaming).toBe(true));
+
+      const persistedAttachments = [
+        {
+          id: "att-image-only-001",
+          filename: "2026-07-12T00-00-00_screenshot.png",
+          originalName: "screenshot.png",
+          mimeType: "image/png",
+          size: 11,
+          createdAt: "2026-07-12T00:00:00.000Z",
+        },
+      ];
+      act(() => {
+        subscribeHandler["chat:message:added"]?.({
+          data: JSON.stringify(makeMessage({
+            id: "msg-user-attachment-only",
+            sessionId: "session-001",
+            role: "user",
+            content: "",
+            attachments: persistedAttachments,
+          })),
+        } as MessageEvent);
+      });
+
+      await waitFor(() => {
+        const userMessages = result.current.messages.filter((message) => message.role === "user");
+        expect(userMessages).toHaveLength(1);
+        expect(userMessages[0]?.id).toBe("msg-user-attachment-only");
+        expect(userMessages[0]?.content).toBe("");
+        expect(userMessages[0]?.attachments).toEqual(persistedAttachments);
+      });
+    });
+
+    it("reconciles text-only persisted user echo during streaming without duplicate", async () => {
+      mockFetchChatSessions.mockResolvedValueOnce({
+        sessions: [makeSession({ id: "session-001", agentId: "agent-001" })],
+      });
+      mockFetchChatMessages.mockResolvedValueOnce({ messages: [] });
+      mockStreamChatResponse.mockImplementation((_sessionId, _content, _handlers) => ({ close: vi.fn(), isConnected: () => true }));
+
+      const { result } = renderHook(() => useChat("proj-123"));
+      await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+      act(() => result.current.selectSession("session-001"));
+      await waitFor(() => expect(result.current.activeSession?.id).toBe("session-001"));
+
+      act(() => {
+        result.current.sendMessage("Plain text only");
+      });
+      await waitFor(() => expect(result.current.isStreaming).toBe(true));
+
+      act(() => {
+        subscribeHandler["chat:message:added"]?.({
+          data: JSON.stringify(makeMessage({
+            id: "msg-user-text-only",
+            sessionId: "session-001",
+            role: "user",
+            content: "Plain text only",
+          })),
+        } as MessageEvent);
+      });
+
+      await waitFor(() => {
+        const userMessages = result.current.messages.filter((message) => message.role === "user");
+        expect(userMessages).toHaveLength(1);
+        expect(userMessages[0]?.id).toBe("msg-user-text-only");
+        expect(userMessages[0]?.attachments).toBeUndefined();
       });
     });
 

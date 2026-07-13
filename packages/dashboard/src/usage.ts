@@ -1126,6 +1126,9 @@ async function fetchClaudeUsage(authStorage?: AuthStorageLike): Promise<Provider
     /*
     FNXC:UsageIndicator 2026-07-10-00:00:
     Claude Fable 5 is a first-class Anthropic model, so the Usage dropdown must mirror the Sonnet/Opus per-model weekly windows when Anthropic returns a Fable usage bucket. `seven_day_fable` follows the existing API naming convention but remains an assumed primary key until a live OAuth usage payload confirms it; tolerant fallbacks keep the operator-visible window working if Anthropic ships a nearby field name.
+
+    FNXC:UsageIndicator 2026-07-11-19:40:
+    A live OAuth usage probe disproved the `seven_day_fable` guess: Anthropic ships per-model weekly usage in the top-level `limits[]` array as `{ kind: "weekly_scoped", group: "weekly", percent, resets_at, scope.model.display_name }` (observed live with display_name "Fable"), while `seven_day_opus`/`seven_day_sonnet` are now null. Parse `limits[]` generically so every scoped weekly model bucket (Fable today, future models automatically) appears in the Usage dropdown as "Weekly (<model>)". The legacy seven_day_* keys stay first for older payloads; label dedup prevents double windows when both shapes are present.
     */
     const fable = parseWindow("seven_day_fable", "Weekly (Fable)", SEVEN_DAYS_MS, [
       "seven_day_claude_fable",
@@ -1138,6 +1141,30 @@ async function fetchClaudeUsage(authStorage?: AuthStorageLike): Promise<Provider
     if (sonnet) usage.windows.push(sonnet);
     if (opus) usage.windows.push(opus);
     if (fable) usage.windows.push(fable);
+
+    if (Array.isArray(data.limits)) {
+      for (const limit of data.limits) {
+        if (!limit || typeof limit !== "object") continue;
+        const modelName = limit?.scope?.model?.display_name;
+        if (typeof modelName !== "string" || modelName.trim().length === 0) continue;
+        if (typeof limit.percent !== "number" || !Number.isFinite(limit.percent)) continue;
+        const isWeekly = limit.group === "weekly" || (typeof limit.kind === "string" && limit.kind.startsWith("weekly"));
+        if (!isWeekly) continue;
+        const label = `Weekly (${modelName.trim()})`;
+        if (usage.windows.some((w) => w.label === label)) continue;
+
+        const parsedReset = _parseResetTimestamp(limit.resets_at ?? limit.reset_at ?? limit.resetsAt);
+        usage.windows.push({
+          label,
+          percentUsed: Math.min(100, Math.max(0, limit.percent)),
+          percentLeft: Math.min(100, Math.max(0, 100 - limit.percent)),
+          resetText: parsedReset ? `resets in ${formatDuration(parsedReset.msLeft)}` : null,
+          resetMs: parsedReset?.msLeft,
+          resetAt: parsedReset?.resetAt,
+          windowDurationMs: SEVEN_DAYS_MS,
+        });
+      }
+    }
   } catch (e: unknown) {
     usage.status = "error";
     usage.error = e instanceof Error ? e.message : "Failed to fetch Claude usage";
@@ -1611,6 +1638,67 @@ async function readGrokUserSettingsApiKey(): Promise<string | null> {
   }
 }
 
+/*
+FNXC:UsageProviders 2026-07-11-19:45:
+The grok CLI (`grok login`) stores OIDC subscription credentials in `~/.grok/auth.json` as a map keyed by `<issuer>::<client_id>` whose entries carry a Bearer `key`. Its `/usage` command fetches subscription credit usage from `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` (verified live: returns `config.creditUsagePercent`, weekly `currentPeriod`/`billingPeriodEnd`, and per-product `productUsage`). This gives the Usage dropdown a real percent-used weekly window for Grok subscription users, unlike the xAI inference API key which only supports an auth-validity card.
+*/
+async function readGrokCliOidcToken(): Promise<string | null> {
+  try {
+    const raw = await readFile(path.join(getHomeDir(), ".grok", "auth.json"), "utf-8");
+    const parsed = JSON.parse(raw) as Record<string, { key?: unknown } | null>;
+    for (const entry of Object.values(parsed)) {
+      if (entry && typeof entry.key === "string" && entry.key.trim().length > 0) {
+        return entry.key.trim();
+      }
+    }
+  } catch {
+    // File doesn't exist or invalid JSON — no grok CLI login
+  }
+  return null;
+}
+
+/**
+ * Fetch Grok subscription credit usage via the grok CLI's billing endpoint.
+ * Returns null when the request fails in any way so the caller can fall back
+ * to the xAI API-key auth-validity card.
+ */
+async function fetchGrokCliBillingUsage(token: string, usage: ProviderUsage): Promise<boolean> {
+  try {
+    const res = await httpsRequest("https://cli-chat-proxy.grok.com/v1/billing?format=credits", {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+    });
+    if (res.status !== 200) return false;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped API response
+    const data: any = res.body.trim().length > 0 ? JSON.parse(res.body) : {};
+    const config = data?.config;
+    if (!config || typeof config !== "object") return false;
+
+    const pctUsed = config.creditUsagePercent;
+    if (typeof pctUsed !== "number" || !Number.isFinite(pctUsed)) return false;
+
+    const parsedReset = _parseResetTimestamp(config.billingPeriodEnd ?? config.currentPeriod?.end);
+    const isWeekly = config.currentPeriod?.type === "USAGE_PERIOD_TYPE_WEEKLY";
+    usage.windows.push({
+      label: isWeekly ? "Weekly (credits)" : "Credits",
+      percentUsed: Math.min(100, Math.max(0, pctUsed)),
+      percentLeft: Math.min(100, Math.max(0, 100 - pctUsed)),
+      resetText: parsedReset ? `resets in ${formatDuration(parsedReset.msLeft)}` : null,
+      resetMs: parsedReset?.msLeft,
+      resetAt: parsedReset?.resetAt,
+      windowDurationMs: isWeekly ? 7 * 24 * 60 * 60 * 1000 : undefined,
+    });
+    usage.status = "ok";
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function readGrokApiKey(authStorage?: AuthStorageLike): Promise<string | null> {
   const envKey = process.env.GROK_API_KEY;
   if (typeof envKey === "string" && envKey.trim().length > 0) {
@@ -1633,9 +1721,23 @@ async function fetchGrokUsage(authStorage?: AuthStorageLike): Promise<ProviderUs
     windows: [],
   };
 
+  // Prefer grok CLI subscription credentials — they yield a real percent-used
+  // weekly credits window instead of the API-key auth-validity card below.
+  const cliToken = await readGrokCliOidcToken();
+  if (cliToken && (await fetchGrokCliBillingUsage(cliToken, usage))) {
+    return usage;
+  }
+
   const apiKey = await readGrokApiKey(authStorage);
   if (!apiKey) {
-    usage.error = "No Grok credentials — set GROK_API_KEY or add a key";
+    if (cliToken) {
+      // A grok CLI login exists but its billing call failed — surface an
+      // actionable error card instead of hiding the provider as no-auth.
+      usage.status = "error";
+      usage.error = "Grok CLI auth expired — run 'grok login' (or set GROK_API_KEY)";
+    } else {
+      usage.error = "No Grok credentials — set GROK_API_KEY or add a key";
+    }
     return usage;
   }
 
@@ -1802,6 +1904,221 @@ async function fetchZaiUsage(authStorage?: AuthStorageLike): Promise<ProviderUsa
     if (data?.data?.level) {
       usage.plan = data.data.level.charAt(0).toUpperCase() + data.data.level.slice(1);
     }
+  } catch (e: unknown) {
+    usage.status = "error";
+    usage.error = e instanceof Error ? e.message : "Failed to fetch";
+  }
+
+  return usage;
+}
+
+// ── Cursor fetcher ──────────────────────────────────────────────────────────
+
+const CURSOR_ADMIN_SPEND_ENDPOINT = "https://api.cursor.com/teams/spend";
+const CURSOR_API_KEY_ENV_VAR = "CURSOR_API_KEY";
+const CURSOR_API_KEY_PROVIDER_ID = "cursor";
+const CURSOR_MONTHLY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+type CursorAccountInfo = {
+  email?: string;
+  plan?: string;
+};
+
+/*
+FNXC:UsageProviders 2026-07-11-00:00:
+Cursor Admin API usage metering needs a real operator-reachable credential path, but Cursor CLI runtime auth remains OAuth/session-based through `cursor-agent status` and is not an Admin API key. Use Fusion's documented `CURSOR_API_KEY` environment variable first, mirroring the `GROK_API_KEY` precedent, then the single `cursor` authStorage fallback for tests/imported credentials. Cursor documents Basic Auth with an API key for the Admin API and `POST /teams/spend`, but does not document a local Admin API key file, so no file fallback is invented here.
+*/
+export async function readCursorApiKey(authStorage?: AuthStorageLike): Promise<string | null> {
+  const envKey = process.env[CURSOR_API_KEY_ENV_VAR];
+  if (typeof envKey === "string" && envKey.trim().length > 0) {
+    return envKey.trim();
+  }
+
+  return readConfiguredApiKey(CURSOR_API_KEY_PROVIDER_ID, authStorage);
+}
+
+async function readCursorAccountInfo(): Promise<CursorAccountInfo> {
+  for (const command of ["cursor-agent", "cursor"]) {
+    try {
+      const { stdout } = await execFileAsync(command, ["about", "--format", "json"], {
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      const data = JSON.parse(stdout.trim()) as Record<string, unknown>;
+      return {
+        email: typeof data.userEmail === "string" ? data.userEmail : undefined,
+        plan: typeof data.subscriptionTier === "string" ? data.subscriptionTier : undefined,
+      };
+    } catch {
+      // Try the next binary/status fallback.
+    }
+
+    try {
+      const { stdout } = await execFileAsync(command, ["status", "--format", "json"], {
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      const data = JSON.parse(stdout.trim()) as { userInfo?: { email?: unknown }; status?: unknown };
+      return {
+        email: typeof data.userInfo?.email === "string" ? data.userInfo.email : undefined,
+        plan: typeof data.status === "string" ? data.status : undefined,
+      };
+    } catch {
+      // Try the next binary.
+    }
+  }
+
+  return {};
+}
+
+function readNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function clampPercent(value: number): number {
+  return Math.min(100, Math.max(0, value));
+}
+
+function addOneMonth(value: Date): Date {
+  const next = new Date(value.getTime());
+  next.setUTCMonth(next.getUTCMonth() + 1);
+  return next;
+}
+
+function deriveCursorReset(cycleStart: unknown): { resetText: string | null; resetMs?: number; resetAt?: string; windowDurationMs: number } {
+  const startMs = readNumber(cycleStart);
+  if (!startMs) {
+    return { resetText: null, windowDurationMs: CURSOR_MONTHLY_WINDOW_MS };
+  }
+
+  let resetAtDate = addOneMonth(new Date(startMs >= 1e12 ? startMs : startMs * 1000));
+  const now = Date.now();
+  while (resetAtDate.getTime() <= now) {
+    resetAtDate = addOneMonth(resetAtDate);
+  }
+
+  const parsedReset = _parseResetTimestamp(resetAtDate.toISOString());
+  if (!parsedReset) {
+    return { resetText: null, windowDurationMs: CURSOR_MONTHLY_WINDOW_MS };
+  }
+
+  return {
+    resetText: `resets in ${formatDuration(parsedReset.msLeft)}`,
+    resetMs: parsedReset.msLeft,
+    resetAt: parsedReset.resetAt,
+    windowDurationMs: CURSOR_MONTHLY_WINDOW_MS,
+  };
+}
+
+function getCursorSpendRows(data: Record<string, unknown>): Record<string, unknown>[] {
+  const nested = typeof data.data === "object" && data.data !== null ? data.data as Record<string, unknown> : undefined;
+  const rows = data.teamMemberSpend ?? nested?.teamMemberSpend ?? data.members ?? nested?.members;
+  return Array.isArray(rows) ? rows.filter((row): row is Record<string, unknown> => typeof row === "object" && row !== null) : [];
+}
+
+function selectCursorSpendRow(rows: Record<string, unknown>[], email?: string): Record<string, unknown> | null {
+  if (rows.length === 0) return null;
+  if (email) {
+    const normalizedEmail = email.toLowerCase();
+    const match = rows.find((row) => typeof row.email === "string" && row.email.toLowerCase() === normalizedEmail);
+    if (match) return match;
+  }
+  return rows.length === 1 ? rows[0] : null;
+}
+
+export async function fetchCursorUsage(authStorage?: AuthStorageLike): Promise<ProviderUsage> {
+  const usage: ProviderUsage = {
+    name: "Cursor",
+    icon: "🟣",
+    status: "no-auth",
+    windows: [],
+  };
+
+  const apiKey = await readCursorApiKey(authStorage);
+  if (!apiKey) {
+    usage.error = "No Cursor Admin API key — set CURSOR_API_KEY in the Fusion dashboard environment";
+    return usage;
+  }
+
+  const account = await readCursorAccountInfo();
+  if (account.email) usage.email = account.email;
+  if (account.plan) usage.plan = account.plan;
+
+  try {
+    /*
+    FNXC:UsageProviders 2026-07-11-00:00:
+    Cursor exposes meterable team spend through the documented Admin API `POST https://api.cursor.com/teams/spend`, authenticated with Basic auth using the API key as the username (`-u YOUR_API_KEY:`). Fusion resolves that key from the documented `CURSOR_API_KEY` environment variable; Cursor CLI OAuth/session auth is not an Admin API credential and cannot reach this endpoint by itself. The response documents `teamMemberSpend[].overallSpendCents`, `spendCents`, `hardLimitOverrideDollars`, `monthlyLimitDollars`, `email`, and `subscriptionCycleStart`; no personal CLI usage endpoint or direct reset timestamp is documented, so personal/session-only Cursor logins stay `no-auth` and the reset is derived from the monthly cycle start.
+    */
+    const body: Record<string, unknown> = { page: 1, pageSize: 500 };
+    if (account.email) body.searchTerm = account.email;
+
+    const res = await httpsRequest(CURSOR_ADMIN_SPEND_ENDPOINT, {
+      method: "POST",
+      headers: {
+        authorization: `Basic ${Buffer.from(`${apiKey}:`).toString("base64")}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (res.status === 401 || res.status === 403) {
+      usage.status = "error";
+      usage.error = "Auth expired — check your Cursor Admin API key";
+      return usage;
+    }
+
+    if (res.status === 404) {
+      usage.status = "no-auth";
+      usage.error = "No Cursor usage entitlement found";
+      return usage;
+    }
+
+    if (res.status !== 200) {
+      usage.status = "error";
+      usage.error = `HTTP ${res.status}: ${res.body.slice(0, 200)}`;
+      return usage;
+    }
+
+    const data = JSON.parse(res.body) as Record<string, unknown>;
+    const rows = getCursorSpendRows(data);
+    const row = selectCursorSpendRow(rows, account.email);
+    if (!row) {
+      usage.status = "no-auth";
+      usage.error = rows.length > 1
+        ? "Cursor usage response did not include a unique current user row"
+        : "Cursor usage response did not include meterable spend";
+      return usage;
+    }
+
+    const spentCents = readNumber(row.overallSpendCents) ?? readNumber(row.spendCents);
+    const hardLimitDollars = readNumber(row.hardLimitOverrideDollars);
+    const monthlyLimitDollars = readNumber(row.monthlyLimitDollars);
+    const limitDollars = hardLimitDollars && hardLimitDollars > 0 ? hardLimitDollars : monthlyLimitDollars;
+    if (spentCents === undefined || !limitDollars || limitDollars <= 0) {
+      usage.status = "no-auth";
+      usage.error = "Cursor usage response did not include a spend limit to meter";
+      return usage;
+    }
+
+    const percentUsed = clampPercent((spentCents / (limitDollars * 100)) * 100);
+    const reset = deriveCursorReset(data.subscriptionCycleStart ?? row.subscriptionCycleStart);
+    usage.status = "ok";
+    usage.email = typeof row.email === "string" ? row.email : usage.email;
+    usage.plan = usage.plan ?? (typeof row.plan === "string" ? row.plan : null);
+    usage.windows.push({
+      label: "Monthly spend",
+      percentUsed,
+      percentLeft: clampPercent(100 - percentUsed),
+      resetText: reset.resetText,
+      resetMs: reset.resetMs,
+      resetAt: reset.resetAt,
+      windowDurationMs: reset.windowDurationMs,
+    });
   } catch (e: unknown) {
     usage.status = "error";
     usage.error = e instanceof Error ? e.message : "Failed to fetch";
@@ -2027,7 +2344,7 @@ export async function fetchAllProviderUsage(authStorage?: AuthStorageLike): Prom
   }
 
   // Fetch all providers in parallel with per-provider timeout
-  // Currently includes: Claude, Codex, Gemini, Minimax, Zai, Grok, GitHub Copilot
+  // Currently includes: Claude, Codex, Gemini, Minimax, Zai, Grok, Cursor, GitHub Copilot
   const results = await Promise.allSettled([
     withTimeout(fetchClaudeUsage(authStorage), "Claude", CLAUDE_FETCH_TIMEOUT_MS),
     withTimeout(fetchCodexUsage(), "Codex"),
@@ -2035,6 +2352,7 @@ export async function fetchAllProviderUsage(authStorage?: AuthStorageLike): Prom
     withTimeout(fetchMinimaxUsage(authStorage), "Minimax"),
     withTimeout(fetchZaiUsage(authStorage), "Zai"),
     withTimeout(fetchGrokUsage(authStorage), "Grok"),
+    withTimeout(fetchCursorUsage(authStorage), "Cursor"),
     withTimeout(fetchGitHubCopilotUsage(), "GitHub Copilot"),
   ]);
 
@@ -2077,14 +2395,6 @@ export function clearUsageCache(): void {
  *  1. The engine-injected `getRateLimitResetAt` callback (self-healing reset-aware
  *     auto-unpause scheduling — see SelfHealingOptions in packages/engine/src/self-healing.ts).
  *  2. The dashboard GlobalPauseBanner ETA countdown.
- *
- * Only resolves a reset time when a window is actually exhausted (percentLeft <= 0
- * or percentUsed >= 100) — i.e. the window that would have triggered the rate-limit
- * globalPause. A non-exhausted window's resetAt (even if soonest) is intentionally
- * ignored: reporting an ETA for a window that isn't the reason for the pause would
- * be misleading (the pause may resolve sooner, or the operator would resume-guess
- * against the wrong window). Prefers the Claude provider and ignores providers whose
- * `status !== "ok"` (no-auth/error providers carry no trustworthy reset data).
  */
 export function resolveRateLimitResetAt(
   providers: ProviderUsage[],
@@ -2100,8 +2410,6 @@ export function resolveRateLimitResetAt(
     if (!isExhausted) continue;
     if (!window.resetAt || window.resetMs === undefined) continue;
 
-    // Guard against past/invalid resets — reuse the resetMs/resetAt already
-    // computed by the fetchers rather than re-parsing resetAt.
     const resetTimeMs = new Date(window.resetAt).getTime();
     if (Number.isNaN(resetTimeMs) || resetTimeMs <= now) continue;
     if (window.resetMs <= 0) continue;
@@ -2119,51 +2427,17 @@ FNXC:UsageControl 2026-07-11-00:00 (FUSI-057):
 The engine (scheduler, self-healing) needs a worst-case read on live Anthropic-subscription
 usage to gate future pause/throttle behavior (FUSI-058, FUSI-059), but `@fusion/engine` must
 never import `@fusion/dashboard`. `UsageControlSnapshot` + `resolveUsageControlSnapshot` are
-the single engine-consumable reduction of the display-only `ProviderUsage[]` shape: a pure,
-display-agnostic function with no I/O, no cache access, and no `Date.now()` reliance beyond
-what the windows already encode. The dashboard wires a DI callback (`getUsageControlSnapshot`
-on `SelfHealingOptions`, see `packages/engine/src/self-healing.ts`) that calls
-`fetchAllProviderUsage(authStorage)` then this resolver, so the engine can read a compact
-snapshot without ever importing this file. This generalizes FUSI-053's `resolveRateLimitResetAt`
-/ `getRateLimitResetAt` seam: `soonestResetAt`/`soonestResetMs` here subsume that reset time, so
-a future refactor could derive `getRateLimitResetAt`'s return from this snapshot instead of
-maintaining a parallel reducer. FUSI-053's `getRateLimitResetAt` path is untouched by this change.
+the single engine-consumable reduction of the display-only `ProviderUsage[]` shape.
 */
-
-/**
- * Compact, engine-consumable reduction of live Anthropic-subscription usage.
- * Display-agnostic: contains only the fields downstream usage-control behaviors
- * (threshold pause, adaptive concurrency) need, not the full display shape
- * (`resetText`, `windowDurationMs`, per-window labels for every window, etc.)
- * that `UsageIndicator.tsx` renders.
- */
 export interface UsageControlSnapshot {
-  /** Highest `percentUsed` across the considered Claude windows (5h + weekly). */
   worstPercentUsed: number;
-  /** `percentLeft` of the same worst-case window (not simply `100 - worstPercentUsed`;
-   *  derived directly from that window so any provider-side rounding is preserved). */
   worstPercentLeft: number;
-  /** ISO 8601 timestamp of the soonest FUTURE reset across usable windows, or `null`. */
   soonestResetAt: string | null;
-  /** Milliseconds until the soonest future reset, or `null`. */
   soonestResetMs: number | null;
-  /** Weekly-window pace passthrough (`ahead`/`on-track`/`behind`), or `null` when unavailable. */
   pace: "ahead" | "on-track" | "behind" | null;
-  /** Label of the window that produced the worst-case percentages (e.g. "Session (5h)", "Weekly"). */
   worstWindowLabel: string;
 }
 
-/**
- * Reduce `ProviderUsage[]` to a compact `UsageControlSnapshot` for engine consumption.
- * PURE: no I/O, no cache access, no hidden `Date.now()` dependence beyond what the
- * windows already encode (their `resetMs`/`resetAt` were computed at fetch time).
- *
- * Selects the `"Claude"` provider with `status === "ok"`, considers its `"Session (5h)"`
- * and `"Weekly"` windows (per-model weekly windows, e.g. `"Weekly (Sonnet)"`, are also
- * included for worst-case percent selection, but the `pace` field only reads the
- * aggregate `"Weekly"` window). Returns `null` when there is no Claude provider with
- * `status === "ok"`, or when it has no usable window.
- */
 export function resolveUsageControlSnapshot(providers: ProviderUsage[]): UsageControlSnapshot | null {
   const claude = providers.find((p) => p.name === "Claude" && p.status === "ok");
   if (!claude || claude.windows.length === 0) {
@@ -2177,7 +2451,6 @@ export function resolveUsageControlSnapshot(providers: ProviderUsage[]): UsageCo
     return null;
   }
 
-  // Worst-case: highest percentUsed wins; ties keep the first (stable) match.
   let worst = candidateWindows[0]!;
   for (const w of candidateWindows) {
     if (w.percentUsed > worst.percentUsed) {
@@ -2185,7 +2458,6 @@ export function resolveUsageControlSnapshot(providers: ProviderUsage[]): UsageCo
     }
   }
 
-  // Soonest future reset across ALL candidate windows (only positive resetMs counts).
   let soonestResetMs: number | null = null;
   let soonestResetAt: string | null = null;
   for (const w of candidateWindows) {

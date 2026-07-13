@@ -52,6 +52,16 @@ export async function advanceIntegrationBranchRef(args: {
   expectedCurrentSha: string;
   taskId: string;
   audit: RunAuditor;
+  /*
+  FNXC:MergePush 2026-07-11-22:20:
+  Explicit opt-in for the push-after-merge divergence path ONLY. A `git pull --rebase`
+  against a diverged remote rewrites the local-only commits on top of the remote tip, so
+  the resulting sha can never descend from the old local tip — a non-fast-forward ref move
+  is inherent to rebase, not an orphaning bug (the rewritten commits carry the same diffs,
+  and the old tip stays reachable via the reflog). The CAS old-value check still guards
+  against concurrent movement. Merge landings must NEVER set this.
+  */
+  allowNonFastForward?: boolean;
   /**
    * FNXC:MergeIsolation 2026-07-11-12:00:
    * Opt-in flag set by the reuse-task-worktree (isolated-mode) merge caller
@@ -62,6 +72,7 @@ export async function advanceIntegrationBranchRef(args: {
    * unaffected; production reuse-task-worktree callers MUST pass `true`.
    */
   requireIsolatedRoot?: boolean;
+
 }): Promise<
   | { advanced: true; previousSha: string; newSha: string }
   | {
@@ -207,8 +218,10 @@ export async function advanceIntegrationBranchRef(args: {
   // tip. CAS alone (old-value match) lets a sibling commit overwrite the ref
   // and orphan the prior tip — the exact shape that left an FN-trailered
   // squash reachable only from a feature branch when a subsequent merger
-  // built its squash off a stale base. Reject non-FF advances.
-  if (newSha !== expectedCurrentSha) {
+  // built its squash off a stale base. Reject non-FF advances unless the
+  // caller explicitly opted in (push-after-merge divergence rebase — see the
+  // allowNonFastForward doc above).
+  if (newSha !== expectedCurrentSha && args.allowNonFastForward !== true) {
     try {
       await testHooks.runGit(
         ["merge-base", "--is-ancestor", expectedCurrentSha, newSha],

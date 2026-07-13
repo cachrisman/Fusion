@@ -127,6 +127,7 @@ async function loadCommandHandlers() {
   const { runSettingsExport } = await import("./commands/settings-export.js");
   const { runSettingsImport } = await import("./commands/settings-import.js");
   const { runMcpList, runMcpAdd, runMcpEdit, runMcpRemove, runMcpEnable, runMcpDisable, runMcpImport, runMcpExport, runMcpValidate, runMcpServe } = await import("./commands/mcp.js");
+  const { runWorkflowValidate } = await import("./commands/workflow.js");
   const { runGitStatus, runGitFetch, runGitPull, runGitPush } = await import("./commands/git.js");
   const { runBranchGroupList, runBranchGroupShow, runBranchGroupPromote, runBranchGroupAbandon } = await import("./commands/branch-group.js");
   const { runBackupCreate, runBackupList, runBackupRestore, runBackupCleanup } = await import("./commands/backup.js");
@@ -145,6 +146,7 @@ async function loadCommandHandlers() {
   const { runPluginList, runPluginInstall, runPluginUninstall, runPluginEnable, runPluginDisable, runPluginSetupStatus, runPluginSetup, runPluginAvailable, runPluginSettings, runPluginRescan } = await import("./commands/plugin.js");
   const { runPluginCreate, runPluginNew } = await import("./commands/plugin-scaffold.js");
   const { runPluginDev } = await import("./commands/plugin-dev.js");
+  const { runPluginPublish } = await import("./commands/plugin-publish.js");
   const { runSkillsSearch, runSkillsInstall } = await import("./commands/skills.js");
   const { runResearchCreate, runResearchList, runResearchShow, runResearchExport, runResearchCancel, runResearchRetry } = await import("./commands/research.js");
   const { runExperimentFinalize } = await import("./commands/experiment-finalize.js");
@@ -205,6 +207,7 @@ async function loadCommandHandlers() {
     runMcpExport,
     runMcpValidate,
     runMcpServe,
+    runWorkflowValidate,
     runGitStatus,
     runGitFetch,
     runGitPull,
@@ -270,6 +273,7 @@ async function loadCommandHandlers() {
     runPluginCreate,
     runPluginNew,
     runPluginDev,
+    runPluginPublish,
     runSkillsSearch,
     runSkillsInstall,
     runResearchCreate,
@@ -421,6 +425,8 @@ PR:
                                       --transport defaults to stdio; --transport http requires --port
                                       and a bearer token (--token or FN_MCP_TOKEN) is REQUIRED for any
                                       non-loopback --host and strongly recommended even on loopback
+  fn workflow validate <id> | --file <path> [--json]
+                                      Dry-run validate a workflow IR without creating or mutating it
 
   fn git status              Show current branch, commit, dirty state, ahead/behind
   fn git push                Push current branch
@@ -472,6 +478,8 @@ PR:
   fn plugin create <name>           Scaffold a new plugin project
   fn plugin new <name>              Scaffold a standalone publishable plugin project
   fn plugin dev <path>              Build, install, and hot-reload a plugin locally
+  fn plugin publish <path> [--dry-run] [--previous-version <semver>]
+                                      Preflight a plugin before manual pack/publish
   fn skills search <query>            Search skills.sh for agent skills
   fn skills search <query> --limit 5  Limit results
   fn skills install <owner/repo>      Install skills from a source
@@ -488,7 +496,8 @@ Options:
   --paused                   Start with engine paused (automation disabled)
   --dev                      Start dashboard in development mode
   --no-engine                Start dashboard only (no AI engine)
-  --supervise                Run with auto-restart on crash (bounded retries)
+  --supervise                (default) Run with auto-restart on crash and System-panel restart support
+  --no-supervise             Run the dashboard without the supervising parent process
   --lang <locale>            Terminal-UI locale for this run (en, zh-CN, zh-TW, fr, es, ko); the browser dashboard resolves its own language
   --attach <file>            Attach file(s) on task create (repeatable)
   --depends <id>             Declare dependency on task create (repeatable)
@@ -725,6 +734,7 @@ async function main() {
     runMcpExport,
     runMcpValidate,
     runMcpServe,
+    runWorkflowValidate,
     runGitStatus,
     runGitFetch,
     runGitPull,
@@ -790,6 +800,7 @@ async function main() {
     runPluginCreate,
     runPluginNew,
     runPluginDev,
+    runPluginPublish,
     runSkillsSearch,
     runSkillsInstall,
     runResearchCreate,
@@ -844,7 +855,17 @@ async function main() {
         const noAuth = args.includes("--no-auth");
         const dashTokenIdx = args.indexOf("--token");
         const token = dashTokenIdx !== -1 && dashTokenIdx + 1 < args.length ? args[dashTokenIdx + 1] : undefined;
-        const supervise = args.includes("--supervise");
+        /*
+        FNXC:SystemPanel 2026-07-12-14:10:
+        Supervision is the default for the dashboard (bare `fn`, `fusion`,
+        npx, packaged binary alike): a foreground parent respawns the child on
+        crash and on the System panel's intentional-restart exit code.
+        `--no-supervise` opts out; a child under an existing supervisor
+        (FUSION_RESTART_SUPERVISED=1, incl. `pnpm dev`) and inspector runs
+        never self-supervise. `--supervise` is kept as a no-op-compat flag.
+        */
+        const { shouldSuperviseDashboard } = await import("./commands/dashboard.js");
+        const supervise = shouldSuperviseDashboard(args);
         const dashLangIdx = args.indexOf("--lang");
         const lang = dashLangIdx !== -1 && dashLangIdx + 1 < args.length ? args[dashLangIdx + 1] : undefined;
         if (lang !== undefined) {
@@ -1831,6 +1852,23 @@ async function main() {
         break;
       }
 
+      case "workflow": {
+        const subcommand = args[1];
+        switch (subcommand) {
+          case "validate": {
+            const file = getFlagValue(args, "--file");
+            const workflowId = file ? undefined : args[2];
+            await runWorkflowValidate({ workflowId, file, projectName, json: args.includes("--json") });
+            break;
+          }
+          default:
+            console.error(`Unknown subcommand: workflow ${subcommand || ""}`);
+            console.log("Try: fn workflow validate <id> | --file <path> [--json]");
+            process.exit(1);
+        }
+        break;
+      }
+
 
       case "git": {
         const subcommand = args[1];
@@ -2178,9 +2216,24 @@ async function main() {
             });
             break;
           }
+          case "publish": {
+            const publishArgs = args.slice(2);
+            const previousVersion = getFlagValue(publishArgs, "--previous-version");
+            const pluginPath = publishArgs.find((value, index) => {
+              if (value.startsWith("--")) return false;
+              return !(publishArgs[index - 1] === "--previous-version");
+            });
+            if (!pluginPath) { console.error("Usage: fn plugin publish <path> [--dry-run] [--previous-version <semver>]"); process.exit(1); }
+            await runPluginPublish(pluginPath, {
+              dryRun: args.includes("--dry-run"),
+              previousVersion,
+              projectName,
+            });
+            break;
+          }
           default:
             console.error(`Unknown subcommand: plugin ${sub || ""}`);
-            console.log("Try: fn plugin list | install | add (alias for install) | uninstall | enable | disable | available | settings | rescan | setup-status | setup | create | new | dev");
+            console.log("Try: fn plugin list | install | add (alias for install) | uninstall | enable | disable | available | settings | rescan | setup-status | setup | create | new | dev | publish");
             process.exit(1);
         }
         break;

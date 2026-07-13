@@ -246,6 +246,45 @@ describe("ChatManager.sendMessage", () => {
     });
   });
 
+  it("uses the updated session model pair on the next send after updateSession persistence", async () => {
+    let createOptions: any;
+    __setCreateResolvedAgentSession(async (options: any) => {
+      createOptions = options;
+      return {
+        session: {
+          prompt: vi.fn().mockResolvedValue(undefined),
+          dispose: vi.fn(),
+          model: { provider: options.defaultProvider, id: options.defaultModelId },
+          state: { messages: [{ role: "assistant", content: "Updated model response" }] },
+        },
+        runtimeId: "openai",
+        wasConfigured: true,
+      } as any;
+    });
+    const session = {
+      id: "chat-001",
+      agentId: "__fn_agent__",
+      status: "active",
+      projectId: "project-a",
+      modelProvider: "anthropic",
+      modelId: "claude-sonnet-4-5",
+    };
+    mockChatStore.getSession.mockImplementation(() => session);
+    mockChatStore.updateSession.mockImplementation((_id, input) => {
+      Object.assign(session, input);
+      return { ...session };
+    });
+
+    mockChatStore.updateSession("chat-001", { modelProvider: "openai", modelId: "gpt-4o" });
+    const chatManager = createChatManagerWithSettings({ defaultProvider: "anthropic", defaultModelId: "claude-sonnet-4-5" });
+    await chatManager.sendMessage("chat-001", "Use the new target");
+
+    expect(mockChatStore.updateSession).toHaveBeenCalledWith("chat-001", { modelProvider: "openai", modelId: "gpt-4o" });
+    expect(createOptions.defaultProvider).toBe("openai");
+    expect(createOptions.defaultModelId).toBe("gpt-4o");
+  });
+
+
   it("passes the chat session thinking level to model-loop session options", async () => {
     let createOptions: any;
     __setCreateResolvedAgentSession(async (options: any) => {
@@ -766,6 +805,7 @@ describe("ChatManager.sendMessage", () => {
       "fn_workflow_settings",
       "fn_workflow_list",
       "fn_workflow_get",
+        "fn_workflow_validate",
       "fn_workflow_select",
       "fn_trait_list",
     ]) {
@@ -1590,6 +1630,126 @@ describe("ChatManager.sendMessage", () => {
       toType: "user",
       type: "agent-to-user",
     }));
+  });
+
+  it("exposes mailbox tools when an agent-bound chat has a MessageStore", async () => {
+    const createResolvedSession = vi.fn(async () => ({
+      session: {
+        prompt: vi.fn().mockResolvedValue(undefined),
+        dispose: vi.fn(),
+        state: {
+          messages: [{ role: "assistant", content: "Runtime response" }],
+        },
+      },
+    }));
+    __setCreateResolvedAgentSession(createResolvedSession as any);
+
+    const messageStore = {
+      sendMessage: vi.fn().mockReturnValue({ id: "msg-123" }),
+      getInbox: vi.fn().mockReturnValue([]),
+      markAsRead: vi.fn(),
+      markAllAsRead: vi.fn(),
+    };
+    const chatManager = createChatManager(undefined, messageStore);
+
+    await chatManager.sendMessage("chat-001", "Hello");
+
+    const toolNames = (createResolvedSession.mock.calls[0]?.[0]?.customTools ?? []).map((tool: { name: string }) => tool.name);
+    expect(toolNames).toContain("fn_send_message");
+    expect(toolNames).toContain("fn_read_messages");
+  });
+
+  it("signals reduced tool schema when an agent-bound chat has no MessageStore", async () => {
+    mockChatStore.getSession.mockReturnValue({
+      id: "chat-001",
+      agentId: "agent-001",
+      status: "active",
+      projectId: "project-a",
+    });
+    const diagnosticsWarn = vi.fn();
+    __setChatDiagnostics({
+      ...__getChatDiagnostics(),
+      warn: diagnosticsWarn,
+    });
+    const events: Array<{ type: string; data: any }> = [];
+    const unsubscribe = chatStreamManager.subscribe("chat-001", (event) => {
+      events.push(event as any);
+    });
+    const createResolvedSession = vi.fn(async () => ({
+      session: {
+        prompt: vi.fn().mockResolvedValue(undefined),
+        dispose: vi.fn(),
+        state: {
+          messages: [{ role: "assistant", content: "Runtime response" }],
+        },
+      },
+    }));
+    __setCreateResolvedAgentSession(createResolvedSession as any);
+
+    const chatManager = createChatManager();
+    await chatManager.sendMessage("chat-001", "Hello");
+    unsubscribe();
+
+    const toolNames = (createResolvedSession.mock.calls[0]?.[0]?.customTools ?? []).map((tool: { name: string }) => tool.name);
+    expect(toolNames).not.toContain("fn_send_message");
+    expect(toolNames).not.toContain("fn_read_messages");
+    expect(diagnosticsWarn).toHaveBeenCalledWith("Project chat tool schema reduced", expect.objectContaining({
+      sessionId: "chat-001",
+      agentId: "agent-001",
+      projectId: "project-a",
+      reason: "message-store-unavailable",
+    }));
+    expect(events).toContainEqual({
+      type: "warning",
+      data: expect.objectContaining({
+        code: "tool-schema-reduced",
+        toolSchemaReduced: true,
+        reason: "message-store-unavailable",
+      }),
+    });
+  });
+
+  it("adds mailbox tools after setMessageStore upgrades a cached manager", async () => {
+    const firstCreateResolvedSession = vi.fn(async () => ({
+      session: {
+        prompt: vi.fn().mockResolvedValue(undefined),
+        dispose: vi.fn(),
+        state: {
+          messages: [{ role: "assistant", content: "Before upgrade" }],
+        },
+      },
+    }));
+    __setCreateResolvedAgentSession(firstCreateResolvedSession as any);
+
+    const chatManager = createChatManager();
+    await chatManager.sendMessage("chat-001", "Before engine boot");
+    const firstToolNames = (firstCreateResolvedSession.mock.calls[0]?.[0]?.customTools ?? []).map((tool: { name: string }) => tool.name);
+    expect(firstToolNames).not.toContain("fn_send_message");
+
+    const messageStore = {
+      sendMessage: vi.fn().mockReturnValue({ id: "msg-123" }),
+      getInbox: vi.fn().mockReturnValue([]),
+      markAsRead: vi.fn(),
+      markAllAsRead: vi.fn(),
+    };
+    chatManager.setMessageStore(messageStore as any);
+
+    const secondCreateResolvedSession = vi.fn(async () => ({
+      session: {
+        prompt: vi.fn().mockResolvedValue(undefined),
+        dispose: vi.fn(),
+        state: {
+          messages: [{ role: "assistant", content: "After upgrade" }],
+        },
+      },
+    }));
+    __setCreateResolvedAgentSession(secondCreateResolvedSession as any);
+
+    await chatManager.sendMessage("chat-001", "After engine boot");
+
+    const secondToolNames = (secondCreateResolvedSession.mock.calls[0]?.[0]?.customTools ?? []).map((tool: { name: string }) => tool.name);
+    expect(secondToolNames).toContain("fn_send_message");
+    expect(secondToolNames).toContain("fn_read_messages");
   });
 
   it("injects ask-question but not mailbox tools for non-agent chat sessions", async () => {
@@ -2581,7 +2741,7 @@ describe("ChatManager.sendMessage", () => {
       expect(promptArgument).toContain("## Attachments");
       expect(promptArgument).toContain("session attachment bytes");
       expect(promptOptions).toEqual({
-        images: [{ type: "image", data: Buffer.from([9, 8, 7]).toString("base64"), mimeType: "image/png" }],
+        images: [expect.objectContaining({ type: "image", data: Buffer.from([9, 8, 7]).toString("base64"), mimeType: "image/png" })],
       });
     } finally {
       await rm(rootDir, { recursive: true, force: true });
@@ -3414,7 +3574,7 @@ describe("ChatManager generation isolation", () => {
       expect(promptArgument).toContain("## Attachments");
       expect(promptArgument).toContain("room attachment bytes");
       expect(promptOptions).toEqual({
-        images: [{ type: "image", data: Buffer.from([5, 4, 3]).toString("base64"), mimeType: "image/webp" }],
+        images: [expect.objectContaining({ type: "image", data: Buffer.from([5, 4, 3]).toString("base64"), mimeType: "image/webp" })],
       });
     } finally {
       await rm(rootDir, { recursive: true, force: true });

@@ -8,6 +8,15 @@ import { fetchTaskDetail } from "../../api";
 import { InlineCreateCard } from "../InlineCreateCard";
 import { TaskCard } from "../TaskCard";
 
+// FNXC:TaskCardTestHarness 2026-07-11-00:00: RuntimeFallbackBadge calls useToast directly, so isolated TaskCard mobile renders need the hook mocked unless wrapped in ToastProvider.
+vi.mock("../../hooks/useToast", () => ({
+  useToast: () => ({
+    addToast: vi.fn(),
+    removeToast: vi.fn(),
+    toasts: [],
+  }),
+}));
+
 vi.mock("../../api", () => ({
   fetchTaskDetail: vi.fn(),
   uploadAttachment: vi.fn(),
@@ -432,7 +441,7 @@ describe("TaskCard mobile", () => {
     expectRuleToContain(mobileSection, ".card-revert-btn", "opacity: 1;");
   });
 
-  it("renders the Revert affordance on a done card at the mobile breakpoint", () => {
+  it("renders the Revert affordance inside the done actions dropdown at the mobile breakpoint", () => {
     const task = createTask({ id: "FN-201", column: "done", mergeDetails: { commitSha: "abc123def456" } as any });
 
     const { container } = render(
@@ -444,7 +453,9 @@ describe("TaskCard mobile", () => {
       />,
     );
 
-    expect(container.querySelector(".card-revert-btn")).toBeTruthy();
+    expect(container.querySelector(".card-revert-btn")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Actions" }));
+    expect(screen.getByRole("menuitem", { name: "Revert" })).toBeTruthy();
   });
 
   it("renders the Revert affordance on an archived card at the mobile breakpoint", () => {

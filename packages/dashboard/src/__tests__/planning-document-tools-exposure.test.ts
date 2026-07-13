@@ -38,6 +38,7 @@ async function waitFor(condition: () => boolean): Promise<void> {
 const REQUIRED_WORKFLOW_AUTHORING_TOOLS = [
   "fn_workflow_list",
   "fn_workflow_get",
+        "fn_workflow_validate",
   "fn_workflow_select",
   "fn_workflow_create",
   "fn_workflow_update",

@@ -1373,6 +1373,7 @@
     "stopGeneration": "停止生成",
     "thinking": "思考中",
     "thinkingLabel": "思考",
+    "thinkingLevelButton": "思考等級",
     "thinkingStatus": "思考中……",
     "toolArgsLabel": "",
     "toolArgsPreview": "",
@@ -1387,7 +1388,14 @@
     "workingStatus": "處理中……",
     "you": "你",
     "contextWindowAria": "Estimated {{used}} of {{total}} context tokens",
-    "noMessage": ""
+    "noMessage": "",
+    "modelAgentSection": "Model / Agent",
+    "thinkingLevelSection": "Thinking level",
+    "noModelsAvailable": "No models available",
+    "currentAgentTarget": "Current agent: {{name}}",
+    "currentModelTarget": "Current model: {{model}}",
+    "currentDefaultTarget": "Using the default chat target"
+
   },
   "chatRooms": {
     "error": {
@@ -1409,6 +1417,13 @@
     "versionMismatchInfix": "但此儀表板需要",
     "versionMismatchPrefix": "你安裝的",
     "versionMismatchSuffix": "更新以保持同步。"
+  },
+  "storageMigrationNotice": {
+    "body": "",
+    "dismissLabel": "",
+    "getHelp": "",
+    "getHelpLabel": "",
+    "title": ""
   },
   "cliBinary": {
     "binaryLabel": "",
@@ -2441,6 +2456,7 @@
     "previewTitle": "{{file}} 的預覽"
   },
   "fileEditor": {
+    "autoSave": "",
     "edit": "編輯",
     "editMode": "編輯模式",
     "editorFor": "{{filePath}}編輯器",
@@ -2448,6 +2464,7 @@
     "lineNumber": "行號",
     "preview": "預覽",
     "previewMode": "預覽模式",
+    "toggleAutoSave": "",
     "toggleLineNumbers": "切換行號",
     "toggleOptions": "切換編輯器選項",
     "toggleWordWrap": "切換自動換行",
@@ -5666,7 +5683,9 @@
       "title": "外觀",
       "openTasksInRightSidebarHelp": "",
       "openMobileTasksInPopupHelp": "",
-      "taskDetailChatFirstHelp": ""
+      "taskDetailChatFirstHelp": "",
+      "showCostBadgeOnCards": "",
+      "showCostBadgeOnCardsHelp": ""
     },
     "auth": {
       "apiKeyCleared": "API 金鑰已清除",
@@ -5796,6 +5815,7 @@
     "footer": {
       "help": "說明",
       "version": "版本 {{version}}",
+      "versionShort": "",
       "checkUpdates": "",
       "helpDiscussions": ""
     },
@@ -6205,7 +6225,11 @@
       "gitLabPersonalAccessToken": "",
       "gitLabAuthTokenHint": "",
       "includeTaskIdInCommitDefault": "",
-      "trailerEmail": ""
+      "trailerEmail": "",
+      "gitRemoteThatMergedResultsArePushedTo": "",
+      "pushTargetBranch": "",
+      "sameAsIntegrationBranchDefault": "",
+      "pushTargetBranchHelp": ""
     },
     "mergeManually": "手動合併",
     "mobileNav": {
@@ -6370,7 +6394,25 @@
       "whenEnabledTasksCreatedWithoutATitleBut": "",
       "autoSelectModelPresetHint": "",
       "prTitlePromptInstructionsHelp": "",
-      "prDescriptionPromptInstructionsHelp": ""
+      "prDescriptionPromptInstructionsHelp": "",
+      "chatHeading": "Chat",
+      "chatDescription": "Choose the default target for new Direct chats and whether New Chat should prompt or immediately use that default.",
+      "chatNewSessionMode": "New Chat behavior",
+      "chatNewSessionModePrompt": "Prompt for model each time",
+      "chatNewSessionModeAlwaysDefault": "Always use configured default",
+      "chatNewSessionModeHelp": "Prompt mode opens New Chat with this default preselected. Always-default mode skips the dialog when the configured default is complete.",
+      "chatDefaultKind": "Chat default target",
+      "chatDefaultKindModel": "Model",
+      "chatDefaultKindAgent": "Agent",
+      "chatDefaultModel": "Chat Default Model",
+      "selectChatDefaultModel": "Select a chat default model",
+      "chatDefaultModelHelp": "Model-mode New Chat uses the built-in Fusion chat agent with this provider/model pair. Leave empty to fall back to prompting.",
+      "chatDefaultAgent": "Chat Default Agent",
+      "loadingAgents": "Loading agents…",
+      "selectChatDefaultAgent": "Select a chat default agent",
+      "chatDefaultAgentEmpty": "No agents are available for this project yet.",
+      "chatDefaultAgentHelp": "Agent-mode New Chat starts a Direct chat with the selected durable agent.",
+      "chatDefaultReset": "Reset Chat default"
     },
     "remote": {
       "acceptRoutes": "",
@@ -6684,6 +6726,7 @@
     },
     "reset": {
       "button": "",
+      "buttonShort": "",
       "buttonTitle": "",
       "dialogAriaLabel": "",
       "dialogTitle": "",
@@ -7766,7 +7809,8 @@
       "terminal": "工作階段",
       "worktreeTerminal": "終端",
       "workflow": "工作流程",
-      "summary": "Summary"
+      "summary": "Summary",
+      "cost": ""
     },
     "terminal": {
       "loading": ""
@@ -7852,6 +7896,22 @@
       "unlinkMessage": "",
       "unlinkTitle": "",
       "unlinked": ""
+    },
+    "costTab": {
+      "cacheWriteTokens": "",
+      "cachedTokens": "",
+      "cost": "",
+      "costUnavailable": "",
+      "description": "",
+      "empty": "",
+      "heading": "",
+      "inputTokens": "",
+      "model": "",
+      "outputTokens": "",
+      "totalCost": "",
+      "totalCostLabel": "",
+      "totalTokens": "",
+      "unknownModel": ""
     }
   },
   "taskDocuments": {
@@ -8274,7 +8334,9 @@
     "revertTask": "",
     "undoOf": "",
     "undoOfTitle": "",
-    "undoTask": ""
+    "undoTask": "",
+    "costBadgeTitle": "",
+    "costBadgeAriaLabel": ""
   },
   "terminal": {
     "arrowKeysLabel": "",
@@ -8289,7 +8351,6 @@
     "decreaseFontSize": "減小終端字型大小",
     "exitLabel": "退出：{{code}}",
     "failedToStartTerminal": "無法啟動終端：{{error}}",
-    "helpText": "Ctrl++/- 縮放 • ⌨ 快捷鍵面板 • Esc 關閉",
     "increaseFontSize": "增加終端字型大小",
     "initializeError": "終端 UI 初始化失敗：{{error}}",
     "newSession": "新建工作階段",
@@ -8326,6 +8387,7 @@
   },
   "todo": {
     "addItemPlaceholder": "新增待辦事項",
+    "allDoneHidden": "",
     "addList": "新增清單",
     "assignAgent": "將 {{text}} 指派給代理",
     "cancelItemEdit": "取消項目編輯",
@@ -8355,6 +8417,7 @@
     "failedToCreateTask": "建立任務失敗：{{error}}",
     "failedToLoadAgents": "加載代理失敗：{{error}}",
     "failedUpdateItem": "更新項目失敗",
+    "hideDone": "",
     "failedUpdateItemToast": "更新待辦項目失敗",
     "itemsLabel": "待辦事項",
     "lists": "清單",
@@ -8374,6 +8437,7 @@
     "saveListRename": "保存清單重新命名",
     "selectList": "選擇清單 {{title}}",
     "selectListEmpty": "從側邊欄選擇清單",
+    "showDone": "",
     "startPlanning": "從 {{text}} 開始規劃",
     "taskCreatedAndAssigned": "建立了 {{id}} 並指派給 {{agent}}",
     "taskCreatedFromTodo": "從待辦事項建立了 {{id}}",
@@ -8633,12 +8697,22 @@
     "widgetDefault": "預設"
   },
   "workflowNodes": {
+    "addStepAgentSteps": "",
+    "addStepAutomation": "",
+    "addStepFlowControl": "",
+    "addStepFragmentDesc": "",
+    "addStepNoMatches": "",
+    "addStepSearchLabel": "",
+    "addStepSearchPlaceholder": "",
+    "addStepTitle": "",
     "advisory": "",
     "autoLayout": "自動排版",
     "codeNote": "在沙箱中執行 TypeScript。語法會在儲存時驗證。",
     "codeSource": "原始碼（TypeScript）",
     "codeTimeout": "逾時（毫秒）",
     "collapseInspector": "",
+    "conditionFailure": "",
+    "conditionSuccess": "",
     "cycleBlocked": "該連線會形成循環 — 只有 for-each 範本內的重做邊才能回繞",
     "deleteEdge": "刪除邊",
     "deleteNode": "刪除節點",
@@ -8691,9 +8765,13 @@
     "mobileConnectTarget": "目標節點",
     "mobileGraph": "",
     "mobileGraphEmpty": "",
+    "mobileGraphStyleCanvas": "",
+    "mobileGraphStyleLabel": "",
+    "mobileGraphStyleList": "",
     "mobileMoveDown": "",
     "mobileMoveUp": "",
     "mobileNodeKinds": "",
+    "nodeInspector": "",
     "notifyCustom": "",
     "notifyCustomEvent": "",
     "notifyEvent": "",
@@ -8703,6 +8781,7 @@
     "parseArtifact": "Artifact",
     "parseParser": "Parser",
     "quorumN": "法定人數（n）",
+    "readOnlyDuplicateToEdit": "Built-in structure is read-only — prompts on prompt and gate nodes can be edited here.",
     "releaseCapacity": "下游容量",
     "releaseCondition": "釋放條件",
     "releaseDependency": "相依完成",
@@ -8715,6 +8794,9 @@
     "reviewPlan": "Plan review",
     "reviewType": "Review type",
     "showInspector": "",
+    "simpleAddStep": "",
+    "simpleContainerEmpty": "",
+    "simpleInsertStep": "",
     "splitNote": "分支從此節點並行執行。分支內不允許執行與合併接縫。",
     "startEntryColumn": "",
     "startEntryColumnAuto": "",
@@ -8729,11 +8811,7 @@
     "templatesPluginSteps": "外掛步驟",
     "templatesSection": "範本",
     "timeoutMs": "",
-    "trivialGraphHint": "這個工作流程只會執行 start → end。請從上方的選盤新增步驟來建構它。",
-    "conditionFailure": "",
-    "conditionSuccess": "",
-    "nodeInspector": "",
-    "readOnlyDuplicateToEdit": "Built-in structure is read-only — prompts on prompt and gate nodes can be edited here."
+    "trivialGraphHint": "這個工作流程只會執行 start → end。請從上方的選盤新增步驟來建構它。"
   },
   "workflows": {
     "aiEdit": "使用 AI 設計",
@@ -8749,6 +8827,7 @@
     "backToWorkflowList": "",
     "clickToEditDescription": "按一下以編輯說明",
     "clickToRename": "按一下以重新命名",
+    "closeEditor": "",
     "created": "已建立工作流程「{{name}}」",
     "createDescription": "說明（選填）",
     "createFailed": "建立工作流程失敗",
@@ -8765,6 +8844,8 @@
     "discardConfirm": "捨棄",
     "discardMessage": "你對這個工作流程有未儲存的變更。要捨棄它們嗎？",
     "discardTitle": "要捨棄未儲存的變更嗎？",
+    "duplicatedEditable": "",
+    "duplicateFailed": "",
     "duplicateToCustomize": "",
     "emptyDescription": "工作流程會協調任務執行前後所執行的步驟與閘門。建立一個來開始安排流程。",
     "emptyTitle": "未選取工作流程",
@@ -8778,17 +8859,22 @@
     "importInvalidJson": "該檔案不是有效的 JSON。",
     "importStripped": "已從匯入的節點移除自動核准旗標",
     "importTooltip": "從 JSON 檔案匯入工作流程",
+    "lifecycleFix": "",
+    "lifecycleFixAll": "",
+    "lifecycleWarningsCount_one": "",
+    "lifecycleWarningsCount_other": "",
+    "loadFailed": "",
+    "loading": "",
     "migrationNotice": "你的舊版工作流程步驟已轉換 — 可在選盤中以範本形式找到它們，以及名為「已遷移步驟」的工作流程。",
     "mobileEditorNav": "",
     "mobileSelectNote": "",
     "nameLabel": "工作流程名稱",
     "newWorkflow": "新工作流程",
+    "noneYet": "",
     "readOnlyBuiltin": "Built-in workflow: structure is read-only, prompts are editable.",
     "saved": "",
     "savedNotCompilable": "",
     "saveFailed": "",
-    "showCanvasEditor": "",
-    "showSimpleEditor": "",
     "templateBlank": "空白",
     "templateBlankDescription": "從空的 start → end 圖形開始。",
     "templateCopyName": "{{name}} 複本",
@@ -8797,13 +8883,11 @@
     "templatePickerLabel": "起始來源",
     "templateSectionBuiltin": "內建工作流程",
     "templateSectionYours": "你的工作流程",
-    "closeEditor": "",
-    "duplicatedEditable": "",
-    "duplicateFailed": "",
-    "loadFailed": "",
-    "loading": "",
-    "noneYet": "",
-    "title": ""
+    "title": "",
+    "viewModeAdvanced": "",
+    "viewModeLabel": "",
+    "viewModeList": "",
+    "viewModeSimple": ""
   },
   "workflowSelector": {
     "switchActiveMessage": "",

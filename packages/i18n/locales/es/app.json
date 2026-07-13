@@ -1373,6 +1373,7 @@
     "stopGeneration": "Detener generación",
     "thinking": "Pensando",
     "thinkingLabel": "Pensando",
+    "thinkingLevelButton": "Nivel de pensamiento",
     "thinkingStatus": "Pensando…",
     "toolArgsLabel": "",
     "toolArgsPreview": "",
@@ -1387,7 +1388,14 @@
     "workingStatus": "Trabajando…",
     "you": "Tú",
     "contextWindowAria": "Estimated {{used}} of {{total}} context tokens",
-    "noMessage": ""
+    "noMessage": "",
+    "modelAgentSection": "Model / Agent",
+    "thinkingLevelSection": "Thinking level",
+    "noModelsAvailable": "No models available",
+    "currentAgentTarget": "Current agent: {{name}}",
+    "currentModelTarget": "Current model: {{model}}",
+    "currentDefaultTarget": "Using the default chat target"
+
   },
   "chatRooms": {
     "error": {
@@ -1409,6 +1417,13 @@
     "versionMismatchInfix": "pero este panel espera",
     "versionMismatchPrefix": "Tu",
     "versionMismatchSuffix": "Actualiza para mantenerte sincronizado."
+  },
+  "storageMigrationNotice": {
+    "body": "",
+    "dismissLabel": "",
+    "getHelp": "",
+    "getHelpLabel": "",
+    "title": ""
   },
   "cliBinary": {
     "binaryLabel": "",
@@ -2441,6 +2456,7 @@
     "previewTitle": "Vista previa de {{file}}"
   },
   "fileEditor": {
+    "autoSave": "",
     "edit": "Editar",
     "editMode": "Modo editar",
     "editorFor": "Editor para {{filePath}}",
@@ -2448,6 +2464,7 @@
     "lineNumber": "Línea #",
     "preview": "Vista previa",
     "previewMode": "Modo vista previa",
+    "toggleAutoSave": "",
     "toggleLineNumbers": "Alternar números de línea",
     "toggleOptions": "Alternar opciones del editor",
     "toggleWordWrap": "Alternar ajuste de palabra",
@@ -5666,7 +5683,9 @@
       "title": "Apariencia",
       "openTasksInRightSidebarHelp": "",
       "openMobileTasksInPopupHelp": "",
-      "taskDetailChatFirstHelp": ""
+      "taskDetailChatFirstHelp": "",
+      "showCostBadgeOnCards": "",
+      "showCostBadgeOnCardsHelp": ""
     },
     "auth": {
       "apiKeyCleared": "Clave API borrada",
@@ -5796,6 +5815,7 @@
     "footer": {
       "help": "Ayuda",
       "version": "Versión {{version}}",
+      "versionShort": "",
       "checkUpdates": "",
       "helpDiscussions": ""
     },
@@ -6205,7 +6225,11 @@
       "gitLabPersonalAccessToken": "",
       "gitLabAuthTokenHint": "",
       "includeTaskIdInCommitDefault": "",
-      "trailerEmail": ""
+      "trailerEmail": "",
+      "gitRemoteThatMergedResultsArePushedTo": "",
+      "pushTargetBranch": "",
+      "sameAsIntegrationBranchDefault": "",
+      "pushTargetBranchHelp": ""
     },
     "mergeManually": "Fusionar manualmente",
     "mobileNav": {
@@ -6370,7 +6394,25 @@
       "whenEnabledTasksCreatedWithoutATitleBut": "",
       "autoSelectModelPresetHint": "",
       "prTitlePromptInstructionsHelp": "",
-      "prDescriptionPromptInstructionsHelp": ""
+      "prDescriptionPromptInstructionsHelp": "",
+      "chatHeading": "Chat",
+      "chatDescription": "Choose the default target for new Direct chats and whether New Chat should prompt or immediately use that default.",
+      "chatNewSessionMode": "New Chat behavior",
+      "chatNewSessionModePrompt": "Prompt for model each time",
+      "chatNewSessionModeAlwaysDefault": "Always use configured default",
+      "chatNewSessionModeHelp": "Prompt mode opens New Chat with this default preselected. Always-default mode skips the dialog when the configured default is complete.",
+      "chatDefaultKind": "Chat default target",
+      "chatDefaultKindModel": "Model",
+      "chatDefaultKindAgent": "Agent",
+      "chatDefaultModel": "Chat Default Model",
+      "selectChatDefaultModel": "Select a chat default model",
+      "chatDefaultModelHelp": "Model-mode New Chat uses the built-in Fusion chat agent with this provider/model pair. Leave empty to fall back to prompting.",
+      "chatDefaultAgent": "Chat Default Agent",
+      "loadingAgents": "Loading agents…",
+      "selectChatDefaultAgent": "Select a chat default agent",
+      "chatDefaultAgentEmpty": "No agents are available for this project yet.",
+      "chatDefaultAgentHelp": "Agent-mode New Chat starts a Direct chat with the selected durable agent.",
+      "chatDefaultReset": "Reset Chat default"
     },
     "remote": {
       "acceptRoutes": "",
@@ -6684,6 +6726,7 @@
     },
     "reset": {
       "button": "",
+      "buttonShort": "",
       "buttonTitle": "",
       "dialogAriaLabel": "",
       "dialogTitle": "",
@@ -7766,7 +7809,8 @@
       "terminal": "Sesión",
       "worktreeTerminal": "Terminal",
       "workflow": "Flujo de trabajo",
-      "summary": "Summary"
+      "summary": "Summary",
+      "cost": ""
     },
     "terminal": {
       "loading": ""
@@ -7852,6 +7896,22 @@
       "unlinkMessage": "",
       "unlinkTitle": "",
       "unlinked": ""
+    },
+    "costTab": {
+      "cacheWriteTokens": "",
+      "cachedTokens": "",
+      "cost": "",
+      "costUnavailable": "",
+      "description": "",
+      "empty": "",
+      "heading": "",
+      "inputTokens": "",
+      "model": "",
+      "outputTokens": "",
+      "totalCost": "",
+      "totalCostLabel": "",
+      "totalTokens": "",
+      "unknownModel": ""
     }
   },
   "taskDocuments": {
@@ -8274,7 +8334,9 @@
     "revertTask": "",
     "undoOf": "",
     "undoOfTitle": "",
-    "undoTask": ""
+    "undoTask": "",
+    "costBadgeTitle": "",
+    "costBadgeAriaLabel": ""
   },
   "terminal": {
     "arrowKeysLabel": "",
@@ -8289,7 +8351,6 @@
     "decreaseFontSize": "Reducir el tamaño de fuente del terminal",
     "exitLabel": "Salida: {{code}}",
     "failedToStartTerminal": "Error al iniciar el terminal: {{error}}",
-    "helpText": "Ctrl++/- zoom • ⌨ Panel de atajos • Esc cerrar",
     "increaseFontSize": "Aumentar el tamaño de fuente del terminal",
     "initializeError": "Error en la inicialización de la interfaz del terminal: {{error}}",
     "newSession": "Nueva sesión",
@@ -8326,6 +8387,7 @@
   },
   "todo": {
     "addItemPlaceholder": "Agregar elemento de tarea",
+    "allDoneHidden": "",
     "addList": "Agregar lista",
     "assignAgent": "Asignar {{text}} al agente",
     "cancelItemEdit": "Cancelar edición de elemento",
@@ -8355,6 +8417,7 @@
     "failedToCreateTask": "Error al crear la tarea: {{error}}",
     "failedToLoadAgents": "Error al cargar agentes: {{error}}",
     "failedUpdateItem": "Error al actualizar el elemento",
+    "hideDone": "",
     "failedUpdateItemToast": "Error al actualizar el elemento de tareas pendientes",
     "itemsLabel": "Elementos de tareas",
     "lists": "Listas",
@@ -8374,6 +8437,7 @@
     "saveListRename": "Guardar cambio de nombre de lista",
     "selectList": "Seleccionar lista {{title}}",
     "selectListEmpty": "Seleccione una lista de la barra lateral",
+    "showDone": "",
     "startPlanning": "Comenzar a planificar desde {{text}}",
     "taskCreatedAndAssigned": "Creado {{id}} y asignado a {{agent}}",
     "taskCreatedFromTodo": "Creado {{id}} desde la lista de tareas",
@@ -8633,12 +8697,22 @@
     "widgetDefault": "Predeterminado"
   },
   "workflowNodes": {
+    "addStepAgentSteps": "",
+    "addStepAutomation": "",
+    "addStepFlowControl": "",
+    "addStepFragmentDesc": "",
+    "addStepNoMatches": "",
+    "addStepSearchLabel": "",
+    "addStepSearchPlaceholder": "",
+    "addStepTitle": "",
     "advisory": "",
     "autoLayout": "Diseño automático",
     "codeNote": "Ejecuta TypeScript en un entorno aislado. La sintaxis se valida al guardar.",
     "codeSource": "Origen (TypeScript)",
     "codeTimeout": "Tiempo de espera (ms)",
     "collapseInspector": "",
+    "conditionFailure": "",
+    "conditionSuccess": "",
     "cycleBlocked": "Esa conexión crearía un ciclo — solo las conexiones de revisión dentro de una plantilla for-each pueden hacer bucles de retorno",
     "deleteEdge": "Eliminar conexión",
     "deleteNode": "Eliminar nodo",
@@ -8691,9 +8765,13 @@
     "mobileConnectTarget": "Nodo de destino",
     "mobileGraph": "",
     "mobileGraphEmpty": "",
+    "mobileGraphStyleCanvas": "",
+    "mobileGraphStyleLabel": "",
+    "mobileGraphStyleList": "",
     "mobileMoveDown": "",
     "mobileMoveUp": "",
     "mobileNodeKinds": "",
+    "nodeInspector": "",
     "notifyCustom": "",
     "notifyCustomEvent": "",
     "notifyEvent": "",
@@ -8703,6 +8781,7 @@
     "parseArtifact": "Artifact",
     "parseParser": "Parser",
     "quorumN": "Recuento de quórum (n)",
+    "readOnlyDuplicateToEdit": "Built-in structure is read-only — prompts on prompt and gate nodes can be edited here.",
     "releaseCapacity": "Capacidad posterior",
     "releaseCondition": "Condición de liberación",
     "releaseDependency": "Dependencia completada",
@@ -8715,6 +8794,9 @@
     "reviewPlan": "Plan review",
     "reviewType": "Review type",
     "showInspector": "",
+    "simpleAddStep": "",
+    "simpleContainerEmpty": "",
+    "simpleInsertStep": "",
     "splitNote": "Las ramas se ejecutan de forma concurrente desde este nodo. No se permiten uniones de ejecución y fusión dentro de una rama.",
     "startEntryColumn": "",
     "startEntryColumnAuto": "",
@@ -8729,11 +8811,7 @@
     "templatesPluginSteps": "Pasos de plugin",
     "templatesSection": "Plantillas",
     "timeoutMs": "",
-    "trivialGraphHint": "Este flujo de trabajo solo ejecuta inicio → fin. Añade pasos desde la paleta superior para construirlo.",
-    "conditionFailure": "",
-    "conditionSuccess": "",
-    "nodeInspector": "",
-    "readOnlyDuplicateToEdit": "Built-in structure is read-only — prompts on prompt and gate nodes can be edited here."
+    "trivialGraphHint": "Este flujo de trabajo solo ejecuta inicio → fin. Añade pasos desde la paleta superior para construirlo."
   },
   "workflows": {
     "aiEdit": "Diseñar con IA",
@@ -8749,6 +8827,7 @@
     "backToWorkflowList": "",
     "clickToEditDescription": "Haz clic para editar la descripción",
     "clickToRename": "Haz clic para renombrar",
+    "closeEditor": "",
     "created": "Flujo de trabajo «{{name}}» creado",
     "createDescription": "Descripción (opcional)",
     "createFailed": "Error al crear el flujo de trabajo",
@@ -8765,6 +8844,8 @@
     "discardConfirm": "Descartar",
     "discardMessage": "Tienes cambios no guardados en este flujo de trabajo. ¿Descartarlos?",
     "discardTitle": "¿Descartar cambios no guardados?",
+    "duplicatedEditable": "",
+    "duplicateFailed": "",
     "duplicateToCustomize": "",
     "emptyDescription": "Los flujos de trabajo orquestan los pasos y compuertas que se ejecutan alrededor de la ejecución de tareas. Crea uno para comenzar a organizar ese flujo.",
     "emptyTitle": "Ningún flujo de trabajo seleccionado",
@@ -8778,17 +8859,22 @@
     "importInvalidJson": "Ese archivo no es JSON válido.",
     "importStripped": "Se eliminaron los indicadores de aprobación automática de los nodos importados",
     "importTooltip": "Importar un flujo de trabajo desde un archivo JSON",
+    "lifecycleFix": "",
+    "lifecycleFixAll": "",
+    "lifecycleWarningsCount_one": "",
+    "lifecycleWarningsCount_other": "",
+    "loadFailed": "",
+    "loading": "",
     "migrationNotice": "Los pasos del flujo de trabajo heredado fueron convertidos — encuéntralos como plantillas en la paleta y como el flujo de trabajo «Pasos migrados».",
     "mobileEditorNav": "",
     "mobileSelectNote": "",
     "nameLabel": "Nombre del flujo de trabajo",
     "newWorkflow": "Nuevo flujo de trabajo",
+    "noneYet": "",
     "readOnlyBuiltin": "Built-in workflow: structure is read-only, prompts are editable.",
     "saved": "",
     "savedNotCompilable": "",
     "saveFailed": "",
-    "showCanvasEditor": "",
-    "showSimpleEditor": "",
     "templateBlank": "En blanco",
     "templateBlankDescription": "Comenzar desde un grafo vacío inicio → fin.",
     "templateCopyName": "Copia de {{name}}",
@@ -8797,13 +8883,11 @@
     "templatePickerLabel": "Comenzar desde",
     "templateSectionBuiltin": "Flujos de trabajo integrados",
     "templateSectionYours": "Tus flujos de trabajo",
-    "closeEditor": "",
-    "duplicatedEditable": "",
-    "duplicateFailed": "",
-    "loadFailed": "",
-    "loading": "",
-    "noneYet": "",
-    "title": ""
+    "title": "",
+    "viewModeAdvanced": "",
+    "viewModeLabel": "",
+    "viewModeList": "",
+    "viewModeSimple": ""
   },
   "workflowSelector": {
     "switchActiveMessage": "",

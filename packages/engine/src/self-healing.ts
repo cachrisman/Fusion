@@ -45,7 +45,16 @@ import {
   isRecoverableMissingWorktreeReviewFailureWithProgress,
   MERGE_ACTIVE_MISSING_WORKTREE_STATUSES,
 } from "./restart-recovery-coordinator.js";
-import { classifyError, extractMissingModulePath, isNonContinuableSessionError, isOperatorActionableAgentError, isStaleWorktreeModuleResolutionError } from "./transient-error-detector.js";
+import { extractMissingModulePath, isNonContinuableSessionError, isStaleWorktreeModuleResolutionError } from "./transient-error-detector.js";
+import {
+  buildHeartbeatErrorRecoveryMetadata,
+  HEARTBEAT_ERROR_RETRY_EXHAUSTED_PAUSE_REASON,
+  HEARTBEAT_ERROR_UNRECOVERABLE_PAUSE_REASON,
+  isHeartbeatErrorRecoverable,
+  readHeartbeatErrorRetryCount,
+  resetHeartbeatErrorRecoveryMetadata,
+  resolveErrorRecoveryLimit,
+} from "./agent-heartbeat.js";
 import { classifyForeignOnlyContamination, deriveTaskIdFromFusionBranch, inspectBranchConflict, listUniqueBranchCommits } from "./branch-conflicts.js";
 import { createRunAuditor, generateSyntheticRunId, type DatabaseMutationType, type RunAuditor } from "./run-audit.js";
 import { finalizeProvenAutoMergeTask, validateWorkflowDoneMergeProof } from "./auto-merge-finalization.js";
@@ -60,6 +69,9 @@ self-healing — a real import cycle. Importing from the predicate module breaks
 */
 import { isRepoLanded } from "./workspace-land-predicate.js";
 import { findAlreadyMergedTaskCommit, getCommitTaskOwnership } from "./already-merged-detector.js";
+import { getTaskCompletionBlockerForStore } from "./task-completion.js";
+
+export const COMPLETED_BLOCKED_PAUSE_REASON = "completed-work-blocked";
 import { advanceIntegrationBranchRef } from "./merger-ref-update-advance.js";
 import { isAiMergeContainerDir, resolveAiMergeRootPath, resolveLegacyAiMergeRootPath, resolveWorktreesDir } from "./worktree-paths.js";
 import { canonicalFusionBranchName, resolveTaskWorkingBranch } from "./worktree-names.js";
@@ -579,7 +591,6 @@ const DEADLOCK_RECOVERY_COOLDOWN_MS = 15 * 60_000;
 const DEFAULT_STALE_MERGING_STATUS_MIN_AGE_MS = 5 * 60_000;
 const DEFAULT_STALE_MERGING_FANOUT_MIN_AGE_MS = 15 * 60_000;
 const DEFAULT_UNBACKED_MERGING_FANOUT_GRACE_MS = 60_000;
-const DURABLE_ERROR_RECOVERY_MAX_RETRIES = 5;
 const DURABLE_ERROR_RECOVERY_BASE_COOLDOWN_MS = 30_000;
 const DURABLE_ERROR_RECOVERY_MAX_COOLDOWN_MS = 15 * 60_000;
 const RUNNING_ON_INACTIVE_TASK_STALE_RUN_MS = PARKED_AGENT_LINK_FRESH_RUN_MS;
@@ -1493,6 +1504,7 @@ export class SelfHealingManager {
       { name: "approved-triage", fn: () => this.recoverApprovedTriageTasks().then(() => undefined) },
       { name: "recover-starved-refinement", fn: () => this.recoverStarvedRefinementTriageTasks().then(() => undefined) },
       { name: "orphaned-planning", fn: () => this.recoverOrphanedPlanningTasks().then(() => undefined) },
+      { name: "reset-durable-agent-error-state-on-startup", fn: () => this.resetDurableAgentErrorStateOnStartup().then(() => undefined) },
       { name: "recover-orphaned-agents", fn: () => this.recoverOrphanedAgents().then(() => undefined) },
       { name: "recover-stale-heartbeat-runs", fn: () => this.recoverStaleHeartbeatRuns().then(() => undefined) },
       { name: "reattach-orphaned-assigned-executions", fn: () => this.reattachOrphanedAssignedExecutions().then(() => undefined) },
@@ -1512,6 +1524,7 @@ export class SelfHealingManager {
       { name: "clear-stale-blocked-by", fn: () => this.clearStaleBlockedBy().then(() => undefined) },
       { name: "reconcile-self-defeating-deps", fn: () => this.reconcileSelfDefeatingDependencies().then(() => undefined) },
       { name: "reconcile-dependency-blocking-leases", fn: () => this.reconcileDependencyBlockingLeases().then(() => undefined) },
+      { name: "reconcile-completed-blocked", fn: () => this.reconcileCompletedBlockedTasks().then(() => undefined) },
       { name: "reconcile-in-review-unmet-dependencies", fn: () => this.reconcileInReviewUnmetDependencies().then(() => undefined) },
       { name: "reconcile-engine-downtime-active-timing", fn: () => this.reconcileEngineDowntimeActiveTiming().then(() => undefined) },
       { name: "reconcile-dependency-cycles", fn: () => this.reconcileDependencyCycles().then(() => undefined) },
@@ -3102,6 +3115,7 @@ export class SelfHealingManager {
           { name: "recover-stale-transition-pending", fn: () => this.runStaleTransitionPendingSweep() },
           { name: "reconcile-self-defeating-deps", fn: () => this.reconcileSelfDefeatingDependencies() },
           { name: "reconcile-dependency-blocking-leases", fn: () => this.reconcileDependencyBlockingLeases() },
+          { name: "reconcile-completed-blocked", fn: () => this.reconcileCompletedBlockedTasks() },
           { name: "reconcile-in-review-unmet-dependencies", fn: () => this.reconcileInReviewUnmetDependencies() },
           // FN-6782: reclaim in-memory worktree slots whose holder is no longer
           // in-progress (defense-in-depth for the pause-abort leak; conservative,
@@ -6081,6 +6095,96 @@ export class SelfHealingManager {
         autoMerge: settings.autoMerge ?? null,
       },
     };
+  }
+
+  async reconcileCompletedBlockedTasks(): Promise<number> {
+    const settings = await this.store.getSettings();
+    if (settings.globalPause || settings.enginePaused) return 0;
+    if (!this.options.recoverCompletedTask) return 0;
+
+    let tasks: Task[] = [];
+    try {
+      tasks = await this.store.listTasks({ includeArchived: false, slim: true });
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.warn(`reconcileCompletedBlockedTasks: failed to list tasks: ${errorMessage}`);
+      return 0;
+    }
+
+    const executingIds = this.options.getExecutingTaskIds?.() ?? new Set<string>();
+    let recovered = 0;
+    for (const snapshot of tasks) {
+      if (snapshot.deletedAt) continue;
+      if (snapshot.column !== "todo") continue;
+      if (snapshot.paused !== true || snapshot.pausedReason !== COMPLETED_BLOCKED_PAUSE_REASON) continue;
+      if (snapshot.userPaused === true) continue;
+      if (!allowsAutoMergeProcessing(snapshot, settings)) continue;
+      if (executingIds.has(snapshot.id) || this.options.isTaskActive?.(snapshot.id) === true) continue;
+      if (snapshot.worktree && activeSessionRegistry.isPathActive(snapshot.worktree)) continue;
+      /*
+      FNXC:WorkflowLifecycle 2026-07-12-23:40:
+      FN-7926: unlike the generic isTaskWorkComplete() convention used elsewhere in self-healing,
+      a zero-step task CAN legitimately reach this parked state — parkCompletedBlockedTask()
+      already accepts `workComplete = taskDone` for a task with no planned steps (explicit
+      fn_task_done() with an empty step list). Since COMPLETED_BLOCKED_PAUSE_REASON is only ever
+      set by that already-validated park path, re-deriving completeness by rejecting empty step
+      arrays here would strand those rows forever (parked but never reconciled — the same
+      indefinite non-terminal stall this task exists to eliminate). Only reject when steps exist
+      and are provably incomplete (defense-in-depth against a concurrent reopen after park).
+      */
+      if (snapshot.steps.length > 0 && !snapshot.steps.every((step) => step.status === "done" || step.status === "skipped")) continue;
+
+      const completionBlocker = await getTaskCompletionBlockerForStore(this.store, snapshot);
+      if (completionBlocker) continue;
+
+      try {
+        await this.store.updateTask(snapshot.id, {
+          paused: false,
+          pausedReason: undefined,
+          status: null,
+          error: null,
+          blockedBy: null,
+          executeRequeueLoopCount: null,
+          executeRequeueLoopSignature: null,
+        });
+        const fresh = await this.store.getTask(snapshot.id);
+        const advanced = await this.options.recoverCompletedTask(fresh);
+        if (!advanced) {
+          await this.store.updateTask(snapshot.id, {
+            paused: true,
+            pausedReason: COMPLETED_BLOCKED_PAUSE_REASON,
+            status: "queued",
+          });
+          continue;
+        }
+        await this.store.logEntry(
+          snapshot.id,
+          "Auto-advanced completed blocked work to review after blocker cleared",
+        );
+        await createRunAuditor(this.store, {
+          runId: generateSyntheticRunId("completed-blocked-advance", snapshot.id),
+          agentId: "self-healing",
+          taskId: snapshot.id,
+          taskLineageId: snapshot.lineageId,
+          phase: "reconcile-completed-blocked",
+        }).database({
+          type: "task:completed-blocked-advanced" as DatabaseMutationType,
+          target: snapshot.id,
+          metadata: {
+            taskId: snapshot.id,
+            priorColumn: snapshot.column,
+            priorStatus: snapshot.status ?? null,
+            source: "self-healing",
+          },
+        });
+        recovered++;
+      } catch (err: unknown) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        log.warn(`reconcileCompletedBlockedTasks: failed to advance ${snapshot.id}: ${errorMessage}`);
+      }
+    }
+
+    return recovered;
   }
 
   async reconcileInReviewUnmetDependencies(): Promise<number> {
@@ -10722,13 +10826,11 @@ export class SelfHealingManager {
   } {
     const metadata = agent.metadata ?? {};
     const raw = metadata.durableErrorRecovery;
-    if (!raw || typeof raw !== "object") {
-      return { attempts: 0, consecutiveMissingModulePathCount: 0 };
-    }
-    const record = raw as Record<string, unknown>;
-    const attempts = typeof record.attempts === "number" && Number.isFinite(record.attempts)
+    const record = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+    const durableAttempts = typeof record.attempts === "number" && Number.isFinite(record.attempts)
       ? Math.max(0, Math.floor(record.attempts))
       : 0;
+    const attempts = Math.max(durableAttempts, readHeartbeatErrorRetryCount(agent));
     const consecutiveMissingModulePathCount =
       typeof record.consecutiveMissingModulePathCount === "number" && Number.isFinite(record.consecutiveMissingModulePathCount)
         ? Math.max(0, Math.floor(record.consecutiveMissingModulePathCount))
@@ -10746,6 +10848,40 @@ export class SelfHealingManager {
     const clampedAttempts = Math.max(1, attempts);
     const exponential = DURABLE_ERROR_RECOVERY_BASE_COOLDOWN_MS * Math.pow(2, clampedAttempts - 1);
     return Math.min(exponential, DURABLE_ERROR_RECOVERY_MAX_COOLDOWN_MS);
+  }
+
+  private async emitDurableAgentErrorRecoveryAudit(options: {
+    agentId: string;
+    type: "agent:auto-recover-error-state" | "agent:reset-error-state-on-startup" | "agent:error-retry-exhausted" | "agent:error-parked-unrecoverable";
+    attempt?: number;
+    attempts?: number;
+    limit?: number;
+    priorState?: Agent["state"];
+    priorPauseReason?: string;
+    source: "self-healing";
+  }): Promise<void> {
+    try {
+      await createRunAuditor(this.store, {
+        runId: generateSyntheticRunId("durable-agent-error-recovery", options.agentId),
+        agentId: "self-healing",
+        phase: "durable-agent-error-recovery",
+        source: options.source,
+      }).database({
+        type: options.type as DatabaseMutationType,
+        target: options.agentId,
+        metadata: {
+          agentId: options.agentId,
+          ...(options.attempt !== undefined ? { attempt: options.attempt } : {}),
+          ...(options.attempts !== undefined ? { attempts: options.attempts } : {}),
+          ...(options.limit !== undefined ? { limit: options.limit } : {}),
+          ...(options.priorState !== undefined ? { priorState: options.priorState } : {}),
+          ...(options.priorPauseReason !== undefined ? { priorPauseReason: options.priorPauseReason } : {}),
+          source: options.source,
+        },
+      });
+    } catch (error) {
+      log.warn(`Failed to emit durable-agent error recovery audit for ${options.agentId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private async emitStaleAgentAssignmentAudit(options: {
@@ -10912,6 +11048,82 @@ export class SelfHealingManager {
     return clearedAgentIds.size;
   }
 
+  /*
+  FNXC:AgentHeartbeat 2026-07-12-17:26:
+  FN-7884: Engine restart is an explicit operator retry boundary for durable heartbeat agents. Startup recovery must immediately clear recoverable `error` and `error-retry-exhausted` parks, reset shared heartbeatErrorRecovery/durableErrorRecovery budget state, and re-arm heartbeats without steady-state staleness/cooldown/exhaustion gates; operator-actionable, stale-module, user-paused, error-unrecoverable, disabled, ephemeral, and actively executing agents remain suppressed.
+  */
+  async resetDurableAgentErrorStateOnStartup(): Promise<number> {
+    const agentStore = this.options.agentStore;
+    if (!agentStore) {
+      return 0;
+    }
+
+    let resetCount = 0;
+    try {
+      const allAgents = await agentStore.listAgents({ includeEphemeral: true });
+      for (const agent of allAgents) {
+        const isErrorRetryExhaustedPark =
+          agent.state === "paused" && agent.pauseReason === HEARTBEAT_ERROR_RETRY_EXHAUSTED_PAUSE_REASON;
+        if (agent.state !== "error" && !isErrorRetryExhaustedPark) {
+          continue;
+        }
+        if (isEphemeralAgent(agent)) {
+          continue;
+        }
+        const runtimeConfig = (agent.runtimeConfig ?? {}) as Record<string, unknown>;
+        if (runtimeConfig.enabled === false) {
+          continue;
+        }
+        if (this.options.hasActiveAgentExecution?.(agent.id) === true) {
+          continue;
+        }
+        if (!isHeartbeatErrorRecoverable(agent) || isStaleWorktreeModuleResolutionError(agent.lastError ?? "")) {
+          log.warn(`Startup durable-agent error reset suppressed for ${agent.id}: unrecoverable or stale-module error requires existing recovery path`);
+          continue;
+        }
+
+        const priorState = agent.state;
+        const priorPauseReason = agent.pauseReason;
+        const resetMetadata = resetHeartbeatErrorRecoveryMetadata(agent);
+        try {
+          await agentStore.updateAgentState(agent.id, "active");
+          await agentStore.updateAgent(agent.id, {
+            lastError: undefined,
+            pauseReason: undefined,
+            metadata: resetMetadata,
+          });
+          await this.emitDurableAgentErrorRecoveryAudit({
+            agentId: agent.id,
+            type: "agent:reset-error-state-on-startup",
+            priorState,
+            ...(priorPauseReason ? { priorPauseReason } : {}),
+            source: "self-healing",
+          });
+          if (!this.options.restartDurableAgentHeartbeat) {
+            log.log(`Durable-agent startup error reset heartbeat restart unavailable for ${agent.id}; state reset only`);
+          } else {
+            const restartOk = await this.options.restartDurableAgentHeartbeat(agent.id, {
+              reason: "startup-error-reset",
+              attempt: 1,
+            });
+            if (!restartOk) {
+              log.warn(`Durable-agent startup error reset heartbeat restart skipped for ${agent.id}`);
+            }
+          }
+          resetCount++;
+          log.log(`Startup reset durable-agent error state for ${agent.id}; heartbeat re-armed when available`);
+        } catch (error) {
+          log.warn(`Failed to reset durable-agent error state on startup for ${agent.id}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    } catch (error) {
+      log.warn(`Startup durable-agent error reset failed: ${error instanceof Error ? error.message : String(error)}`);
+      return resetCount;
+    }
+
+    return resetCount;
+  }
+
   async recoverOrphanedAgents(): Promise<number> {
     const agentStore = this.options.agentStore;
     if (!agentStore) {
@@ -10920,6 +11132,7 @@ export class SelfHealingManager {
 
     try {
       const settings = await this.store.getSettings();
+      const errorRecoveryLimit = resolveErrorRecoveryLimit(settings);
       const timeoutMs = settings.taskStuckTimeoutMs;
       if (!Number.isFinite(timeoutMs) || timeoutMs === undefined || timeoutMs <= 0) {
         return 0;
@@ -10930,11 +11143,20 @@ export class SelfHealingManager {
       const allAgentIds = new Set(allAgents.map((agent) => agent.id));
       const now = Date.now();
 
+      /*
+      FNXC:AgentHeartbeat 2026-07-12-20:10:
+      An agent parked paused/"error-unrecoverable" whose lastError NOW classifies as recoverable (e.g. transient OAuth token-rotation 401s that were misclassified operator-actionable before isTransientAuthCredentialError existed) must not stay parked forever waiting for a human. Re-admit exactly those parked agents to the error-recovery sweep; user pauses and every other pauseReason are untouched. The shared retry budget, cooldown, and staleness gates below still apply.
+      */
+      const isReclassifiedRecoverableParkedError = (agent: Agent): boolean =>
+        agent.state === "paused"
+        && agent.pauseReason === HEARTBEAT_ERROR_UNRECOVERABLE_PAUSE_REASON
+        && isHeartbeatErrorRecoverable(agent);
+
       const orphaned = allAgents.filter((agent) => {
         if (isEphemeralAgent(agent)) {
           return false;
         }
-        if (agent.state !== "running" && agent.state !== "error") {
+        if (agent.state !== "running" && agent.state !== "error" && !isReclassifiedRecoverableParkedError(agent)) {
           return false;
         }
         /*
@@ -10968,7 +11190,7 @@ export class SelfHealingManager {
           return false;
         }
 
-        if (agent.state === "error") {
+        if (agent.state === "error" || isReclassifiedRecoverableParkedError(agent)) {
           const runtimeConfig = (agent.runtimeConfig ?? {}) as Record<string, unknown>;
           if (runtimeConfig.enabled === false) {
             return false;
@@ -10976,18 +11198,15 @@ export class SelfHealingManager {
           if (this.options.hasActiveAgentExecution?.(agent.id) === true) {
             return false;
           }
-          if (classifyError(agent.lastError ?? "") !== "transient" && !isStaleWorktreeModuleResolutionError(agent.lastError ?? "")) {
-            return false;
-          }
-          if (isOperatorActionableAgentError(agent.lastError ?? "")) {
-            return false;
-          }
+          const isRecoverableHeartbeatError = isHeartbeatErrorRecoverable(agent);
+          const isStaleMissingModule = isStaleWorktreeModuleResolutionError(agent.lastError ?? "");
+          const isUnrecoverableHeartbeatError = !isRecoverableHeartbeatError && !isStaleMissingModule;
 
           const recoveryState = this.getDurableAgentRecoveryState(agent);
-          if (recoveryState.exhausted) {
+          if (!isUnrecoverableHeartbeatError && recoveryState.exhausted) {
             return false;
           }
-          if (recoveryState.nextRetryAt) {
+          if (!isUnrecoverableHeartbeatError && recoveryState.nextRetryAt) {
             const nextRetryMs = Date.parse(recoveryState.nextRetryAt);
             if (Number.isFinite(nextRetryMs) && nextRetryMs > now) {
               log.log(`Durable agent ${agent.id} transient recovery delayed until ${recoveryState.nextRetryAt}`);
@@ -11004,13 +11223,54 @@ export class SelfHealingManager {
       }
 
       let recovered = 0;
+      /*
+      FNXC:AgentHeartbeat 2026-07-12-21:05:
+      PR #2027 review: unrecoverable-error parks are a handled outcome of the sweep (the return value counts actions taken, preserving the existing caller contract), but they are NOT recoveries to active — the summary log must say "parked for operator action", never fold them into "→ active", or maintenance logs misreport agents that still need manual repair.
+      */
+      let parkedUnrecoverable = 0;
       for (const agent of orphaned) {
         const updatedAt = Date.parse(agent.updatedAt ?? "");
         const stuckForMs = Math.max(0, now - updatedAt);
+        // Reclassified "error-unrecoverable" parked agents run the same recovery
+        // branch as error-state agents: shared budget, cooldown, audit, restart.
+        const isErrorRecoveryCandidate = agent.state === "error" || isReclassifiedRecoverableParkedError(agent);
         try {
-          if (agent.state === "error") {
+          if (isErrorRecoveryCandidate) {
             const recoveryState = this.getDurableAgentRecoveryState(agent);
             const isStaleMissingModule = isStaleWorktreeModuleResolutionError(agent.lastError ?? "");
+            const isUnrecoverableHeartbeatError = !isHeartbeatErrorRecoverable(agent) && !isStaleMissingModule;
+            if (isUnrecoverableHeartbeatError) {
+              /*
+              FNXC:AgentHeartbeat 2026-07-12-18:34:
+              FN-7859 keeps self-healing from restart-looping non-recoverable durable agent errors, but still parks them paused with a clear operator-action reason instead of skipping them into indefinite bare error.
+              */
+              await agentStore.updateAgentState(agent.id, "paused");
+              await agentStore.updateAgent(agent.id, {
+                pauseReason: HEARTBEAT_ERROR_UNRECOVERABLE_PAUSE_REASON,
+                metadata: {
+                  ...(agent.metadata ?? {}),
+                  durableErrorRecovery: {
+                    ...((agent.metadata?.durableErrorRecovery && typeof agent.metadata.durableErrorRecovery === "object")
+                      ? agent.metadata.durableErrorRecovery as Record<string, unknown>
+                      : {}),
+                    attempts: recoveryState.attempts,
+                    exhausted: recoveryState.exhausted,
+                    lastReason: "non-recoverable-error",
+                    lastObservedAt: new Date().toISOString(),
+                  },
+                },
+              });
+              await this.emitDurableAgentErrorRecoveryAudit({
+                agentId: agent.id,
+                type: "agent:error-parked-unrecoverable",
+                attempts: recoveryState.attempts,
+                limit: errorRecoveryLimit,
+                source: "self-healing",
+              });
+              log.warn(`Suppressed durable-agent auto-restart for ${agent.id}: unrecoverable heartbeat error; paused for operator action`);
+              parkedUnrecoverable++;
+              continue;
+            }
             if (isStaleMissingModule) {
               const missingModulePath = extractMissingModulePath(agent.lastError ?? "");
               const repeatedPath =
@@ -11040,11 +11300,15 @@ export class SelfHealingManager {
               continue;
             }
             const nextAttempts = recoveryState.attempts + 1;
-            const exhausted = nextAttempts >= DURABLE_ERROR_RECOVERY_MAX_RETRIES;
+            const exhausted = nextAttempts >= errorRecoveryLimit;
             const nextRetryAt = new Date(Date.now() + this.computeDurableAgentRecoveryCooldownMs(nextAttempts)).toISOString();
+            /*
+            FNXC:AgentHeartbeat 2026-07-11-22:42:
+            FN-7844 consolidates durable-agent error recovery accounting across the heartbeat timer and self-healing sweep. The sweep keeps its cooldown/stale-path metadata, but writes the shared heartbeatErrorRecovery counter and audit event so a single retry budget applies regardless of which recovery entry path fires.
+            */
             await agentStore.updateAgent(agent.id, {
               metadata: {
-                ...(agent.metadata ?? {}),
+                ...buildHeartbeatErrorRecoveryMetadata(agent, nextAttempts),
                 durableErrorRecovery: {
                   attempts: nextAttempts,
                   lastAttemptAt: new Date().toISOString(),
@@ -11057,6 +11321,15 @@ export class SelfHealingManager {
               },
             });
             if (exhausted) {
+              await this.emitDurableAgentErrorRecoveryAudit({
+                agentId: agent.id,
+                type: "agent:error-retry-exhausted",
+                attempts: nextAttempts,
+                limit: errorRecoveryLimit,
+                source: "self-healing",
+              });
+              await agentStore.updateAgentState(agent.id, "paused");
+              await agentStore.updateAgent(agent.id, { pauseReason: HEARTBEAT_ERROR_RETRY_EXHAUSTED_PAUSE_REASON });
               log.warn(`Suppressed durable-agent auto-restart for ${agent.id}: retry budget exhausted`);
               continue;
             }
@@ -11065,9 +11338,26 @@ export class SelfHealingManager {
           await agentStore.updateAgentState(agent.id, "active");
           await agentStore.updateAgent(agent.id, {
             lastError: undefined,
+            // Clear the "error-unrecoverable" park marker when a reclassified
+            // parked agent is re-admitted; harmless no-op for error-state agents.
+            pauseReason: undefined,
           });
 
-          if (agent.state === "error" && this.options.restartDurableAgentHeartbeat) {
+          if (isErrorRecoveryCandidate) {
+            const attempt = this.getDurableAgentRecoveryState(agent).attempts + 1;
+            await this.emitDurableAgentErrorRecoveryAudit({
+              agentId: agent.id,
+              type: "agent:auto-recover-error-state",
+              attempt,
+              limit: errorRecoveryLimit,
+              source: "self-healing",
+            });
+            if (!this.options.restartDurableAgentHeartbeat) {
+              log.log(`Durable-agent transient recovery heartbeat restart unavailable for ${agent.id}; state reset only`);
+            }
+          }
+
+          if (isErrorRecoveryCandidate && this.options.restartDurableAgentHeartbeat) {
             const restartOk = await this.options.restartDurableAgentHeartbeat(agent.id, {
               reason: "transient-error",
               attempt: this.getDurableAgentRecoveryState(agent).attempts + 1,
@@ -11090,7 +11380,10 @@ export class SelfHealingManager {
       if (recovered > 0) {
         log.log(`Recovered ${recovered} orphaned agent(s) → active`);
       }
-      return recovered;
+      if (parkedUnrecoverable > 0) {
+        log.warn(`Parked ${parkedUnrecoverable} durable agent(s) with unrecoverable errors for operator action (not recovered)`);
+      }
+      return recovered + parkedUnrecoverable;
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       log.error(`Orphaned agent recovery failed: ${errorMessage}`);

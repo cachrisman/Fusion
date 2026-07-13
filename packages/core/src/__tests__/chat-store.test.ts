@@ -411,6 +411,28 @@ describe("ChatStore", () => {
         expect(store.getSession(session.id)?.thinkingLevel).toBe("off");
       });
 
+      it("updates agentId without clobbering omitted model fields", () => {
+        const session = createTestSession(store, {
+          agentId: "__fn_agent__",
+          modelProvider: "anthropic",
+          modelId: "claude-sonnet-4-5",
+          thinkingLevel: "high",
+        });
+
+        const updated = store.updateSession(session.id, { agentId: "agent-specialist" });
+
+        expect(updated!.agentId).toBe("agent-specialist");
+        expect(updated!.modelProvider).toBe("anthropic");
+        expect(updated!.modelId).toBe("claude-sonnet-4-5");
+        expect(updated!.thinkingLevel).toBe("high");
+        expect(store.getSession(session.id)).toMatchObject({
+          agentId: "agent-specialist",
+          modelProvider: "anthropic",
+          modelId: "claude-sonnet-4-5",
+        });
+
+      });
+
       it("returns undefined for non-existent session", () => {
         const result = store.updateSession("chat-nonexistent", { title: "Test" });
         expect(result).toBeUndefined();
@@ -1109,6 +1131,27 @@ describe("ChatStore", () => {
       const members = store.listRoomMembers(room.id);
       expect(members).toHaveLength(2);
       expect(members.find((m) => m.agentId === "agent-owner")?.role).toBe("owner");
+    });
+
+    it("round-trips room thinkingLevel through accessors and update clears", () => {
+      const inheritedRoom = store.createRoom({ name: "inherit defaults", projectId: "proj-1" });
+      expect(inheritedRoom.thinkingLevel).toBeNull();
+      expect(store.getRoom(inheritedRoom.id)?.thinkingLevel).toBeNull();
+
+      const explicitRoom = store.createRoom({
+        name: "deep thinking",
+        projectId: "proj-1",
+        memberAgentIds: ["agent-1"],
+        thinkingLevel: "high",
+      });
+
+      expect(store.getRoom(explicitRoom.id)?.thinkingLevel).toBe("high");
+      expect(store.getRoomBySlug("proj-1", explicitRoom.slug)?.thinkingLevel).toBe("high");
+      expect(store.listRooms({ projectId: "proj-1" }).find((room) => room.id === explicitRoom.id)?.thinkingLevel).toBe("high");
+      expect(store.listRoomsForAgent("agent-1", { projectId: "proj-1" }).find((room) => room.id === explicitRoom.id)?.thinkingLevel).toBe("high");
+
+      expect(store.updateRoom(explicitRoom.id, { thinkingLevel: "minimal" })?.thinkingLevel).toBe("minimal");
+      expect(store.updateRoom(explicitRoom.id, { thinkingLevel: null })?.thinkingLevel).toBeNull();
     });
 
     it("rejects slug collision in same project and allows across projects", () => {

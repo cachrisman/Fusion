@@ -34,6 +34,19 @@ export {
 export type { OpenAiCodexProviderRegistration } from "./openai-models.js";
 export { detectImageMimeFromBytes } from "./image-mime.js";
 export type { DetectedImageMime } from "./image-mime.js";
+export {
+  computeSkillId,
+  getSkillSettingState,
+  normalizeStoredSkillPath,
+  parseSkillId,
+  resolvePluginSkillEnabled,
+} from "./skill-settings.js";
+export type { SkillSettingState, SkillSettingsScope } from "./skill-settings.js";
+export {
+  resolvePluginRootFromEntryPath,
+  resolvePluginSkillBodyPath,
+} from "./plugin-skill-paths.js";
+export type { PluginSkillBodyPath } from "./plugin-skill-paths.js";
 export { redactSecrets } from "./redact-secrets.js";
 export {
   evaluatePromptCondition,
@@ -589,7 +602,14 @@ export {
   canAgentTakeImplementationTaskForExplicitRouting,
   canAgentTakeImplementationTaskForBacklogPickup,
   formatRoleMismatchReason,
+  getAgentAssignmentPolicy,
+  isAgentAutoAssignable,
+  canAgentReceiveImplementationTasks,
+  evaluateImplementationTaskBind,
+  assertImplementationTaskBindAllowed,
+  AgentTaskRoutingPolicyError,
 } from "./agent-role-policy.js";
+export type { AgentAssignmentPolicy, ImplementationTaskBindContext, ImplementationTaskBindVerdict } from "./agent-role-policy.js";
 export { ReflectionStore } from "./reflection-store.js";
 export type { ReflectionStoreEvents } from "./reflection-store.js";
 export { MessageStore } from "./message-store.js";
@@ -878,7 +898,7 @@ export {
   readProjectIdentity,
   writeProjectIdentity,
 } from "./project-identity.js";
-export { ProcessSupervisor, superviseSpawn } from "./process-supervisor.js";
+export { ProcessSupervisor, superviseSpawn, FUSION_RESTART_EXIT_CODE } from "./process-supervisor.js";
 export type {
   SuperviseSpawnOptions,
   SupervisedChild,

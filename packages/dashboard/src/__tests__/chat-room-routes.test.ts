@@ -72,6 +72,32 @@ describe("Chat Room API Routes", () => {
     expect((delRes.body as any).success).toBe(true);
   });
 
+  it("creates, updates, clears, and validates room thinkingLevel", async () => {
+    const createRes = await request(app, "POST", "/api/chat/rooms", JSON.stringify({ name: "Reasoning", thinkingLevel: "high" }), {
+      "content-type": "application/json",
+    });
+    expect(createRes.status).toBe(201);
+    expect((createRes.body as any).room.thinkingLevel).toBe("high");
+
+    const roomId = (createRes.body as any).room.id as string;
+    const setRes = await request(app, "PATCH", `/api/chat/rooms/${roomId}`, JSON.stringify({ thinkingLevel: "minimal" }), {
+      "content-type": "application/json",
+    });
+    expect(setRes.status).toBe(200);
+    expect((setRes.body as any).room.thinkingLevel).toBe("minimal");
+
+    const clearRes = await request(app, "PATCH", `/api/chat/rooms/${roomId}`, JSON.stringify({ thinkingLevel: null }), {
+      "content-type": "application/json",
+    });
+    expect(clearRes.status).toBe(200);
+    expect((clearRes.body as any).room.thinkingLevel).toBeNull();
+
+    const invalidRes = await request(app, "PATCH", `/api/chat/rooms/${roomId}`, JSON.stringify({ thinkingLevel: "extreme" }), {
+      "content-type": "application/json",
+    });
+    expect(invalidRes.status).toBe(400);
+  });
+
   it("validates create and slug collision", async () => {
     const missingName = await request(app, "POST", "/api/chat/rooms", JSON.stringify({}), {
       "content-type": "application/json",

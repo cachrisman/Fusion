@@ -359,6 +359,16 @@ export function MainContent({
         <MailboxView
           projectId={currentProject?.id}
           addToast={addToast}
+          /*
+          FNXC:ArtifactRegistry 2026-07-12-00:00: Artifact-registration mail notifications open their producing task through the shared task-detail fetch path so the mailbox does not invent a separate deep-link scheme.
+
+          FNXC:ArtifactRegistry 2026-07-13-00:00: Mailbox artifact "View task" opens the producing task in the shared movable/resizable popped-out task-detail FloatingWindow (`popOutTaskDetail`), matching DocumentsView's artifact-task path instead of the docked `openDetailTask` modal, so the modal has full resize/move parity.
+          */
+          onOpenTask={(taskId) => {
+            void fetchTaskDetail(taskId, currentProject?.id)
+              .then((task) => popOutTaskDetail(task))
+              .catch(() => addToast?.("Failed to open task", "error"));
+          }}
           onUnreadCountChange={setMailboxUnreadCount}
         />
       </PageErrorBoundary>

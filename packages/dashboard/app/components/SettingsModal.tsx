@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties, type MouseEvent } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { Globe, Folder, RefreshCw, Star, HelpCircle, Settings as SettingsIcon, Search, X as SearchToggleCloseIcon } from "lucide-react";
 import {
   getErrorMessage,
@@ -238,6 +238,70 @@ type SettingsSection = {
 
 const MOBILE_SETTINGS_MEDIA_QUERY = "(max-width: 768px)";
 const DEFAULT_MEMORY_EDITOR_PATH = ".fusion/memory/DREAMS.md";
+const ADVANCED_SETTINGS_STORAGE_KEY = "fusion:settings:show-advanced";
+const SETTINGS_NAV_WIDTH_STORAGE_KEY = "fusion:settings-nav-width";
+const SETTINGS_NAV_DEFAULT_WIDTH = 248;
+const SETTINGS_NAV_MIN_WIDTH = 200;
+const SETTINGS_NAV_MAX_WIDTH = 420;
+
+/*
+FNXC:SettingsSimplification 2026-07-10-23:24:
+Settings opens in a focused mode that omits specialist integration, runtime, diagnostics, and infrastructure sections. The Advanced settings switch restores every section, applies consistently to desktop navigation, mobile navigation, and search, and persists only as a browser-local display preference so it never changes or exports project settings.
+*/
+const ADVANCED_SETTINGS_SECTION_IDS = new Set([
+  "node-sync",
+  "global-mcp",
+  "cli-agents",
+  "research-global",
+  "remote",
+  "experimental",
+  "hermes-runtime",
+  "openclaw-runtime",
+  "paperclip-runtime",
+  "scheduled-evals",
+  "node-routing",
+  "agent-permissions",
+  "memory",
+  "backups",
+  "research-project",
+  "secrets",
+  "mcp",
+  "prompts",
+  "plugins",
+]);
+
+function readAdvancedSettingsPreference(): boolean {
+  try {
+    return localStorage.getItem(ADVANCED_SETTINGS_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function clampSettingsNavWidth(width: number): number {
+  if (!Number.isFinite(width)) return SETTINGS_NAV_DEFAULT_WIDTH;
+  return Math.min(SETTINGS_NAV_MAX_WIDTH, Math.max(SETTINGS_NAV_MIN_WIDTH, Math.round(width)));
+}
+
+function readSettingsNavWidthPreference(): number {
+  try {
+    const stored = Number.parseFloat(localStorage.getItem(SETTINGS_NAV_WIDTH_STORAGE_KEY) ?? "");
+    return clampSettingsNavWidth(stored);
+  } catch {
+    return SETTINGS_NAV_DEFAULT_WIDTH;
+  }
+}
+
+function removeEmptySettingsGroups(sections: SettingsSection[]): SettingsSection[] {
+  return sections.filter((section, index) => {
+    if (!section.isGroupHeader) return true;
+    for (const candidate of sections.slice(index + 1)) {
+      if (candidate.isGroupHeader) return false;
+      return true;
+    }
+    return false;
+  });
+}
 
 function normalizeSettingsSearchText(value: string): string {
   return value.trim().toLocaleLowerCase();
@@ -904,6 +968,7 @@ export function SettingsModal({
     showWorktreeGrouping: false,
     openTasksInRightSidebar: false,
     openMobileTasksInPopup: false,
+    showCostBadgeOnCards: false,
     taskDetailChatFirst: false,
     executorAllowSiblingBranchRename: false,
     worktreeNaming: "random",
@@ -977,7 +1042,39 @@ export function SettingsModal({
       ? window.matchMedia(MOBILE_SETTINGS_MEDIA_QUERY)?.matches === true
       : false),
   );
+  /**
+   * FNXC:Settings 2026-07-11-18:52:
+   * FN-7825 makes the desktop/tablet Settings rail resizable and persists the chosen width locally. Mobile remains stacked and ignores this inline CSS variable so a desktop-saved width cannot leak into the top-bar layout.
+   */
+  const [settingsNavWidth, setSettingsNavWidth] = useState(() => readSettingsNavWidthPreference());
+  const settingsNavDragRef = useRef<{ startX: number; startWidth: number; previousUserSelect: string } | null>(null);
   const [settingsSearchQuery, setSettingsSearchQuery] = useState("");
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(() => {
+    const requestedSection = initialSection === "pi-extensions" ? "plugins" : initialSection;
+    /*
+    FNXC:SettingsSimplification 2026-07-10-23:24:
+    Product links that intentionally open a specific advanced section must remain usable. Reveal advanced navigation for that Settings session, but do not persist the implicit reveal; only a direct user toggle changes the local-storage preference.
+    */
+    return readAdvancedSettingsPreference() || (requestedSection !== undefined && ADVANCED_SETTINGS_SECTION_IDS.has(requestedSection));
+  });
+  const handleAdvancedSettingsChange = useCallback((enabled: boolean) => {
+    setShowAdvancedSettings(enabled);
+    try {
+      localStorage.setItem(ADVANCED_SETTINGS_STORAGE_KEY, String(enabled));
+    } catch {
+      // Storage can be unavailable in private/locked-down browser contexts; the in-session preference still works.
+    }
+  }, []);
+  const persistSettingsNavWidth = useCallback((width: number) => {
+    const nextWidth = clampSettingsNavWidth(width);
+    setSettingsNavWidth(nextWidth);
+    try {
+      localStorage.setItem(SETTINGS_NAV_WIDTH_STORAGE_KEY, String(nextWidth));
+    } catch {
+      // Storage can be unavailable in private/locked-down browser contexts; the in-session width still works.
+    }
+    return nextWidth;
+  }, []);
   /*
    * FNXC:Settings 2026-07-09-00:00:
    * Mobile Settings previously always rendered the `.settings-search` row (label + input + result
@@ -1042,7 +1139,11 @@ export function SettingsModal({
   const experimentalFeatures = form.experimentalFeatures ?? {};
   const researchViewEnabled = isExperimentalFeatureEnabled(experimentalFeatures, "researchView");
   const evalsViewEnabled = isExperimentalFeatureEnabled(experimentalFeatures, "evalsView");
-  const visibleSections = useMemo(() => SETTINGS_SECTIONS.filter((section) => {
+  const visibleSections = useMemo(() => removeEmptySettingsGroups(SETTINGS_SECTIONS.filter((section) => {
+    if (!showAdvancedSettings && ADVANCED_SETTINGS_SECTION_IDS.has(section.id)) {
+      return false;
+    }
+
     if (section.id === "research-global" || section.id === "research-project") {
       return researchViewEnabled;
     }
@@ -1052,7 +1153,7 @@ export function SettingsModal({
     }
 
     return true;
-  }), [researchViewEnabled, evalsViewEnabled]);
+  })), [researchViewEnabled, evalsViewEnabled, showAdvancedSettings]);
   const firstVisibleSectionId = visibleSections.some((section) => section.id === DEFAULT_SETTINGS_SECTION)
     ? DEFAULT_SETTINGS_SECTION
     : resolveFirstSelectableSettingsSection(visibleSections, firstNonHeaderSection?.id ?? "general");
@@ -1205,6 +1306,74 @@ export function SettingsModal({
     enabled: activeSection === "memory",
   });
 
+  const settingsNavResizeEnabled = !showMobileSectionPicker;
+  const settingsNavigationStyle = settingsNavResizeEnabled
+    ? ({ "--settings-nav-width": `${settingsNavWidth}px` } as CSSProperties)
+    : undefined;
+
+  const endSettingsNavResize = useCallback((pointerId?: number, target?: EventTarget | null) => {
+    const dragState = settingsNavDragRef.current;
+    if (!dragState) return;
+    document.body.style.userSelect = dragState.previousUserSelect;
+    settingsNavDragRef.current = null;
+    if (typeof pointerId === "number" && target instanceof HTMLElement && typeof target.releasePointerCapture === "function") {
+      try {
+        target.releasePointerCapture(pointerId);
+      } catch {
+        // Pointer capture may already be released by the browser; cleanup is still complete.
+      }
+    }
+  }, []);
+
+  const handleSettingsNavResizePointerMove = useCallback((event: PointerEvent) => {
+    const dragState = settingsNavDragRef.current;
+    if (!dragState) return;
+    event.preventDefault();
+    persistSettingsNavWidth(dragState.startWidth + event.clientX - dragState.startX);
+  }, [persistSettingsNavWidth]);
+
+  const handleSettingsNavResizePointerUp = useCallback((event: PointerEvent) => {
+    endSettingsNavResize(event.pointerId, event.target);
+  }, [endSettingsNavResize]);
+
+  const handleSettingsNavResizePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!settingsNavResizeEnabled) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (typeof event.currentTarget.setPointerCapture === "function") {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    }
+    settingsNavDragRef.current = {
+      startX: event.clientX,
+      startWidth: settingsNavWidth,
+      previousUserSelect: document.body.style.userSelect,
+    };
+    document.body.style.userSelect = "none";
+  }, [settingsNavResizeEnabled, settingsNavWidth]);
+
+  const handleSettingsNavResizeKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!settingsNavResizeEnabled) return;
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    persistSettingsNavWidth(settingsNavWidth + (event.key === "ArrowRight" ? 16 : -16));
+  }, [persistSettingsNavWidth, settingsNavResizeEnabled, settingsNavWidth]);
+
+  useEffect(() => {
+    if (!settingsNavResizeEnabled) {
+      endSettingsNavResize();
+      return;
+    }
+    document.addEventListener("pointermove", handleSettingsNavResizePointerMove);
+    document.addEventListener("pointerup", handleSettingsNavResizePointerUp);
+    document.addEventListener("pointercancel", handleSettingsNavResizePointerUp);
+    return () => {
+      document.removeEventListener("pointermove", handleSettingsNavResizePointerMove);
+      document.removeEventListener("pointerup", handleSettingsNavResizePointerUp);
+      document.removeEventListener("pointercancel", handleSettingsNavResizePointerUp);
+      endSettingsNavResize();
+    };
+  }, [endSettingsNavResize, handleSettingsNavResizePointerMove, handleSettingsNavResizePointerUp, settingsNavResizeEnabled]);
+
   useEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
       return;
@@ -1239,6 +1408,11 @@ export function SettingsModal({
           ...s,
           ignoreHiddenOverlapPaths: s.ignoreHiddenOverlapPaths ?? true,
           allowAbsoluteFileBrowserPaths: s.allowAbsoluteFileBrowserPaths === true,
+          /*
+          FNXC:TaskCardCostBadge 2026-07-11-12:15:
+          The Settings form normalizes missing showCostBadgeOnCards to false so upgraded projects retain no card spend badge until an operator explicitly opts in.
+          */
+          showCostBadgeOnCards: s.showCostBadgeOnCards === true,
           /*
           FNXC:TaskDetailActivityFirst 2026-06-30-23:59:
           The Settings form normalizes missing taskDetailChatFirst to false so new and upgraded projects show the Activity-first default until an operator explicitly opts into Chat-first.
@@ -1626,6 +1800,15 @@ export function SettingsModal({
   // free-text entry. Best-effort — falls back to empty list (custom-only).
   useEffect(() => {
     if (activeSection !== "merge") return;
+    /*
+    FNXC:MergePush 2026-07-11-22:50:
+    The push-after-merge target is now picked from dropdowns (remote + branch on that
+    remote) instead of a free-text field, so the merge section also needs the remote
+    list. Best-effort — an empty list makes MergeSection fall back to free-text entry.
+    */
+    fetchGitRemotesDetailed(projectId)
+      .then((remotes) => setGitRemotes(remotes))
+      .catch(() => setGitRemotes([]));
     fetchGitBranches(projectId)
       .then((branches) => {
         const names = branches
@@ -3409,6 +3592,8 @@ export function SettingsModal({
             integrationBranchCustomMode={integrationBranchCustomMode}
             setIntegrationBranchCustomMode={setIntegrationBranchCustomMode}
             onOpenWorkflowSettings={onOpenWorkflowSettings}
+            gitRemoteOptions={gitRemotes.map((r) => r.name)}
+            projectId={projectId}
           />
         );
       case "agent-permissions":
@@ -3692,7 +3877,11 @@ export function SettingsModal({
           <div className="settings-empty-state settings-loading"><LoadingSpinner label={t("settings.loading", "Loading…")} /></div>
         ) : (
           <div className="settings-layout">
-            <aside className="settings-navigation" aria-label={t("settings.search.navigationLabel", "Settings navigation")}> 
+            <aside
+              className="settings-navigation"
+              aria-label={t("settings.search.navigationLabel", "Settings navigation")}
+              style={settingsNavigationStyle}
+            >
               {showMobileSectionPicker && (
                 <div className="settings-mobile-section-picker">
                   {/**
@@ -3740,6 +3929,14 @@ export function SettingsModal({
                   </div>
                 </div>
               )}
+              <label className="settings-advanced-toggle">
+                <input
+                  type="checkbox"
+                  checked={showAdvancedSettings}
+                  onChange={(event) => handleAdvancedSettingsChange(event.target.checked)}
+                />
+                <span>{t("settings.advanced.toggle", "Advanced settings")}</span>
+              </label>
               {settingsSearchRowVisible && (
                 <div className="settings-search" data-testid="settings-search">
                   <div id="settings-search-row-region" className="settings-search-row">
@@ -3821,7 +4018,25 @@ export function SettingsModal({
                 )}
               </nav>
             </aside>
-            <div className="settings-content" ref={settingsContentRef}>
+            {settingsNavResizeEnabled && (
+              <div
+                className="settings-nav-resize-handle"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label={t("settings.nav.resize", "Resize settings navigation")}
+                aria-valuemin={SETTINGS_NAV_MIN_WIDTH}
+                aria-valuemax={SETTINGS_NAV_MAX_WIDTH}
+                aria-valuenow={settingsNavWidth}
+                tabIndex={0}
+                onPointerDown={handleSettingsNavResizePointerDown}
+                onKeyDown={handleSettingsNavResizeKeyDown}
+              />
+            )}
+            <div
+              className="settings-content"
+              ref={settingsContentRef}
+              data-show-advanced={showAdvancedSettings ? "true" : "false"}
+            >
               {hasSettingsSearchResults ? renderSectionFields() : (
                 <div className="settings-empty-state settings-search-content-empty" role="status">
                   <p>{t("settings.search.noResults", "No settings sections match \"{{query}}\".", { query: settingsSearchQuery.trim() })}</p>
@@ -3915,6 +4130,9 @@ export function SettingsModal({
             embedded (SettingsView) presentations — the footer is not gated by isEmbedded
             (only Cancel is), so this button renders in both automatically (FN-7506
             Surface Enumeration: modal + embedded).
+
+            FNXC:SettingsReset 2026-07-12-00:00:
+            The mobile Settings footer needs the compact Reset label to preserve horizontal space alongside Help, version, Import, Export, Cancel, and Save. Desktop and tablet keep the full Reset Settings wording while the existing destructive confirmation dialog remains unchanged.
             */}
             <button
               type="button"
@@ -3924,7 +4142,9 @@ export function SettingsModal({
               disabled={loading}
               title={t("settings.reset.buttonTitle", "Reset settings to their defaults")}
             >
-              {t("settings.reset.button", "Reset Settings")}
+              {viewportMode === "mobile"
+                ? t("settings.reset.buttonShort", "Reset")
+                : t("settings.reset.button", "Reset Settings")}
             </button>
           </div>
           <div className="modal-actions-right">

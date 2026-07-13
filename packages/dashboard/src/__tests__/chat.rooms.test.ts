@@ -95,6 +95,48 @@ describe("Chat orchestration — rooms (FN-3805..FN-3811 contract)", () => {
       expect(assistantWrite).toMatchObject({ role: "assistant", senderAgentId: "agent-a", content: "Room reply" });
     });
 
+    it("passes resolved room thinkingLevel to every direct and ambient responder session", async () => {
+      const createResolvedSession = vi.fn(async () => ({
+        session: {
+          prompt: vi.fn(),
+          dispose: vi.fn(),
+          state: { messages: [{ role: "assistant", content: "Room reply" }] },
+        },
+        provider: "test",
+        model: "test",
+        fallbackInfo: undefined,
+      } as any));
+      __setCreateResolvedAgentSession(createResolvedSession as any);
+      mockChatStore.getRoom.mockReturnValue({ id: "room-1", name: "room-1", thinkingLevel: "high", projectId: "project-1" });
+      mockChatStore.listRoomMembers.mockReturnValue([
+        { roomId: "room-1", agentId: "agent-a", role: "member", addedAt: "2026-01-01" },
+        { roomId: "room-1", agentId: "agent-b", role: "member", addedAt: "2026-01-01" },
+      ]);
+      mockAgentStore.listAgents.mockResolvedValue([
+        { id: "agent-a", name: "Alpha", role: "executor" },
+        { id: "agent-b", name: "Beta", role: "executor" },
+      ]);
+      mockAgentStore.getAgent.mockResolvedValue(null);
+
+      const manager = new ChatManager(
+        mockChatStore as any,
+        "/tmp",
+        mockAgentStore as any,
+        undefined,
+        async () => ({ executionThinkingLevel: "medium" } as any),
+      );
+      await manager.sendRoomMessage("room-1", "hello @Alpha");
+
+      expect(createResolvedSession).toHaveBeenCalledTimes(2);
+      expect(createResolvedSession.mock.calls.map((call) => call[0].defaultThinkingLevel)).toEqual(["high", "high"]);
+
+      createResolvedSession.mockClear();
+      mockChatStore.getRoom.mockReturnValue({ id: "room-1", name: "room-1", thinkingLevel: null, projectId: "project-1" });
+      await manager.sendRoomMessage("room-1", "hello @Alpha");
+
+      expect(createResolvedSession.mock.calls.map((call) => call[0].defaultThinkingLevel)).toEqual(["medium", "medium"]);
+    });
+
     it("requests responder and enabled plugin skills for room responder sessions", async () => {
       mockChatStore.listRoomMembers.mockReturnValue([
         { roomId: "room-1", agentId: "agent-a", role: "member", addedAt: "2026-01-01" },
@@ -179,6 +221,7 @@ describe("Chat orchestration — rooms (FN-3805..FN-3811 contract)", () => {
         "fn_workflow_settings",
         "fn_workflow_list",
         "fn_workflow_get",
+        "fn_workflow_validate",
         "fn_workflow_select",
         "fn_trait_list",
       ]));

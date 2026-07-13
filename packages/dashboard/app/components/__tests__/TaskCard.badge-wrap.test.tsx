@@ -1,3 +1,4 @@
+import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "@testing-library/react";
 import { TaskCard } from "../TaskCard";
@@ -22,7 +23,12 @@ vi.mock("lucide-react", () => ({
   RotateCw: () => null,
   Zap: () => null,
   AlertTriangle: () => null,
+  ArrowDown: ({ style }: { style?: React.CSSProperties }) => <svg className="lucide-arrow-down" style={style} />,
+  Flag: ({ style }: { style?: React.CSSProperties }) => <svg className="lucide-flag" style={style} />,
+  ArrowUp: ({ style }: { style?: React.CSSProperties }) => <svg className="lucide-arrow-up" style={style} />,
+  TriangleAlert: ({ style }: { style?: React.CSSProperties }) => <svg className="lucide-triangle-alert" style={style} />,
   Eye: () => null,
+  MoreHorizontal: () => null,
 }));
 
 vi.mock("../ProviderIcon", () => ({
@@ -45,6 +51,141 @@ vi.mock("../../hooks/useToast", () => ({
 }));
 
 const noop = () => {};
+const resolvedChipHeightPattern = /^(var\(--card-chip-height\)|22px)$/;
+const centeredIdNudgePattern = /^translateY\(calc\(var\(--space-xs\) \/ 4\)\)$/;
+
+function expectSharedHeaderBaseline(container: HTMLElement) {
+  const header = container.querySelector(".card-header") as HTMLElement;
+  const cardId = container.querySelector(".card-id") as HTMLElement;
+  const actions = container.querySelector(".card-header-actions") as HTMLElement;
+
+  expect(header).toBeTruthy();
+  expect(cardId).toBeTruthy();
+  expect(actions).toBeTruthy();
+
+  const headerStyles = getComputedStyle(header);
+  const idStyles = getComputedStyle(cardId);
+  const actionsStyles = getComputedStyle(actions);
+
+  expect(headerStyles.alignItems).toBe("flex-start");
+  expect(headerStyles.flexWrap).toBe("nowrap");
+  expect(idStyles.display).toBe("inline-flex");
+  expect(idStyles.alignItems).toBe("center");
+  expect(idStyles.lineHeight).toBe("1");
+  expect(idStyles.minHeight).toMatch(resolvedChipHeightPattern);
+  expect(idStyles.height).toMatch(resolvedChipHeightPattern);
+  expect(idStyles.maxHeight).toMatch(resolvedChipHeightPattern);
+  expect(idStyles.transform).toMatch(centeredIdNudgePattern);
+  expect(actionsStyles.display).toBe("flex");
+  expect(actionsStyles.alignItems).toBe("center");
+  expect(actionsStyles.transform).toBe(idStyles.transform);
+  expect(actionsStyles.minHeight).toMatch(resolvedChipHeightPattern);
+  // Locked chip-height row so a taller ⋯ touch target cannot sink the right cluster below the task id.
+  expect(actionsStyles.height).toMatch(resolvedChipHeightPattern);
+  expect(actionsStyles.maxHeight).toMatch(resolvedChipHeightPattern);
+  expect(actionsStyles.overflow).toBe("visible");
+  expect(actionsStyles.marginLeft).toBe("auto");
+  expect(actionsStyles.flex).toBe("0 0 auto");
+}
+
+function getCssBlocks(css: string, atRuleFragment: string): string[] {
+  const re = /@media[^{}]*\{/g;
+  const blocks: string[] = [];
+
+  for (const match of css.matchAll(re)) {
+    if (!match[0].includes(atRuleFragment)) continue;
+    const start = match.index! + match[0].length;
+    let depth = 1;
+    let i = start;
+    while (i < css.length && depth > 0) {
+      const ch = css[i];
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      i++;
+    }
+    blocks.push(css.slice(start, i - 1));
+  }
+
+  expect(blocks.length).toBeGreaterThan(0);
+  return blocks;
+}
+
+function getCssRuleBodies(section: string, selectorFragment: string): string[] {
+  const bodies: string[] = [];
+  const pattern = /([^{}]+)\{([\s\S]*?)\}/g;
+
+  for (const match of section.matchAll(pattern)) {
+    if (match[1].includes(selectorFragment)) {
+      bodies.push(match[2]);
+    }
+  }
+
+  expect(bodies.length, `Expected CSS rule for ${selectorFragment}`).toBeGreaterThan(0);
+  return bodies;
+}
+
+function expectCssRuleToContain(section: string, selectorFragment: string, declaration: string): void {
+  const bodies = getCssRuleBodies(section, selectorFragment);
+  expect(bodies.some((body) => body.includes(declaration)), `${selectorFragment} should include ${declaration}`).toBe(true);
+}
+
+function expectCssRuleNotToContain(section: string, selectorFragment: string, declaration: string): void {
+  const bodies = getCssRuleBodies(section, selectorFragment);
+  for (const body of bodies) {
+    expect(body, `${selectorFragment} should not include ${declaration}`).not.toContain(declaration);
+  }
+}
+
+function expectHeaderActionsControlCenterline(container: HTMLElement, expected: {
+  sendBack?: boolean;
+  menu?: boolean;
+  size?: boolean;
+}) {
+  const actions = container.querySelector(".card-header-actions") as HTMLElement;
+  expect(actions).toBeTruthy();
+  expect(getComputedStyle(actions).alignItems).toBe("center");
+
+  const sendBack = actions.querySelector(".card-send-back-btn") as HTMLElement | null;
+  const menu = actions.querySelector(".card-menu-btn") as HTMLElement | null;
+  const sizeBadge = actions.querySelector(".card-size-badge") as HTMLElement | null;
+
+  if (expected.sendBack) {
+    expect(sendBack).toBeTruthy();
+    const sendBackStyles = getComputedStyle(sendBack!);
+    expect(sendBackStyles.display).toBe("inline-flex");
+    expect(sendBackStyles.alignItems).toBe("center");
+    expect(sendBackStyles.lineHeight).toBe("1");
+    expect(sendBackStyles.minHeight).toBe("");
+    // Text+chevron Actions chip reads optically low vs ⋯ / size; tokenized 1px raise keeps the three on one centerline.
+    expect(sendBackStyles.transform).toMatch(/^translateY\(calc\(var\(--space-xs\) \/ -4\)\)$/);
+  } else {
+    expect(sendBack).toBeNull();
+  }
+
+  if (expected.menu) {
+    expect(menu).toBeTruthy();
+    const menuStyles = getComputedStyle(menu!);
+    expect(menuStyles.display).toBe("flex");
+    expect(menuStyles.alignItems).toBe("center");
+    expect(menuStyles.justifyContent).toBe("center");
+    expect(menuStyles.lineHeight).toBe("1");
+    expect(menuStyles.minHeight).toBe("");
+  } else {
+    expect(menu).toBeNull();
+  }
+
+  if (expected.size) {
+    expect(sizeBadge).toBeTruthy();
+    const sizeStyles = getComputedStyle(sizeBadge!);
+    expect(sizeStyles.display).toBe("inline-flex");
+    expect(sizeStyles.alignItems).toBe("center");
+    expect(sizeStyles.lineHeight).toBe("1");
+    expect(actions.contains(sizeBadge)).toBe(true);
+    expect(sizeBadge!.closest(".card-header-badges")).toBeNull();
+  } else {
+    expect(sizeBadge).toBeNull();
+  }
+}
 
 function makeTask(overrides: Partial<Task> = {}): Task {
   return {
@@ -62,10 +203,12 @@ function makeTask(overrides: Partial<Task> = {}): Task {
 describe("TaskCard badge wrapping (FN-5162)", () => {
   let cleanupCss: (() => void) | undefined;
   let container: HTMLElement;
+  let loadedCss = "";
 
   beforeEach(async () => {
     const style = document.createElement("style");
-    style.textContent = await Promise.resolve(loadAllAppCss());
+    loadedCss = await Promise.resolve(loadAllAppCss());
+    style.textContent = loadedCss;
     document.head.appendChild(style);
     cleanupCss = () => style.remove();
 
@@ -98,13 +241,298 @@ describe("TaskCard badge wrapping (FN-5162)", () => {
     cleanupCss = undefined;
   });
 
-  it("wraps the header row and keeps a non-zero row gap", () => {
+  it("keeps the outer header row non-wrapping while badges wrap inside their own group", () => {
     const header = container.querySelector(".card-header");
+    const headerBadges = container.querySelector(".card-header-badges");
     expect(header).toBeTruthy();
+    expect(headerBadges).toBeTruthy();
 
-    const styles = getComputedStyle(header!);
-    expect(styles.flexWrap).toBe("wrap");
-    expect(styles.rowGap).toMatch(/^(var\(--space-xs\)|(?!0px$)\d+(?:\.\d+)?px)$/);
+    const headerStyles = getComputedStyle(header!);
+    expect(headerStyles.flexWrap).toBe("nowrap");
+    expect(headerStyles.rowGap).toMatch(/^(var\(--space-xs\)|(?!0px$)\d+(?:\.\d+)?px)$/);
+
+    const badgeStyles = getComputedStyle(headerBadges!);
+    expect(badgeStyles.display).toBe("flex");
+    expect(badgeStyles.flexWrap).toBe("wrap");
+    expect(badgeStyles.minWidth).toBe("0px");
+    expect(header?.contains(headerBadges)).toBe(true);
+    expect(container.querySelector(".card-header-actions")).toBeNull();
+  });
+
+  it("keeps a fast-mode size badge in the right-aligned header actions instead of an orphaned wrapped row", () => {
+    const { container: sizedContainer } = render(
+      <TaskCard
+        task={makeTask({
+          id: "FN-7832",
+          column: "done",
+          status: "done" as Task["status"],
+          size: "S",
+          priority: "urgent" as Task["priority"],
+          executionMode: "fast",
+          noCommitsExpected: true,
+          issueInfo: {
+            owner: "owner",
+            repo: "repo",
+            number: 7832,
+            state: "open",
+            title: "Fast-mode done card with extra header badges",
+            url: "https://github.com/owner/repo/issues/7832",
+          } as Task["issueInfo"],
+        })}
+        onOpenDetail={noop}
+        addToast={noop}
+        onArchiveTask={async () => makeTask()}
+        workflowBadge={{ workflowId: "wf-fast-size", workflowName: "Fast size workflow" }}
+      />,
+    );
+
+    const header = sizedContainer.querySelector(".card-header") as HTMLElement;
+    const headerBadges = sizedContainer.querySelector(".card-header-badges") as HTMLElement;
+    const actions = sizedContainer.querySelector(".card-header-actions") as HTMLElement;
+    const sizeBadge = sizedContainer.querySelector(".card-size-badge") as HTMLElement;
+    const fastBadge = sizedContainer.querySelector(".card-execution-mode-badge") as HTMLElement;
+
+    expect(header).toBeTruthy();
+    expect(headerBadges).toBeTruthy();
+    expect(actions).toBeTruthy();
+    expect(sizeBadge).toBeTruthy();
+    expect(fastBadge).toBeTruthy();
+    expect(actions.contains(sizeBadge)).toBe(true);
+    expect(headerBadges.contains(fastBadge)).toBe(true);
+    expect(sizeBadge.closest(".card-header-badges")).toBeNull();
+    expect(actions.parentElement).toBe(header);
+    expect(headerBadges.parentElement).toBe(header);
+
+    const headerStyles = getComputedStyle(header);
+    const actionsStyles = getComputedStyle(actions);
+    expect(headerStyles.flexWrap).toBe("nowrap");
+    expect(actionsStyles.marginLeft).toBe("auto");
+    expect(actionsStyles.flexShrink).toBe("0");
+    expect(actionsStyles.alignSelf).toBe("flex-start");
+    expectSharedHeaderBaseline(sizedContainer);
+  });
+
+  it("aligns an in-progress card id with Send back and size actions while badges are present", () => {
+    const { container: alignedContainer } = render(
+      <TaskCard
+        task={makeTask({
+          id: "FN-7862",
+          column: "in-progress",
+          status: "planning" as Task["status"],
+          size: "M",
+          priority: "urgent" as Task["priority"],
+          executionMode: "fast",
+          plannerOverseerState: { state: "monitoring" },
+        })}
+        onOpenDetail={noop}
+        addToast={noop}
+        onMoveTask={async () => makeTask()}
+      />,
+    );
+
+    const headerBadges = alignedContainer.querySelector(".card-header-badges") as HTMLElement;
+    const actions = alignedContainer.querySelector(".card-header-actions") as HTMLElement;
+    const sizeBadge = alignedContainer.querySelector(".card-size-badge") as HTMLElement;
+    const sendBack = alignedContainer.querySelector(".card-send-back") as HTMLElement;
+
+    expect(headerBadges).toBeTruthy();
+    expect(getComputedStyle(headerBadges).alignItems).toBe("center");
+    expect(getComputedStyle(headerBadges).minHeight).toMatch(resolvedChipHeightPattern);
+    expect(sendBack).toBeTruthy();
+    expect(actions.contains(sendBack)).toBe(true);
+    expect(actions.contains(sizeBadge)).toBe(true);
+    expect(sizeBadge.closest(".card-header-badges")).toBeNull();
+    expectSharedHeaderBaseline(alignedContainer);
+  });
+
+  it("aligns a no-badges triage card id with edit/delete actions without shifting the id", () => {
+    const { container: triageContainer } = render(
+      <TaskCard
+        task={makeTask({
+          id: "FN-7862-NO-BADGES",
+          column: "triage",
+          status: undefined,
+          size: "M",
+          priority: "normal" as Task["priority"],
+          executionMode: "standard",
+          plannerOversightLevel: "off",
+        })}
+        onOpenDetail={noop}
+        addToast={noop}
+        onUpdateTask={async () => makeTask()}
+        onDeleteTask={async () => makeTask()}
+      />,
+    );
+
+    const actions = triageContainer.querySelector(".card-header-actions") as HTMLElement;
+    const sizeBadge = triageContainer.querySelector(".card-size-badge") as HTMLElement;
+
+    expect(triageContainer.querySelector(".card-header-badges")).toBeNull();
+    expect(actions.querySelector(".card-edit-btn")).toBeTruthy();
+    expect(actions.querySelector(".card-delete-btn")).toBeTruthy();
+    expect(actions.contains(sizeBadge)).toBe(true);
+    expect(sizeBadge.closest(".card-header-badges")).toBeNull();
+    expectSharedHeaderBaseline(triageContainer);
+  });
+
+  it("keeps Send back, menu, and size controls on one header-actions centerline across card states", () => {
+    const { container: inProgressContainer } = render(
+      <TaskCard
+        task={makeTask({
+          id: "FN-7928-IN-PROGRESS",
+          column: "in-progress",
+          status: "running" as Task["status"],
+          size: "M",
+        })}
+        onOpenDetail={noop}
+        addToast={noop}
+        onMoveTask={async () => makeTask()}
+      />,
+    );
+
+    expectSharedHeaderBaseline(inProgressContainer);
+    expectHeaderActionsControlCenterline(inProgressContainer, { sendBack: true, menu: true, size: true });
+
+    const { container: doneContainer } = render(
+      <TaskCard
+        task={makeTask({
+          id: "FN-7928-DONE",
+          column: "done",
+          status: "done" as Task["status"],
+          size: "S",
+        })}
+        onOpenDetail={noop}
+        addToast={noop}
+        onArchiveTask={async () => makeTask()}
+      />,
+    );
+
+    expectSharedHeaderBaseline(doneContainer);
+    expectHeaderActionsControlCenterline(doneContainer, { sendBack: true, menu: true, size: true });
+
+    const { container: triageContainer } = render(
+      <TaskCard
+        task={makeTask({
+          id: "FN-7928-TRIAGE",
+          column: "triage",
+          status: undefined,
+          size: "L",
+        })}
+        onOpenDetail={noop}
+        addToast={noop}
+        onUpdateTask={async () => makeTask()}
+        onDeleteTask={async () => makeTask()}
+      />,
+    );
+
+    expectSharedHeaderBaseline(triageContainer);
+    expectHeaderActionsControlCenterline(triageContainer, { menu: true, size: true });
+
+    const { container: menuAbsentContainer } = render(
+      <TaskCard
+        task={makeTask({
+          id: "FN-7928-NO-MENU",
+          column: "todo",
+          status: "pending" as Task["status"],
+          size: "M",
+        })}
+        onOpenDetail={noop}
+        addToast={noop}
+      />,
+    );
+
+    expectSharedHeaderBaseline(menuAbsentContainer);
+    expectHeaderActionsControlCenterline(menuAbsentContainer, { size: true });
+
+    const { container: sizeAbsentContainer } = render(
+      <TaskCard
+        task={makeTask({
+          id: "FN-7928-NO-SIZE",
+          column: "in-progress",
+          status: "running" as Task["status"],
+          size: undefined,
+        })}
+        onOpenDetail={noop}
+        addToast={noop}
+        onMoveTask={async () => makeTask()}
+      />,
+    );
+
+    expectSharedHeaderBaseline(sizeAbsentContainer);
+    expectHeaderActionsControlCenterline(sizeAbsentContainer, { sendBack: true, menu: true });
+
+    const { container: awaitingInputContainer } = render(
+      <TaskCard
+        task={makeTask({
+          id: "FN-7933-AWAITING-INPUT",
+          column: "in-progress",
+          status: "awaiting-user-input" as Task["status"],
+          size: "M",
+        })}
+        onOpenDetail={noop}
+        onOpenDetailWithTab={noop}
+        addToast={noop}
+        onMoveTask={async () => makeTask()}
+      />,
+    );
+
+    expect(awaitingInputContainer.querySelector(".card-answer-questions-btn")).toBeTruthy();
+    expectSharedHeaderBaseline(awaitingInputContainer);
+    expectHeaderActionsControlCenterline(awaitingInputContainer, { sendBack: true, menu: true, size: true });
+  });
+
+  it("keeps the centered-id nudge and mobile header rhythm tokenized with the badge-wrap contract", () => {
+    const cardHeaderRule = loadedCss.match(/\.card-header\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? "";
+    const cardIdRule = loadedCss.match(/\.card-id\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? "";
+    const actionsRule = loadedCss.match(/\.card-header-actions\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? "";
+    expect(cardHeaderRule).toContain("align-items: flex-start;");
+    expect(cardIdRule).toContain("min-height: var(--card-chip-height);");
+    expect(cardIdRule).toContain("height: var(--card-chip-height);");
+    expect(cardIdRule).toContain("max-height: var(--card-chip-height);");
+    expect(cardIdRule).toContain("line-height: 1;");
+    expect(cardIdRule).toContain("transform: translateY(calc(var(--space-xs) / 4));");
+    expect(cardIdRule).not.toMatch(/translateY\(\d/);
+    expect(actionsRule).toContain("align-items: center;");
+    expect(actionsRule).toContain("height: var(--card-chip-height);");
+    expect(actionsRule).toContain("max-height: var(--card-chip-height);");
+    expect(actionsRule).toContain("overflow: visible;");
+    expect(actionsRule).toContain("transform: translateY(calc(var(--space-xs) / 4));");
+    expect(actionsRule).not.toMatch(/translateY\(\d/);
+    expect(loadedCss).toContain(".card-id,\n  .card-header-badges,\n  .card-header-actions");
+    expect(loadedCss).toContain("min-height: var(--card-chip-height-mobile);");
+  });
+
+  it("locks the mobile Send back, menu, and size controls to one header-actions centerline", () => {
+    const mobileSection = getCssBlocks(loadedCss, "max-width: 768px").join("\n");
+    const menuTouchSection = getCssBlocks(loadedCss, "max-height: 480px").join("\n");
+
+    expectCssRuleToContain(mobileSection, ".card-header-actions", "min-height: var(--card-chip-height-mobile);");
+    expectCssRuleToContain(mobileSection, ".card-header-actions", "height: var(--card-chip-height-mobile);");
+    expectCssRuleToContain(mobileSection, ".card-header-actions", "max-height: var(--card-chip-height-mobile);");
+    expectCssRuleToContain(mobileSection, ".card-header-actions", "overflow: visible;");
+    expectCssRuleToContain(mobileSection, ".card-header-actions", "align-items: center;");
+    expectCssRuleToContain(mobileSection, ".card-header-actions", "gap: calc(var(--space-xs) / 2);");
+    // Task id and right cluster share the same locked mobile chip row so Actions/⋯/size sit on the FN-#### baseline.
+    expectCssRuleToContain(mobileSection, ".card-id", "height: var(--card-chip-height-mobile);");
+    expectCssRuleToContain(mobileSection, ".card-id", "max-height: var(--card-chip-height-mobile);");
+    expectCssRuleToContain(mobileSection, ".card-send-back", "height: 100%;");
+    expectCssRuleToContain(mobileSection, ".card-send-back", "align-items: center;");
+    expectCssRuleToContain(mobileSection, ".card-send-back-btn", "line-height: 1;");
+    expectCssRuleToContain(mobileSection, ".card-send-back-btn", "transform: translateY(calc(var(--space-xs) / -4));");
+    expectCssRuleToContain(mobileSection, ".card-menu-btn", "line-height: 1;");
+    expectCssRuleToContain(mobileSection, ".card-size-badge", "line-height: 1;");
+    expectCssRuleToContain(mobileSection, ".card-size-badge", "font-size: 0.5625rem;");
+    expectCssRuleToContain(mobileSection, ".card-size-badge", "padding: calc(var(--space-xs) / 4) calc((var(--space-xs) * 3) / 2);");
+    expectCssRuleToContain(mobileSection, ".card-size-badge", "padding-block: calc((var(--space-xs) / 4) + var(--btn-border-width));");
+    expectCssRuleNotToContain(mobileSection, ".card-send-back-btn", "min-height:");
+    expectCssRuleNotToContain(mobileSection, ".card-menu-btn", "min-height:");
+    expectCssRuleToContain(menuTouchSection, ".card-menu-btn", "width: 28px;");
+    expectCssRuleToContain(menuTouchSection, ".card-menu-btn", "height: 28px;");
+    expectCssRuleToContain(menuTouchSection, ".card-menu-btn", "line-height: 1;");
+    // Negative vertical margin cancels residual 28px layout contribution (same pattern as .card-edit-btn/.card-delete-btn).
+    expectCssRuleToContain(menuTouchSection, ".card-menu-btn", "margin: -6px 0;");
+    expectCssRuleToContain(menuTouchSection, ".card-menu-btn svg", "width: 16px;");
+    expectCssRuleToContain(menuTouchSection, ".card-menu-btn svg", "height: 16px;");
   });
 
   it.each([

@@ -139,3 +139,13 @@ export function getUnifiedTaskProgress(
 
   return { total, completed, items };
 }
+
+/*
+FNXC:TaskCardPlanReviewBadge 2026-07-11-12:00:
+FN-7831 requires task cards and list rows to show a distinct "Reviewing" badge only while the optional `plan-review` workflow step is actively running. Reuse the unified progress item status so every board surface follows the same startedAt-without-completedAt semantics as the progress list.
+*/
+export function isPlanReviewRunning(task: Pick<Task, "steps" | "enabledWorkflowSteps" | "workflowStepResults">): boolean {
+  return getUnifiedTaskProgress(task).items.some(
+    (item) => item.id === "workflow-plan-review" && item.status === "running",
+  );
+}

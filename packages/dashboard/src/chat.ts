@@ -35,7 +35,11 @@ import { existsSync } from "node:fs";
 import { join, resolve, relative } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { SessionEventBuffer } from "./sse-buffer.js";
-import { formatChatAttachmentContents, readChatAttachmentContents } from "./chat-attachment-content.js";
+import {
+  formatChatAttachmentContents,
+  formatChatImageAttachmentHints,
+  readChatAttachmentContents,
+} from "./chat-attachment-content.js";
 import { buildTaskPlannerChatContext, TASK_PLANNER_CHAT_CONTEXT_PROMPT_GUIDANCE } from "./task-planner-chat-context.js";
 import { formatTaskPlannerChatMetrics } from "./task-planner-chat-metrics.js";
 import { emitWorkflowSseEvent, type WorkflowSseEventType } from "./sse.js";
@@ -687,6 +691,17 @@ export type ChatStreamEvent =
   | { type: "tool_end"; data: { toolName: string; isError: boolean; result?: unknown } }
   | { type: "fallback"; data: { primaryModel: string; fallbackModel: string; triggerPoint: "session-creation" | "prompt-time" } }
   | {
+      type: "warning";
+      data: {
+        code: "tool-schema-reduced";
+        toolSchemaReduced: true;
+        reason: "message-store-unavailable";
+        sessionId: string;
+        agentId: string;
+        projectId: string | null;
+      };
+    }
+  | {
       type: "done";
       data: {
         messageId: string;
@@ -1051,7 +1066,7 @@ export class ChatManager {
       FNXC:ChatSkills 2026-06-16-19:10:
       Agent chat receives the project plugin runner through this narrow structural type, so expose enabled plugin skill contributions here without requiring dashboard code to depend on the full engine runner class.
       */
-      getPluginSkills?(): Array<{ pluginId: string; skill: { name: string; enabled?: boolean } }>;
+      getPluginSkills?(): Array<{ pluginId: string; pluginRoot?: string; skill: { skillId?: string; name: string; description?: string; enabled?: boolean; skillFiles?: string[] } }>;
     },
     private getSettings?: () => Promise<Pick<Settings,
       | "fallbackProvider"
@@ -1093,6 +1108,14 @@ export class ChatManager {
    */
   setPluginRunner(pluginRunner: ChatManager["pluginRunner"] | undefined): void {
     this.pluginRunner = pluginRunner;
+  }
+
+  /**
+   * FNXC:ProjectChatRuntime 2026-07-12-11:00:
+   * Project-scoped chat managers can be constructed before the project engine boots, so the engine MessageStore that provides fn_send_message/fn_read_messages must be refreshable post-construction like the plugin runner. Without this FN-7854 refresh seam, a cached desktop manager keeps messaging tools permanently stripped for that session.
+   */
+  setMessageStore(messageStore: MessageStore | undefined): void {
+    this.messageStore = messageStore;
   }
 
   private getPluginRunnerForSkillSelection(): Parameters<typeof buildSessionSkillContextSync>[3] {
@@ -1598,6 +1621,7 @@ export class ChatManager {
           roomId,
           roomName: room.name,
           roomProjectId: room.projectId ?? null,
+          roomThinkingLevel: room.thinkingLevel ?? null,
           content: trimmedContent,
           latestUserMessageId: userMessage.id,
           attachments,
@@ -1667,6 +1691,7 @@ export class ChatManager {
     roomId: string;
     roomName: string;
     roomProjectId?: string | null;
+    roomThinkingLevel?: string | null;
     content: string;
     latestUserMessageId: string;
     attachments?: ChatAttachment[];
@@ -1707,6 +1732,7 @@ export class ChatManager {
       diagnostics,
     );
     const attachmentContentBlock = formatChatAttachmentContents(attachmentContents);
+    const imagePathHints = formatChatImageAttachmentHints(imageContents);
     const parsedSkillCommands = parseSkillCommands(input.content);
     const roomPromptParts = [
       `You are replying as ${input.responder.name} in room #${input.roomName}.`,
@@ -1722,6 +1748,9 @@ export class ChatManager {
     if (attachmentContentBlock) {
       roomPromptParts.push(attachmentContentBlock);
     }
+    if (imagePathHints) {
+      roomPromptParts.push(imagePathHints);
+    }
     const roomPrompt = roomPromptParts.join("\n\n");
 
     const responderRuntimeModel = extractRuntimeModel(input.responder.runtimeConfig);
@@ -1732,6 +1761,11 @@ export class ChatManager {
      */
     const effectiveModelProvider = input.modelProvider ?? responderRuntimeModel.provider ?? chatModelSettings.defaultProvider;
     const effectiveModelId = input.modelId ?? responderRuntimeModel.modelId ?? chatModelSettings.defaultModelId;
+    /*
+     * FNXC:Chat-ThinkingLevel 2026-07-12-00:00:
+     * Room responders apply the room-level reasoning-effort default through the engine `defaultThinkingLevel` session option. An unset room value inherits the resolved project/global chat default and every direct or ambient responder in the room receives the same effective level.
+     */
+    const effectiveThinkingLevel = resolveExecutorThinkingLevel(input.roomThinkingLevel ?? undefined, chatModelSettings);
     /*
      * FNXC:ChatModels 2026-07-01-16:42:
      * Room responders should pass configured fallback models even when the room send chose an explicit model. The engine still swaps only for retryable provider/model-selection failures, so an unavailable Sonnet 5 can recover without making ordinary prompt errors ambiguous.
@@ -1776,6 +1810,7 @@ export class ChatManager {
             defaultModelId: effectiveModelId,
           }
         : {}),
+      ...(effectiveThinkingLevel ? { defaultThinkingLevel: effectiveThinkingLevel } : {}),
       ...(allowFallback && chatModelSettings.fallbackProvider && chatModelSettings.fallbackModelId
         ? {
             fallbackProvider: chatModelSettings.fallbackProvider,
@@ -2170,12 +2205,20 @@ export class ChatManager {
         diagnostics,
       );
       const attachmentContentBlock = formatChatAttachmentContents(attachmentContents);
+      /*
+      FNXC:GrokAcp 2026-07-12-07:30:
+      Name/size-only attachmentSummary is not enough for Grok ACP (image ContentBlocks
+      are unsupported). Include absolute filesystem paths so the agent can open pixels.
+      */
+      const imagePathHints = formatChatImageAttachmentHints(imageContents);
 
       // Send only the new user content. Prior turns are reloaded by the
       // pi/Claude CLI session via SessionManager.open() below — stuffing the
       // transcript back into the user message would balloon the on-disk
       // session every turn (and previously did, see chat-store.ts:setCliSessionFile).
-      const promptContent = [attachmentSummary, attachmentContentBlock, resolvedContent].filter(Boolean).join("\n\n");
+      const promptContent = [attachmentSummary, imagePathHints, attachmentContentBlock, resolvedContent]
+        .filter(Boolean)
+        .join("\n\n");
 
       // Per-chat session continuity: the pi SessionManager (and, transitively,
       // the Claude CLI --resume session it owns) is keyed off the chat. On the
@@ -2230,6 +2273,27 @@ export class ChatManager {
        * Model-loop chat sessions apply the per-session thinking level through the engine `defaultThinkingLevel` session option; an empty session value inherits the project/global execution default resolved by resolveExecutorThinkingLevel.
        */
       const effectiveThinkingLevel = resolveExecutorThinkingLevel(session.thinkingLevel ?? undefined, chatModelSettings);
+
+      if (agent?.id && !this.messageStore) {
+        const warning = {
+          code: "tool-schema-reduced" as const,
+          toolSchemaReduced: true as const,
+          reason: "message-store-unavailable" as const,
+          sessionId,
+          agentId: agent.id,
+          projectId: session.projectId ?? null,
+        };
+        /*
+         * FNXC:ChatAgentTools 2026-07-12-11:00:
+         * A bound agent with reduced tools must receive an observable signal instead of later discovering missing coordination tools one failed call at a time. FN-7854 keeps the signal lightweight by using diagnostics plus the existing chat stream channel when MessageStore-backed messaging tools cannot be assembled.
+         */
+        diagnostics.warn("Project chat tool schema reduced", warning);
+        chatStreamManager.broadcast(sessionId, {
+          type: "warning",
+          data: warning,
+        }, broadcastOptions);
+      }
+
 
       const messagingTools = agent?.id && this.messageStore
         ? [

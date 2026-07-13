@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Task } from "@fusion/core";
-import { getUnifiedTaskProgress } from "../taskProgress";
+import { getUnifiedTaskProgress, isPlanReviewRunning } from "../taskProgress";
 
 /*
 FNXC:WorkflowSteps 2026-06-25-00:00 — graph-native progress model (plan U3).
@@ -19,6 +19,20 @@ function makeTask(overrides: Partial<Pick<Task, "steps" | "enabledWorkflowSteps"
     ...overrides,
   } as Pick<Task, "steps" | "enabledWorkflowSteps" | "workflowStepResults">;
 }
+
+describe("isPlanReviewRunning", () => {
+  it.each([
+    { name: "undefined results", task: { enabledWorkflowSteps: ["plan-review"], workflowStepResults: undefined }, expected: false },
+    { name: "pending but not started", task: { enabledWorkflowSteps: ["plan-review"], workflowStepResults: [{ workflowStepId: "plan-review", workflowStepName: "Plan Review", status: "pending" }] }, expected: false },
+    { name: "started and not completed", task: { enabledWorkflowSteps: ["plan-review"], workflowStepResults: [{ workflowStepId: "plan-review", workflowStepName: "Plan Review", status: "pending", startedAt: "2026-07-11T12:00:00.000Z" }] }, expected: true },
+    { name: "passed", task: { enabledWorkflowSteps: ["plan-review"], workflowStepResults: [{ workflowStepId: "plan-review", workflowStepName: "Plan Review", status: "passed", startedAt: "2026-07-11T12:00:00.000Z", completedAt: "2026-07-11T12:01:00.000Z" }] }, expected: false },
+    { name: "failed", task: { enabledWorkflowSteps: ["plan-review"], workflowStepResults: [{ workflowStepId: "plan-review", workflowStepName: "Plan Review", status: "failed", startedAt: "2026-07-11T12:00:00.000Z", completedAt: "2026-07-11T12:01:00.000Z" }] }, expected: false },
+    { name: "skipped", task: { enabledWorkflowSteps: ["plan-review"], workflowStepResults: [{ workflowStepId: "plan-review", workflowStepName: "Plan Review", status: "skipped", startedAt: "2026-07-11T12:00:00.000Z", completedAt: "2026-07-11T12:01:00.000Z" }] }, expected: false },
+    { name: "advisory failure", task: { enabledWorkflowSteps: ["plan-review"], workflowStepResults: [{ workflowStepId: "plan-review", workflowStepName: "Plan Review", status: "advisory_failure", startedAt: "2026-07-11T12:00:00.000Z", completedAt: "2026-07-11T12:01:00.000Z" }] }, expected: false },
+  ])("returns $expected for $name", ({ task, expected }) => {
+    expect(isPlanReviewRunning(makeTask(task as Partial<Pick<Task, "steps" | "enabledWorkflowSteps" | "workflowStepResults">>))).toBe(expected);
+  });
+});
 
 describe("getUnifiedTaskProgress", () => {
   it("resolves workflow step names from result.workflowStepName without a lookup", () => {

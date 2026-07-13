@@ -6,6 +6,7 @@ import { TASK_PRIORITIES, type Task, type TaskPriority } from "@fusion/core";
 import { checkDuplicateTasks, fetchSettings, fetchAgents, uploadAttachment, fetchWorkflowOptionalSteps } from "../../api";
 import { useNodes } from "../../hooks/useNodes";
 import { scopedKey } from "../../utils/projectStorage";
+import { getPriorityColorVar } from "../../utils/priorityIndicator";
 import { loadAllAppCss } from "../../test/cssFixture";
 
 const MOCK_MODELS = [
@@ -442,6 +443,17 @@ function expectQuickEntryPriorityButton(priority: TaskPriority) {
   expect(priorityButton).toHaveAttribute("aria-label", `Priority: ${label}`);
   expect(priorityButton).not.toHaveTextContent(label);
   expect(priorityButton.querySelector("svg")?.classList.contains(QUICK_ENTRY_PRIORITY_ICON_CLASS[priority])).toBe(true);
+const icon = priorityButton.querySelector("svg");
+  expect(icon?.classList.contains(QUICK_ENTRY_PRIORITY_ICON_CLASS[priority])).toBe(true);
+  expect(icon?.getAttribute("style")).toContain(`color: ${getPriorityColorVar(priority)}`);
+}
+
+function expectPriorityOptionColor(priority: TaskPriority) {
+  const option = screen.getByTestId(`quick-entry-priority-option-${priority}`);
+  const icon = option.querySelector("svg");
+  expect(icon?.classList.contains(QUICK_ENTRY_PRIORITY_ICON_CLASS[priority])).toBe(true);
+  expect(icon?.getAttribute("style")).toContain(`color: ${getPriorityColorVar(priority)}`);
+
 }
 
 describe("QuickEntryBox", () => {
@@ -2151,11 +2163,18 @@ describe("QuickEntryBox", () => {
     });
 
     it("renders the icon-only priority glyph and accessible label for every level", () => {
+it("renders urgency-colored priority glyphs in the trigger and picker for every level", () => {
+
       renderQuickEntryBox({});
       expandQuickEntry();
 
       for (const taskPriority of TASK_PRIORITIES) {
         openPriorityMenu();
+
+for (const optionPriority of TASK_PRIORITIES) {
+          expectPriorityOptionColor(optionPriority);
+        }
+
         fireEvent.click(screen.getByTestId(`quick-entry-priority-option-${taskPriority}`));
         expectQuickEntryPriorityButton(taskPriority);
       }

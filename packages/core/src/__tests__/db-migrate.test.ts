@@ -1382,6 +1382,64 @@ describe("schema migration", () => {
     db.close();
   });
 
+  it("adds thinkingLevel to chat_rooms when migrating from schema version 142", () => {
+    const db = new Database(fusionDir);
+    db.exec("CREATE TABLE IF NOT EXISTS __meta (key TEXT PRIMARY KEY, value TEXT)");
+    db.exec("INSERT INTO __meta (key, value) VALUES ('schemaVersion', '142')");
+    db.exec("INSERT INTO __meta (key, value) VALUES ('lastModified', '1000')");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS chat_rooms (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        description TEXT,
+        projectId TEXT,
+        createdBy TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL
+      )
+    `);
+
+    db.init();
+
+    const columns = db.prepare("PRAGMA table_info(chat_rooms)").all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toContain("thinkingLevel");
+    expect(db.getSchemaVersion()).toBe(SCHEMA_VERSION);
+    db.close();
+  });
+
+  it("repairs v143 chat_rooms tables missing thinkingLevel", () => {
+    const db = new Database(fusionDir);
+    db.exec("CREATE TABLE IF NOT EXISTS __meta (key TEXT PRIMARY KEY, value TEXT)");
+    db.exec("INSERT INTO __meta (key, value) VALUES ('schemaVersion', '143')");
+    db.exec("INSERT INTO __meta (key, value) VALUES ('lastModified', '1000')");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS chat_rooms (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        description TEXT,
+        projectId TEXT,
+        createdBy TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL
+      )
+    `);
+    db.exec(`INSERT INTO chat_rooms (id, name, slug, status, createdAt, updatedAt) VALUES ('room-legacy', 'Legacy', 'legacy', 'active', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`);
+
+    db.init();
+
+    const columns = db.prepare("PRAGMA table_info(chat_rooms)").all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toContain("thinkingLevel");
+    const row = db.prepare("SELECT id, thinkingLevel FROM chat_rooms WHERE id = 'room-legacy'").get() as { id: string; thinkingLevel: string | null };
+    expect(row).toEqual({ id: "room-legacy", thinkingLevel: null });
+    expect(db.getSchemaVersion()).toBe(SCHEMA_VERSION);
+    db.close();
+  });
+
+
   it("creates cli_sessions on a fresh database (fresh-create path)", () => {
     const db = new Database(fusionDir);
     db.init();

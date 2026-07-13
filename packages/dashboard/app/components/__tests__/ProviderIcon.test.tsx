@@ -58,14 +58,20 @@ describe("ProviderIcon", () => {
     expect(svg.parentElement).toHaveStyle({ color: "var(--provider-openai)" });
   });
 
-  it("renders cursor-cli icon with provider token color", () => {
+  it("renders cursor-cli icon with provider token color and official brand mark", () => {
     render(<ProviderIcon provider="cursor-cli" />);
     const svg = screen.getByTestId("cursor-cli-icon");
     expect(svg).toBeInTheDocument();
     expect(screen.getByLabelText("Cursor — via Cursor CLI")).toBeInTheDocument();
-    const badgeGlyph = svg.querySelector('path[stroke="var(--provider-icon-contrast)"]');
-    expect(badgeGlyph).toBeInTheDocument();
+    expect(svg.querySelector('path[data-cursor-brand-mark="cube"]')).toHaveAttribute("fill", "var(--provider-cursor-cli)");
+    expect(svg.querySelector('path[data-cursor-brand-mark="arrow"]')).toHaveAttribute("fill", "var(--provider-icon-contrast)");
     expect(svg.parentElement).toHaveStyle({ color: "var(--provider-cursor-cli)" });
+  });
+
+  it("infers cursor provider strings to the cursor-cli brand icon", () => {
+    render(<ProviderIcon provider="cursor" />);
+    expect(screen.getByTestId("cursor-cli-icon")).toBeInTheDocument();
+    expect(document.querySelector('[data-provider="cursor"] svg:not([data-testid])')).not.toBeInTheDocument();
   });
 
   it("renders grok-cli icon reusing the xAI brand mark", () => {

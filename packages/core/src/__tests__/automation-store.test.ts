@@ -843,6 +843,51 @@ describe("AutomationStore", () => {
       expect(fetchedStep.timeoutMs).toBe(60000);
       expect(fetchedStep.continueOnFailure).toBe(true);
     });
+
+    it("round-trips and clears optional step thinkingLevel", async () => {
+      const inheritedStep = makeStep({
+        type: "ai-prompt",
+        name: "Inherited thinking",
+        prompt: "Use defaults",
+        command: undefined,
+      });
+      const explicitStep = makeStep({
+        type: "ai-prompt",
+        name: "Explicit thinking",
+        prompt: "Think harder",
+        modelProvider: "anthropic",
+        modelId: "claude-sonnet-4-5",
+        thinkingLevel: "high",
+        command: undefined,
+      });
+
+      const schedule = await store.createSchedule({
+        name: "Thinking schedule",
+        command: "",
+        scheduleType: "daily",
+        steps: [inheritedStep, explicitStep],
+      });
+
+      const fetched = await store.getSchedule(schedule.id);
+      expect(fetched.steps![0].thinkingLevel).toBeUndefined();
+      expect(fetched.steps![1].thinkingLevel).toBe("high");
+
+      const cleared = await store.updateSchedule(schedule.id, {
+        steps: [
+          { ...inheritedStep },
+          {
+            ...explicitStep,
+            thinkingLevel: undefined,
+          },
+        ],
+      });
+      expect(cleared.steps![0].thinkingLevel).toBeUndefined();
+      expect(cleared.steps![1].thinkingLevel).toBeUndefined();
+
+      const refetched = await store.getSchedule(schedule.id);
+      expect(refetched.steps![0].thinkingLevel).toBeUndefined();
+      expect(refetched.steps![1].thinkingLevel).toBeUndefined();
+    });
   });
 
   // ── reorderSteps ──────────────────────────────────────────────────

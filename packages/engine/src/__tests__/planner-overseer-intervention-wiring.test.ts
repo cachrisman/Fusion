@@ -1,9 +1,9 @@
 /**
  * FNXC:PlannerOversight 2026-07-04-19:45:
  * FN-7551 engine-level end-to-end test: proves real overseer decision points
- * — observation, retry, targeted-fix, steering (reviewer), confirmation
- * request, confirmation resolution, and bounded-recovery escalation —
- * populate the `overseer:intervention` run-audit timeline via the ACTUAL
+ * — observation, retry, targeted-fix, steering (reviewer), advisory
+ * confirmation suppression, and bounded-recovery escalation — populate the
+ * `overseer:intervention` run-audit timeline via the ACTUAL
  * production wiring in `project-engine.ts` (`PlannerOverseerMonitor#onObservation`
  * → the private `emitOverseerObservationDeduped`, the private
  * `buildPlannerRecoveryHandlers`, the private `emitOverseerEscalationDeduped`),
@@ -18,6 +18,9 @@
  * initialized by class-field initializers the constructor never runs here)
  * — this exercises the exact same code that runs inside
  * `pollPlannerOverseer`/`start()` in production, not a reimplementation.
+ *
+ * FNXC:PlannerOversight 2026-07-11-00:00:
+ * FN-7840 removes the only real-tick producer of advisory merger awaiting-confirmation interventions, so this live-wiring harness now proves suppression at the source rather than request/resolution emission for an unreachable advisory pending-confirmation path.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -200,81 +203,36 @@ describe("FN-7551 — overseer decision points populate the intervention timelin
     expect(steeringEntry?.stage).toBe("reviewer");
   });
 
-  it("merger/pull-request confirmation-required decision emits a request-confirmation entry; approving it emits a resolution entry with 'succeeded'", async () => {
+  // FNXC:PlannerOversight 2026-07-11-00:00:
+  // FN-7840 regression coverage: real tick() wiring reaches merger/pull-request oversight only when the same `allowsAutoMergeProcessing` predicate says auto-merge will proceed unattended. That advisory state must be silent — no pending confirmation, no request-confirmation intervention, and no merge-checkpoint steering comment/badge source.
+  it("suppresses advisory merger confirmations under active auto-merge policy", async () => {
     const task = await seedTask("in-review");
     const { monitor, controllerFromMonitor: controller } = wireRealEngineOverseer(store);
     await monitor.observeTask(task, "autonomous"); // merger stage (plain in-review, no PR/reviewState)
 
-    const decision = await controller.tick(task);
-    expect(decision?.requiresConfirmation).toBe(true);
+    const firstDecision = await controller.tick(task, { settings: { autoMerge: true } });
+    expect(firstDecision?.action).toBe("none");
+    expect(firstDecision?.requiresConfirmation).toBe(false);
+    expect(firstDecision?.reason).toMatch(/automatically/i);
 
-    let timeline = getPlannerInterventionTimeline(store, task.id);
-    const requestEntry = timeline.find((e) => e.action === "request-confirmation");
-    expect(requestEntry).toBeTruthy();
-    expect(requestEntry?.outcome).toBe("awaiting-confirmation");
-
-    const pending = controller.getPendingConfirmations(task.id);
-    expect(pending).toHaveLength(1);
-
-    await controller.resolveConfirmation(task.id, pending[0].requestId, "approved", "test-user");
-
-    timeline = getPlannerInterventionTimeline(store, task.id);
-    const confirmationEntries = timeline.filter((e) => e.action === "request-confirmation");
-    expect(confirmationEntries.length).toBeGreaterThanOrEqual(2);
-    expect(confirmationEntries.some((e) => e.outcome === "succeeded")).toBe(true);
-  });
-
-  // FN-7692: the recorded `overseer:intervention` reason for a merger/
-  // pull-request confirmation must accurately reflect whether auto-merge will
-  // proceed unattended (advisory copy) or genuinely requires a human approval
-  // (blocking copy) — reproducing the FN-7689 scenario where the timeline
-  // claimed a hard block that the merge sailed past unattended. A pending
-  // confirmation must still be recorded either way (no dispatch change).
-  it("records accurate advisory copy (not a false hard-block claim) when ctx.settings.autoMerge is truthy for an in-review merger task", async () => {
-    const task = await seedTask("in-review");
-    const { monitor, controllerFromMonitor: controller } = wireRealEngineOverseer(store);
-    await monitor.observeTask(task, "autonomous"); // merger stage (plain in-review, no PR/reviewState)
-
-    const decision = await controller.tick(task, { settings: { autoMerge: true } });
-    expect(decision?.requiresConfirmation).toBe(true);
-    expect(decision?.action).toBe("await_confirmation");
+    const secondDecision = await controller.tick(task, { settings: { autoMerge: true } });
+    expect(secondDecision?.action).toBe("none");
+    expect(secondDecision?.requiresConfirmation).toBe(false);
 
     const timeline = getPlannerInterventionTimeline(store, task.id);
-    const requestEntry = timeline.find((e) => e.action === "request-confirmation");
-    expect(requestEntry).toBeTruthy();
-    expect(requestEntry?.outcome).toBe("awaiting-confirmation");
-    expect(requestEntry?.reason).not.toMatch(/requires explicit confirmation before .* may run/);
-    expect(requestEntry?.reason).toMatch(/automatically/i);
+    expect(timeline.filter((e) => e.action === "request-confirmation")).toHaveLength(0);
+    expect(controller.getPendingConfirmations(task.id)).toHaveLength(0);
 
-    // A pending confirmation is still recorded — no dispatch, no behavior change.
-    expect(controller.getPendingConfirmations(task.id)).toHaveLength(1);
+    const refreshedTask = await store.getTask(task.id);
+    const allCommentText = [
+      ...(refreshedTask?.comments ?? []).map((comment) => comment.text),
+      ...(refreshedTask?.steeringComments ?? []).map((comment) => comment.text),
+    ];
+    expect(allCommentText.some((text) => text.includes("[planner-oversight] merge checkpoint"))).toBe(false);
   });
 
-  // Note: a genuinely-blocking `autoMergeWillProceed: false` state is
-  // exercised directly against the pure `decidePlannerRecovery` in
-  // `planner-recovery.test.ts` (@fusion/core). It is NOT independently
-  // reachable through this engine's real `tick()` wiring: `allowsAutoMerge
-  // Processing(task, settings) === false` is exactly the condition
-  // `evaluateOverseerHumanControl` uses to withhold ALL oversight action
-  // (including confirmation recording) BEFORE `decidePlannerRecovery` is ever
-  // called — so a real merger/pull-request confirmation entry can only ever
-  // be recorded when auto-merge WILL proceed. This is documented here rather
-  // than asserted redundantly to avoid a test that can never legitimately fail.
-
-  it("denying a confirmation resolution emits a 'skipped' outcome entry", async () => {
-    const task = await seedTask("in-review");
-    const { monitor, controllerFromMonitor: controller } = wireRealEngineOverseer(store);
-    await monitor.observeTask(task, "autonomous");
-    await controller.tick(task);
-    const pending = controller.getPendingConfirmations(task.id);
-    expect(pending).toHaveLength(1);
-
-    await controller.resolveConfirmation(task.id, pending[0].requestId, "denied");
-
-    const timeline = getPlannerInterventionTimeline(store, task.id);
-    const confirmationEntries = timeline.filter((e) => e.action === "request-confirmation");
-    expect(confirmationEntries.some((e) => e.outcome === "skipped")).toBe(true);
-  });
+  // FNXC:PlannerOversight 2026-07-11-00:00:
+  // FN-7840 makes the old request/approve/deny confirmation-resolution tests unreachable through the public real tick() seam: auto-merge true returns `none`, while auto-merge false is withheld by `evaluateOverseerHumanControl` before `decidePlannerRecovery`. The pure false/undefined safety-valve contract remains covered in @fusion/core; this engine harness documents the production reachability instead of injecting private pending-confirmation state.
 
   it("bounded-recovery exhaustion emits exactly one escalate entry across repeated polls of the same exhausted stage", async () => {
     const task = await seedTask("in-progress");
@@ -295,45 +253,6 @@ describe("FN-7551 — overseer decision points populate the intervention timelin
     const escalations = timeline.filter((e) => e.action === "escalate");
     expect(escalations).toHaveLength(1);
     expect(escalations[0].outcome).toBe("failed");
-  });
-
-  it("exhaustion actually reached through real tick()s (three denials) emits escalate exactly once thereafter", async () => {
-    const task = await seedTask("in-review");
-    // FNXC:PlannerOversight 2026-07-07-08:50:
-    // FN-7577 (2026-07-05) made PlannerRecoveryController.tick() drop the
-    // bounded-recovery attempt budget whenever a watched stage reports a
-    // HEALTHY/human-wait signal (progressing/complete/awaiting-human). A plain
-    // in-review task derives a "progressing" merger signal, so denials never
-    // accumulate through the real monitor wiring and exhaustion can't be
-    // reached — the 4th tick kept returning await_confirmation instead of the
-    // exhausted "none". This test's invariant is escalation DEDUP after
-    // exhaustion reached via real tick()s, so wire the controller to a PROBLEM
-    // (failed) merger snapshot (controllerWithSnapshot — the documented seam for
-    // branches the monitor's own signal-derivation cannot produce) whose signal
-    // holds the attempt budget, then drive three real denials to reach genuine
-    // exhaustion. The merger stage still surfaces await_confirmation regardless
-    // of signal (decidePlannerRecovery), so requiresConfirmation stays asserted.
-    const { controllerWithSnapshot, emitEscalation } = wireRealEngineOverseer(store);
-    const controller = controllerWithSnapshot(observation({ taskId: task.id, stage: "merger", signal: "failed" }));
-
-    for (let i = 0; i < 3; i += 1) {
-      const decision = await controller.tick(task);
-      expect(decision?.requiresConfirmation).toBe(true);
-      const pending = controller.getPendingConfirmations(task.id);
-      await controller.resolveConfirmation(task.id, pending[0].requestId, "denied");
-    }
-
-    const finalDecision = await controller.tick(task);
-    expect(finalDecision?.action).toBe("none");
-    expect(finalDecision?.exhausted).toBe(true);
-
-    // The poll wires escalation emission itself (project-engine.ts), so drive
-    // it explicitly here with the real decision object, twice, to prove the dedup.
-    emitEscalation(task.id, finalDecision!);
-    emitEscalation(task.id, finalDecision!);
-
-    const timeline = getPlannerInterventionTimeline(store, task.id);
-    expect(timeline.filter((e) => e.action === "escalate")).toHaveLength(1);
   });
 
   it("oversight level 'off' and a human-control-withheld (userPaused) task never emit any steering/retry/fix/confirmation/escalation entry", async () => {

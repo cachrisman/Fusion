@@ -2,6 +2,7 @@ import React from "react";
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, act, within } from "@testing-library/react";
 import { TaskCard, formatElapsedDurationDone, __test_areTaskCardPropsEqual } from "../TaskCard";
+import { CostBadgeProvider } from "../../context/CostBadgeContext";
 
 // Pre-existing gap (unrelated to FN-7676): TaskCard unconditionally renders
 // RuntimeFallbackBadge, which calls the shared useToast() hook directly (not
@@ -19,7 +20,8 @@ vi.mock("../../hooks/useToast", () => ({
 import { NavigationHistoryProvider, useNavigationHistory } from "../../hooks/useNavigationHistory";
 import { useOverlayDismiss } from "../../hooks/useOverlayDismiss";
 import type { ConfirmOptions } from "../../hooks/useConfirm";
-import type { Task } from "@fusion/core";
+import { TASK_PRIORITIES, type Task, type TaskPriority } from "@fusion/core";
+import { getPriorityColorVar, getPriorityLabel } from "../../utils/priorityIndicator";
 
 // Mock lucide-react to avoid SVG rendering issues in test env
 vi.mock("lucide-react", () => ({
@@ -39,6 +41,10 @@ vi.mock("lucide-react", () => ({
   RotateCw: () => null,
   Zap: () => <svg data-testid="icon-zap" />,
   AlertTriangle: () => null,
+  ArrowDown: ({ style, ...props }: React.SVGProps<SVGSVGElement>) => <svg data-testid="priority-icon-low" className="lucide-arrow-down" style={style} {...props} />,
+  Flag: ({ style, ...props }: React.SVGProps<SVGSVGElement>) => <svg data-testid="priority-icon-normal" className="lucide-flag" style={style} {...props} />,
+  ArrowUp: ({ style, ...props }: React.SVGProps<SVGSVGElement>) => <svg data-testid="priority-icon-high" className="lucide-arrow-up" style={style} {...props} />,
+  TriangleAlert: ({ style, ...props }: React.SVGProps<SVGSVGElement>) => <svg data-testid="priority-icon-urgent" className="lucide-triangle-alert" style={style} {...props} />,
   ArrowUpRight: () => null,
   // FN-7592: the overseer badge now renders an icon child instead of a text label,
   // so tests must see a real SVG (like Zap) rather than a no-op render.
@@ -1072,6 +1078,50 @@ describe("TaskCard", () => {
     });
   });
 
+  it("runs the delete flow from the desktop task context menu", async () => {
+    const onDeleteTask = vi.fn(async () => makeTask());
+    mockConfirm.mockResolvedValueOnce(true);
+
+    render(
+      <TaskCard
+        task={makeTask({ column: "todo", githubTracking: { enabled: false }, sourceIssue: undefined } as any)}
+        onOpenDetail={noop}
+        addToast={noop}
+        onDeleteTask={onDeleteTask}
+      />,
+    );
+
+    fireEvent.contextMenu(document.querySelector(".card")!, { clientX: 24, clientY: 28 });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+
+    await waitFor(() => {
+      expect(mockConfirm).toHaveBeenCalledWith(expect.objectContaining({ title: "Delete Task" }));
+      expect(onDeleteTask).toHaveBeenCalledWith("FN-001");
+    });
+  });
+
+  it("runs the delete flow from the mobile pointer-up task context menu", async () => {
+    const onDeleteTask = vi.fn(async () => makeTask());
+    mockConfirm.mockResolvedValueOnce(true);
+
+    render(
+      <TaskCard
+        task={makeTask({ column: "todo", githubTracking: { enabled: false }, sourceIssue: undefined } as any)}
+        onOpenDetail={noop}
+        addToast={noop}
+        onDeleteTask={onDeleteTask}
+      />,
+    );
+
+    fireEvent.contextMenu(document.querySelector(".card")!, { clientX: 24, clientY: 28 });
+    fireEvent.pointerUp(screen.getByRole("menuitem", { name: "Delete" }), { pointerType: "touch", pointerId: 7 });
+
+    await waitFor(() => {
+      expect(mockConfirm).toHaveBeenCalledWith(expect.objectContaining({ title: "Delete Task" }));
+      expect(onDeleteTask).toHaveBeenCalledWith("FN-001");
+    });
+  });
+
   it("preserves githubIssueAction on dependency-conflict retry", async () => {
     const conflict = new Error("Cannot delete task FN-001: still referenced as a dependency by FN-002.") as Error & { status: number; details: { code: string; dependentIds: string[] } };
     conflict.status = 409;
@@ -1159,7 +1209,7 @@ describe("TaskCard", () => {
     });
   });
 
-  it("hides delete button for done tasks while keeping archive action", () => {
+  it("hides delete button for done tasks while keeping archive action in the actions dropdown", () => {
     const onDeleteTask = vi.fn(async () => makeTask());
     const onArchiveTask = vi.fn(async () => makeTask({ column: "archived" }));
 
@@ -1174,7 +1224,8 @@ describe("TaskCard", () => {
     );
 
     expect(screen.queryByLabelText("Delete task")).toBeNull();
-    expect(screen.getByLabelText("Archive task")).toBeDefined();
+    expect(screen.getByRole("button", { name: "Actions" })).toBeDefined();
+    expect(screen.queryByLabelText("Archive task")).toBeNull();
   });
 
   it.each(["triage", "todo", "in-progress", "in-review"] as const)(
@@ -1190,20 +1241,46 @@ describe("TaskCard", () => {
       );
 
       expect(screen.queryByLabelText("Archive task")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Actions" })).toBeNull();
     },
   );
 
-  it("renders archive action for done tasks", () => {
+  it("renders archive action for done tasks inside the actions dropdown", async () => {
+    const onArchiveTask = vi.fn(async () => makeTask({ column: "archived" }));
+
     render(
       <TaskCard
         task={makeTask({ column: "done" })}
         onOpenDetail={noop}
         addToast={noop}
-        onArchiveTask={vi.fn(async () => makeTask({ column: "archived" }))}
+        onArchiveTask={onArchiveTask}
       />,
     );
 
-    expect(screen.getByLabelText("Archive task")).toBeDefined();
+    const actionsButton = screen.getByRole("button", { name: "Actions" });
+    expect(screen.queryByLabelText("Archive task")).toBeNull();
+
+    fireEvent.click(actionsButton);
+
+    const menu = screen.getByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: "Archive" })).toBeDefined();
+
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Archive" }));
+
+    await waitFor(() => expect(onArchiveTask).toHaveBeenCalledWith("FN-001"));
+  });
+
+  it("does not render an empty done actions dropdown when no done action is available", () => {
+    const { container } = render(
+      <TaskCard
+        task={makeTask({ column: "done", mergeDetails: undefined })}
+        onOpenDetail={noop}
+        addToast={noop}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Actions" })).toBeNull();
+    expect(container.querySelector(".card-done-actions")).toBeNull();
   });
 
   it("does not render archive action for archived tasks", () => {
@@ -1218,28 +1295,34 @@ describe("TaskCard", () => {
     );
 
     expect(screen.queryByLabelText("Archive task")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Actions" })).toBeNull();
     expect(screen.getByLabelText("Unarchive task")).toBeDefined();
   });
 
   /*
   FNXC:TaskRevert 2026-07-05-00:00 (FN-7525):
   Coverage for the Revert affordance: presence/absence on done + archived
-  cards (inline row + context menu), the disabled/omitted no-commit-to-revert
-  guard, the auto→clean-success path, and the auto→conflict→confirm→AI-undo
-  fallback path.
+  cards (done-actions dropdown, archived inline row, and context menu), the
+  disabled/omitted no-commit-to-revert guard, the auto→clean-success path,
+  and the auto→conflict→confirm→AI-undo fallback path.
   */
   describe("Revert affordance", () => {
-    it("renders the inline Revert button for a done card with a landed commit", () => {
-      render(
+    it("renders Revert inside the done actions dropdown for a done card with a landed commit", () => {
+      const { container } = render(
         <TaskCard
           task={makeTask({ column: "done", mergeDetails: { commitSha: "abc123def456" } as any })}
           onOpenDetail={noop}
           addToast={noop}
+          onArchiveTask={vi.fn(async () => makeTask({ column: "archived" }))}
           onRevertTask={vi.fn(async () => ({ mode: "git", clean: true, revertCommitSha: "deadbeef" }) as any)}
         />,
       );
 
-      expect(screen.getByLabelText("Revert this task's changes")).toBeDefined();
+      expect(container.querySelector(".card-revert-btn")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Actions" }));
+      const menu = screen.getByRole("menu");
+      expect(within(menu).getByRole("menuitem", { name: "Archive" })).toBeDefined();
+      expect(within(menu).getByRole("menuitem", { name: "Revert" })).toBeDefined();
     });
 
     it("renders the inline Revert button for an archived card with a landed commit", () => {
@@ -1267,17 +1350,22 @@ describe("TaskCard", () => {
       expect(screen.queryByLabelText("Revert this task's changes")).toBeNull();
     });
 
-    it("omits the inline Revert button when the task has no landed commit", () => {
-      render(
+    it("omits Revert from the done actions dropdown when the task has no landed commit", () => {
+      const { container } = render(
         <TaskCard
           task={makeTask({ column: "done", mergeDetails: undefined })}
           onOpenDetail={noop}
           addToast={noop}
+          onArchiveTask={vi.fn(async () => makeTask({ column: "archived" }))}
           onRevertTask={vi.fn(async () => ({ mode: "git", clean: true, revertCommitSha: "deadbeef" }) as any)}
         />,
       );
 
-      expect(screen.queryByLabelText("Revert this task's changes")).toBeNull();
+      expect(container.querySelector(".card-revert-btn")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Actions" }));
+      const menu = screen.getByRole("menu");
+      expect(within(menu).getByRole("menuitem", { name: "Archive" })).toBeDefined();
+      expect(within(menu).queryByRole("menuitem", { name: "Revert" })).toBeNull();
     });
 
     it("shows a disabled Revert context-menu entry when the task has no landed commit", () => {
@@ -1322,8 +1410,10 @@ describe("TaskCard", () => {
         />,
       );
 
+      fireEvent.click(screen.getByRole("button", { name: "Actions" }));
+
       await act(async () => {
-        fireEvent.click(screen.getByLabelText("Revert this task's changes"));
+        fireEvent.click(screen.getByRole("menuitem", { name: "Revert" }));
       });
 
       await waitFor(() => {
@@ -1353,8 +1443,10 @@ describe("TaskCard", () => {
         />,
       );
 
+      fireEvent.click(screen.getByRole("button", { name: "Actions" }));
+
       await act(async () => {
-        fireEvent.click(screen.getByLabelText("Revert this task's changes"));
+        fireEvent.click(screen.getByRole("menuitem", { name: "Revert" }));
       });
 
       await waitFor(() => {
@@ -1984,6 +2076,37 @@ describe("TaskCard", () => {
     }
   });
 
+  it.each([
+    { name: "undefined results", workflowStepResults: undefined, shouldRender: false },
+    { name: "pending but not started", workflowStepResults: [{ workflowStepId: "plan-review", workflowStepName: "Plan Review", status: "pending" }], shouldRender: false },
+    { name: "running", workflowStepResults: [{ workflowStepId: "plan-review", workflowStepName: "Plan Review", status: "pending", startedAt: "2026-07-11T12:00:00.000Z" }], shouldRender: true },
+    { name: "passed", workflowStepResults: [{ workflowStepId: "plan-review", workflowStepName: "Plan Review", status: "passed", startedAt: "2026-07-11T12:00:00.000Z", completedAt: "2026-07-11T12:01:00.000Z" }], shouldRender: false },
+    { name: "failed", workflowStepResults: [{ workflowStepId: "plan-review", workflowStepName: "Plan Review", status: "failed", startedAt: "2026-07-11T12:00:00.000Z", completedAt: "2026-07-11T12:01:00.000Z" }], shouldRender: false },
+    { name: "skipped", workflowStepResults: [{ workflowStepId: "plan-review", workflowStepName: "Plan Review", status: "skipped", startedAt: "2026-07-11T12:00:00.000Z", completedAt: "2026-07-11T12:01:00.000Z" }], shouldRender: false },
+    { name: "advisory failure", workflowStepResults: [{ workflowStepId: "plan-review", workflowStepName: "Plan Review", status: "advisory_failure", startedAt: "2026-07-11T12:00:00.000Z", completedAt: "2026-07-11T12:01:00.000Z" }], shouldRender: false },
+  ])("renders the Reviewing badge only while Plan Review is actively running: $name", ({ workflowStepResults, shouldRender }) => {
+    const { container } = render(
+      <TaskCard
+        task={makeTask({
+          id: "FN-7831",
+          column: "triage",
+          status: "planning",
+          enabledWorkflowSteps: ["plan-review"],
+          workflowStepResults: workflowStepResults as Task["workflowStepResults"],
+        })}
+        onOpenDetail={noop}
+        addToast={noop}
+      />,
+    );
+
+    const badge = container.querySelector('[data-testid="card-reviewing-FN-7831"]');
+    expect(Boolean(badge)).toBe(shouldRender);
+    if (shouldRender) {
+      expect(badge).toHaveTextContent("Reviewing");
+      expect(screen.getByText("planning")).toBeDefined();
+    }
+  });
+
   it("renders the status badge after the card ID in DOM order", () => {
     const { container } = render(
       <TaskCard
@@ -1996,8 +2119,10 @@ describe("TaskCard", () => {
     const badge = container.querySelector(".card-status-badge")!;
     expect(cardId).toBeDefined();
     expect(badge).toBeDefined();
-    // Badge should be the next sibling of card-id
-    expect(cardId.nextElementSibling).toBe(badge);
+    const headerBadges = container.querySelector(".card-header-badges")!;
+    expect(headerBadges).toBeDefined();
+    expect(cardId.nextElementSibling).toBe(headerBadges);
+    expect(headerBadges.contains(badge)).toBe(true);
   });
 
   it("does not render a status badge when task.status is falsy", () => {
@@ -2708,6 +2833,48 @@ describe("TaskCard", () => {
     ]);
   });
 
+  it("renders icon-only urgency-colored priority badges with accessible labels while normal stays hidden", () => {
+    for (const priority of TASK_PRIORITIES) {
+      const { container, unmount } = render(
+        <TaskCard
+          task={makeTask({ priority: priority as TaskPriority })}
+          onOpenDetail={noop}
+          addToast={noop}
+        />,
+      );
+
+      const badge = container.querySelector(".card-priority-badge");
+      if (priority === "normal") {
+        expect(badge).toBeNull();
+        unmount();
+        continue;
+      }
+
+      const label = getPriorityLabel(priority);
+      expect(badge).not.toBeNull();
+      expect(badge).toHaveAttribute("aria-label", label);
+      expect(badge).toHaveAttribute("title", label);
+      expect(Array.from(badge?.childNodes ?? []).filter((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim())).toEqual([]);
+      const visibleLabelSpans = Array.from(badge?.querySelectorAll("span") ?? []).filter((span) => !span.classList.contains("visually-hidden"));
+      expect(visibleLabelSpans).toEqual([]);
+      expect(badge?.querySelector(".visually-hidden")).toHaveTextContent(label);
+      const icon = badge?.querySelector("svg");
+      expect(icon).not.toBeNull();
+      expect(icon).toHaveAttribute("aria-hidden", "true");
+      expect(icon?.getAttribute("style")).toContain(`color: ${getPriorityColorVar(priority)}`);
+      unmount();
+    }
+
+    const { container } = render(
+      <TaskCard
+        task={makeTask({ priority: undefined })}
+        onOpenDetail={noop}
+        addToast={noop}
+      />,
+    );
+    expect(container.querySelector(".card-priority-badge")).toBeNull();
+  });
+
   it("renders partial card meta groups without empty wrappers when time is absent", () => {
     const { container } = render(
       <TaskCard
@@ -3368,18 +3535,50 @@ describe("TaskCard", () => {
     expect(actionsContainer?.contains(sizeBadge)).toBe(true);
   });
 
-  it("places card-header-actions after card-id in DOM order", () => {
+  it("renders size badge as the right-most header action after trailing controls", () => {
     const { container } = render(
-      <TaskCard task={makeTask({ size: "S" })} onOpenDetail={noop} addToast={noop} />,
+      <TaskCard
+        task={makeTask({ column: "in-progress", status: "executing" as any, size: "M" })}
+        onOpenDetail={noop}
+        addToast={noop}
+        onPauseTask={async () => makeTask({ paused: true })}
+      />,
     );
-    const cardId = container.querySelector(".card-id")!;
-    const actionsContainer = container.querySelector(".card-header-actions")!;
-    
-    expect(cardId).not.toBeNull();
+    const actionsContainer = container.querySelector(".card-header-actions") as HTMLElement | null;
+    const menuButton = container.querySelector(".card-menu-btn");
+    const sizeBadge = container.querySelector(".card-size-badge");
+
     expect(actionsContainer).not.toBeNull();
-    // The actions container should come after card-id
+    expect(menuButton).not.toBeNull();
+    expect(sizeBadge).not.toBeNull();
+    expect(actionsContainer?.contains(menuButton)).toBe(true);
+    expect(actionsContainer?.lastElementChild).toBe(sizeBadge);
+    expect(sizeBadge?.nextElementSibling).toBeNull();
+  });
+
+  it("places card-header-actions as a direct header child after the wrapped badge group", () => {
+    const { container } = render(
+      <TaskCard
+        task={makeTask({ size: "S", priority: "urgent" as Task["priority"], executionMode: "fast" })}
+        onOpenDetail={noop}
+        addToast={noop}
+      />,
+    );
+    const header = container.querySelector(".card-header")!;
+    const cardId = container.querySelector(".card-id")!;
+    const headerBadges = container.querySelector(".card-header-badges")!;
+    const actionsContainer = container.querySelector(".card-header-actions")!;
+
+    expect(cardId).not.toBeNull();
+    expect(headerBadges).not.toBeNull();
+    expect(actionsContainer).not.toBeNull();
+    expect(actionsContainer.parentElement).toBe(header);
+    expect(headerBadges.parentElement).toBe(header);
     expect(
-      cardId.compareDocumentPosition(actionsContainer) & Node.DOCUMENT_POSITION_FOLLOWING
+      cardId.compareDocumentPosition(headerBadges) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      headerBadges.compareDocumentPosition(actionsContainer) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
   });
 
@@ -3400,7 +3599,7 @@ describe("TaskCard", () => {
     expect(actionsContainer?.contains(editBtn)).toBe(true);
   });
 
-  it("renders archive button inside card-header-actions for done columns", () => {
+  it("renders done actions dropdown inside card-header-actions for done columns", () => {
     const { container } = render(
       <TaskCard 
         task={makeTask({ column: "done", size: "L" })} 
@@ -3410,11 +3609,11 @@ describe("TaskCard", () => {
       />,
     );
     const actionsContainer = container.querySelector(".card-header-actions");
-    const archiveBtn = container.querySelector(".card-archive-btn");
+    const actionsButton = screen.getByRole("button", { name: "Actions" });
     
     expect(actionsContainer).not.toBeNull();
-    expect(archiveBtn).not.toBeNull();
-    expect(actionsContainer?.contains(archiveBtn)).toBe(true);
+    expect(container.querySelector(".card-archive-btn")).toBeNull();
+    expect(actionsContainer?.contains(actionsButton)).toBe(true);
   });
 
   it("renders in-review Move control inline in card-meta for overlap-blocked tasks", () => {
@@ -3729,7 +3928,7 @@ describe("TaskCard", () => {
     expect(screen.getByTestId("provider-icon-github")).toBeDefined();
   });
 
-  it("renders the GitHub tracking link in the unified footer row above queued metadata", () => {
+  it("renders the GitHub tracking link inline with queued metadata when the footer has no leading content", () => {
     const { container } = render(
       <TaskCard
         task={makeTask({
@@ -3752,13 +3951,14 @@ describe("TaskCard", () => {
     );
 
     const link = screen.getByRole("link", { name: "Linked GitHub issue #42" });
-    const footerRow = container.querySelector(".card-footer-row");
+    const metaRow = container.querySelector(".card-meta");
     const queuedBadge = container.querySelector(".queued-badge");
-    expect(footerRow).not.toBeNull();
-    expect(footerRow?.contains(link)).toBe(true);
+    expect(container.querySelector(".card-footer-row")).toBeNull();
+    expect(link.closest(".card-meta")).toBe(metaRow);
+    expect(link.closest(".card-footer-row-right")?.closest(".card-meta")).toBe(metaRow);
     expect(container.querySelector(".card-bottom-right-row")).toBeNull();
     expect(queuedBadge).not.toBeNull();
-    expect(queuedBadge?.compareDocumentPosition(footerRow as Node) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    expect(queuedBadge?.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
 
@@ -3872,10 +4072,10 @@ describe("TaskCard", () => {
   it("keeps GitHub tracking chip interaction-affordance CSS contract", () => {
     const css = loadAllAppCssBaseOnly();
 
-    expect(css).toMatch(/\.card-time-indicator\s*,\s*\.card-github-tracking-chip\s*,\s*\.card-retry-badge\s*,\s*\.card-create-pr-action\s*\{[^}]*display:\s*inline-flex;[^}]*font-family:\s*var\(--font-mono\);[^}]*\}/);
+    expect(css).toMatch(/\.card-time-indicator\s*,\s*\.card-cost-indicator\s*,\s*\.card-github-tracking-chip\s*,\s*\.card-retry-badge\s*,\s*\.card-create-pr-action\s*\{[^}]*display:\s*inline-flex;[^}]*font-family:\s*var\(--font-mono\);[^}]*\}/);
     expect(css).toContain(".card-github-tracking-chip:hover");
     expect(css).toMatch(/\.card-github-tracking-chip:focus-visible\s*\{[^}]*--focus-ring-strong/);
-    expect(css).toMatch(/\.card-time-indicator\s*,\s*\.card-github-tracking-chip\s*,\s*\.card-retry-badge\s*,\s*\.card-create-pr-action\s*\{[^}]*padding:\s*var\(--space-xs\)\s+var\(--space-sm\);[^}]*height:\s*var\(--card-chip-height\);[^}]*border-radius:\s*var\(--radius-pill\);[^}]*font-size:\s*0\.6875rem;[^}]*line-height:\s*1;[^}]*\}/);
+    expect(css).toMatch(/\.card-time-indicator\s*,\s*\.card-cost-indicator\s*,\s*\.card-github-tracking-chip\s*,\s*\.card-retry-badge\s*,\s*\.card-create-pr-action\s*\{[^}]*padding:\s*var\(--space-xs\)\s+var\(--space-sm\);[^}]*height:\s*var\(--card-chip-height\);[^}]*border-radius:\s*var\(--radius-pill\);[^}]*font-size:\s*0\.6875rem;[^}]*line-height:\s*1;[^}]*\}/);
     expect(css).toMatch(/\.card-github-tracking-chip\s+\.provider-icon\s+svg\s*\{[^}]*width:\s*12px;[^}]*height:\s*12px;[^}]*\}/);
 
     render(
@@ -4702,14 +4902,14 @@ describe("TaskCard", () => {
 
     expect(baseCss).toMatch(/:root\s*\{[^}]*--card-chip-height:\s*22px;[^}]*--card-chip-height-mobile:\s*20px;[^}]*\}/);
     expect(baseCss).toMatch(/\.card-github-badge\s*\{[^}]*height:\s*var\(--card-chip-height\);[^}]*\}/);
-    expect(baseCss).toMatch(/\.card-time-indicator\s*,\s*\.card-github-tracking-chip\s*,\s*\.card-retry-badge\s*,\s*\.card-create-pr-action\s*\{[^}]*height:\s*var\(--card-chip-height\);[^}]*\}/);
+    expect(baseCss).toMatch(/\.card-time-indicator\s*,\s*\.card-cost-indicator\s*,\s*\.card-github-tracking-chip\s*,\s*\.card-retry-badge\s*,\s*\.card-create-pr-action\s*\{[^}]*height:\s*var\(--card-chip-height\);[^}]*\}/);
   });
 
   it("FN-4525 applies shared mobile card-chip height token to badges and chips", () => {
     const fullCss = loadAllAppCss();
 
     expect(fullCss).toMatch(/@media[^{]*\(max-width:\s*768px\)[^{]*\{[\s\S]*?\.card-github-badge\s*\{[^}]*height:\s*var\(--card-chip-height-mobile\);[^}]*\}/);
-    expect(fullCss).toMatch(/@media[^{]*\(max-width:\s*768px\)[^{]*\{[\s\S]*?\.card-time-indicator\s*,\s*\.card-github-tracking-chip\s*,\s*\.card-retry-badge\s*,\s*\.card-create-pr-action\s*\{[^}]*height:\s*var\(--card-chip-height-mobile\);[^}]*\}/);
+    expect(fullCss).toMatch(/@media[^{]*\(max-width:\s*768px\)[^{]*\{[\s\S]*?\.card-time-indicator\s*,\s*\.card-cost-indicator\s*,\s*\.card-github-tracking-chip\s*,\s*\.card-retry-badge\s*,\s*\.card-create-pr-action\s*\{[^}]*height:\s*var\(--card-chip-height-mobile\);[^}]*\}/);
   });
 
   it("keeps Create PR action on shared chip height tokens", () => {
@@ -5194,6 +5394,159 @@ describe("TaskCard", () => {
     const timer = container.querySelector(".card-time-indicator");
     expect(timer).not.toBeNull();
     expect(timer?.textContent).toContain("30m");
+  });
+
+  it("renders the optional cost badge only when enabled and token usage exists", () => {
+    const pricedTask = makeTask({
+      column: "done",
+      tokenUsage: {
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        cachedTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 1_000_000,
+        firstUsedAt: "2026-01-01T00:00:00Z",
+        lastUsedAt: "2026-01-01T00:00:00Z",
+        modelProvider: "openai",
+        modelId: "gpt-5-mini",
+      },
+    } as Partial<Task>);
+
+    const disabled = render(<TaskCard task={pricedTask} onOpenDetail={noop} addToast={noop} />);
+    expect(disabled.container.querySelector(".card-cost-indicator")).toBeNull();
+    disabled.unmount();
+
+    const enabled = render(
+      <CostBadgeProvider value={{ enabled: true }}>
+        <TaskCard task={pricedTask} onOpenDetail={noop} addToast={noop} />
+      </CostBadgeProvider>,
+    );
+
+    const costBadge = enabled.container.querySelector(".card-cost-indicator") as HTMLElement | null;
+    expect(costBadge).not.toBeNull();
+    expect(costBadge?.textContent).toContain("$0.25");
+    expect(costBadge?.querySelector("svg")).toBeNull();
+    expect(costBadge?.getAttribute("aria-label")).toBe("Estimated cost $0.25");
+    expect(costBadge?.getAttribute("title")).toBe("Estimated cost $0.25");
+    expect(costBadge?.closest(".card-footer-row-right")).toBe(enabled.container.querySelector(".card-footer-row-right"));
+    expect(costBadge?.closest(".card-footer-row")).toBe(enabled.container.querySelector(".card-footer-row"));
+    expect(costBadge?.closest(".card-meta")).toBeNull();
+    enabled.unmount();
+
+    const noUsage = render(
+      <CostBadgeProvider value={{ enabled: true }}>
+        <TaskCard task={makeTask({ id: "FN-002", column: "done" })} onOpenDetail={noop} addToast={noop} />
+      </CostBadgeProvider>,
+    );
+    expect(noUsage.container.querySelector(".card-cost-indicator")).toBeNull();
+  });
+
+  it("places a todo cost badge inside the meta row when the footer has no leading content", () => {
+    const { container } = render(
+      <CostBadgeProvider value={{ enabled: true }}>
+        <TaskCard
+          task={makeTask({
+            column: "todo",
+            dependencies: ["FN-000"],
+            tokenUsage: {
+              inputTokens: 1_000_000,
+              outputTokens: 0,
+              cachedTokens: 0,
+              cacheWriteTokens: 0,
+              totalTokens: 1_000_000,
+              firstUsedAt: "2026-01-01T00:00:00Z",
+              lastUsedAt: "2026-01-01T00:00:00Z",
+              modelProvider: "openai",
+              modelId: "gpt-5-mini",
+            },
+          } as Partial<Task>)}
+          onOpenDetail={noop}
+          addToast={noop}
+        />
+      </CostBadgeProvider>,
+    );
+
+    const costBadge = container.querySelector(".card-cost-indicator") as HTMLElement | null;
+    const metaRow = container.querySelector(".card-meta");
+    const rightCluster = container.querySelector(".card-footer-row-right");
+    expect(costBadge).not.toBeNull();
+    expect(costBadge?.textContent).toContain("$0.25");
+    expect(costBadge?.closest(".card-meta")).toBe(metaRow);
+    expect(costBadge?.closest(".card-footer-row")).toBeNull();
+    expect(rightCluster?.closest(".card-meta")).toBe(metaRow);
+    expect(rightCluster?.contains(costBadge)).toBe(true);
+    expect(container.querySelector(".card-footer-row")).toBeNull();
+  });
+
+  it("places the unavailable cost sentinel inside todo meta without adding an icon", () => {
+    const { container } = render(
+      <CostBadgeProvider value={{ enabled: true }}>
+        <TaskCard
+          task={makeTask({
+            column: "todo",
+            dependencies: ["FN-000"],
+            tokenUsage: {
+              inputTokens: 1,
+              outputTokens: 0,
+              cachedTokens: 0,
+              cacheWriteTokens: 0,
+              totalTokens: 1,
+              firstUsedAt: "2026-01-01T00:00:00Z",
+              lastUsedAt: "2026-01-01T00:00:00Z",
+              modelProvider: "unknown",
+              modelId: "no-price",
+            },
+          } as Partial<Task>)}
+          onOpenDetail={noop}
+          addToast={noop}
+        />
+      </CostBadgeProvider>,
+    );
+
+    const costBadge = container.querySelector(".card-cost-indicator") as HTMLElement | null;
+    expect(costBadge).not.toBeNull();
+    expect(costBadge?.textContent).toContain("—");
+    expect(costBadge?.querySelector("svg")).toBeNull();
+    expect(costBadge?.getAttribute("aria-label")).toBe("Estimated cost —");
+    expect(costBadge?.getAttribute("title")).toBe("Estimated cost —");
+    expect(costBadge?.closest(".card-meta")).toBe(container.querySelector(".card-meta"));
+    expect(costBadge?.closest(".card-footer-row")).toBeNull();
+    expect(container.querySelector(".card-footer-row")).toBeNull();
+  });
+
+  it("keeps in-progress cost badges in the footer row with files changed", () => {
+    const { container } = render(
+      <CostBadgeProvider value={{ enabled: true }}>
+        <TaskCard
+          task={makeTask({
+            column: "in-progress",
+            modifiedFiles: ["packages/dashboard/app/components/TaskCard.tsx"],
+            tokenUsage: {
+              inputTokens: 1_000_000,
+              outputTokens: 0,
+              cachedTokens: 0,
+              cacheWriteTokens: 0,
+              totalTokens: 1_000_000,
+              firstUsedAt: "2026-01-01T00:00:00Z",
+              lastUsedAt: "2026-01-01T00:00:00Z",
+              modelProvider: "openai",
+              modelId: "gpt-5-mini",
+            },
+          } as Partial<Task>)}
+          onOpenDetail={noop}
+          addToast={noop}
+        />
+      </CostBadgeProvider>,
+    );
+
+    const costBadge = container.querySelector(".card-cost-indicator") as HTMLElement | null;
+    const footerRow = container.querySelector(".card-footer-row");
+    const rightCluster = container.querySelector(".card-footer-row-right");
+    expect(container.querySelector(".card-session-files")).not.toBeNull();
+    expect(costBadge).not.toBeNull();
+    expect(costBadge?.closest(".card-footer-row")).toBe(footerRow);
+    expect(costBadge?.closest(".card-footer-row-right")).toBe(rightCluster);
+    expect(costBadge?.closest(".card-meta")).toBeNull();
   });
 
   it.each(["merging", "merging-fix"] as const)("shows live merge elapsed in timer chip while task.status is %s", (status) => {
@@ -5925,7 +6278,8 @@ describe("TaskCard workflow badges", () => {
     expect(workflowRow).toContainElement(badge);
     expect(agentRow.compareDocumentPosition(workflowRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
-    [".card-footer-row", ".card-meta", ".card-agent-row"].forEach((selector) => {
+    expect(container.querySelector(".card-footer-row")).toBeNull();
+    [".card-meta", ".card-agent-row"].forEach((selector) => {
       const row = container.querySelector(selector);
       expect(row, `${selector} should render for the placement fixture`).not.toBeNull();
       expect(row!.compareDocumentPosition(workflowRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

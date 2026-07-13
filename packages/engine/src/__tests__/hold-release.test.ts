@@ -925,4 +925,49 @@ describe("hold-release sweep — FN-7648 unplanned/intake cards never enter exec
     setColumn(store, plannedTask.id, "in-progress");
     expect(await isUnplannedForExecution(store, (await store.getTask(plannedTask.id))!, ir.ir)).toBe(false);
   });
+
+  /*
+  FNXC:TaskRefinementWorkflow 2026-07-12-23:58:
+  A refinement's seed PROMPT.md carries no task-id prefix (`# {title}\n\n{description}`), so
+  the old strict bootstrap-stub equality treated a promoted refinement as planned and released
+  it into execution with a feedback-only prompt. The predicate must hold it for planning.
+  */
+  it("isUnplannedForExecution: true for a refinement seed prompt in an intake-trait column", async () => {
+    const def = await store.createWorkflowDefinition({ name: "refinement seed probe", ir: renamedIntakeCapacityWorkflowIr() });
+    const ir = await store.getWorkflowDefinition(def.id);
+    if (!ir?.ir) throw new Error("missing workflow ir");
+
+    const refineTask = await store.createTask({
+      title: "FN-100: tighten the header spacing",
+      description: "tighten the header spacing\n\nRefines: FN-100",
+    });
+    setSelection(store, refineTask.id, def.id);
+    setColumn(store, refineTask.id, "ideas");
+    const detail = await store.getTask(refineTask.id);
+    await store.updateTask(refineTask.id, {
+      prompt: `# ${detail!.title}\n\n${detail!.description}\n`,
+    });
+    expect(await isUnplannedForExecution(store, (await store.getTask(refineTask.id))!, ir.ir)).toBe(true);
+  });
+
+  /*
+  FNXC:WorkflowScheduling 2026-07-13-11:20:
+  `needs-replan` means Plan Review rejected the current PROMPT.md; the plan-in-place rebound
+  parks the card in "todo" awaiting the triage replan. The sweep must never release it — the
+  real (rejected) prompt would otherwise pass the seed check and execute.
+  */
+  it("isUnplannedForExecution: true for status needs-replan even with a real (rejected) spec", async () => {
+    const def = await store.createWorkflowDefinition({ name: "needs-replan probe", ir: renamedIntakeCapacityWorkflowIr() });
+    const ir = await store.getWorkflowDefinition(def.id);
+    if (!ir?.ir) throw new Error("missing workflow ir");
+
+    const replanTask = await store.createTask({ description: "rejected plan" });
+    setSelection(store, replanTask.id, def.id);
+    await store.updateTask(replanTask.id, {
+      prompt: `# Task: ${replanTask.id} - rejected\n\n## Mission\n\nA real spec Plan Review rejected.\n`,
+    });
+    setColumn(store, replanTask.id, "ideas");
+    await store.updateTask(replanTask.id, { status: "needs-replan" } as Parameters<typeof store.updateTask>[1]);
+    expect(await isUnplannedForExecution(store, (await store.getTask(replanTask.id))!, ir.ir)).toBe(true);
+  });
 });

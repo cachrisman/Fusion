@@ -20,6 +20,11 @@ import { recordResumeEvent } from "../utils/resumeInstrumentation";
 import type { Agent, ChatInFlightGenerationState, ChatMessage } from "@fusion/core";
 
 const ACTIVE_SESSION_STORAGE_KEY = "kb-chat-active-session";
+/**
+ * FNXC:Chat-ModelSwitch 2026-07-12-00:00:
+ * Model-loop direct sessions store this sentinel agent id so the UI and hook share one target-mode check instead of duplicating the literal in each composer surface.
+ */
+export const FN_AGENT_ID = "__fn_agent__";
 const TASK_PLANNER_CHAT_AGENT_ID_PREFIX = "task-planner:";
 
 function isTaskPlannerSession(session: ChatSessionInfo): boolean {
@@ -97,6 +102,18 @@ export interface UseChatReturn {
   ) => Promise<ChatSessionInfo>;
   archiveSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
+  setSessionModel: (
+    id: string,
+    selection: { agentId?: string; modelProvider?: string | null; modelId?: string | null },
+  ) => Promise<void>;
+  /**
+   * FNXC:Chat-ThinkingLevel 2026-07-12-19:30:
+   * Change an existing (already-created) session's reasoning-effort level mid-conversation via
+   * PATCH /api/chat/sessions/:id; distinct from the create-time picker in NewChatDialog
+   * (FN-7775). `level: ""` clears the override back to inherit the project/global default.
+   * Mirrors renameSession's optimistic-update-with-rollback contract.
+   */
+  setSessionThinkingLevel: (id: string, level: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
 
   // Message operations
@@ -548,9 +565,40 @@ export function useChat(
           }
         } else {
           if (shouldCommitMessages) {
-            setMessages(mappedMessages);
+            const isActiveStreamingSession = isStreamingRef.current && activeSessionRef.current?.id === sessionId;
+            const responseBelongsToSession = mappedMessages.every((message) => message.sessionId === sessionId);
+            const currentMessagesBelongToSession = messagesRef.current.length > 0 && messagesRef.current.every((message) => message.sessionId === sessionId);
+            const shouldPreserveActiveStreamingThread = isActiveStreamingSession
+              && currentMessagesBelongToSession
+              && (!responseBelongsToSession || mappedMessages.length === 0);
+            setMessages((prev) => {
+              if (isActiveStreamingSession && prev.length > 0) {
+                const previousBelongsToSession = prev.every((message) => message.sessionId === sessionId);
+                if (previousBelongsToSession && (!responseBelongsToSession || mappedMessages.length === 0)) {
+                  /*
+                  FNXC:ChatStreaming 2026-07-12-11:08:
+                  During an active assistant turn, the visible prior thread is append-only until onDone/recovery performs the authoritative reload. Mid-turn chat:session:updated, tool-call, and streaming churn can leave an older loadMessages request in flight; an empty or cross-session response must not blank/reflow messages because chat:message:added assistant echoes are suppressed while streaming.
+                  */
+                  return prev;
+                }
+
+                if (previousBelongsToSession && mappedMessages.length > 0) {
+                  const merged = [...prev];
+                  const seen = new Set(prev.map((message) => message.id));
+                  for (const message of mappedMessages) {
+                    if (!seen.has(message.id)) {
+                      merged.push(message);
+                      seen.add(message.id);
+                    }
+                  }
+                  return merged;
+                }
+              }
+
+              return mappedMessages;
+            });
             setHasMoreMessages(data.messages.length >= 50);
-            if (cacheKey) writeCache(cacheKey, mappedMessages, { maxBytes: 500_000 });
+            if (cacheKey && responseBelongsToSession && !shouldPreserveActiveStreamingThread) writeCache(cacheKey, mappedMessages, { maxBytes: 500_000 });
           }
         }
       } catch {
@@ -981,6 +1029,102 @@ export function useChat(
         setSessions(previousSessions);
         setActiveSession(previousActiveSession);
         addToast?.("Failed to rename conversation", "error");
+        throw error;
+      }
+    },
+    [activeSession, addToast, projectId, sessions],
+  );
+
+  /**
+   * FNXC:Chat-ModelSwitch 2026-07-12-00:00:
+   * The brain-icon popup can retarget an active direct conversation to either a model pair or a real agent mid-conversation. Optimistically patch both session collections so the next send and visible header use the new persisted target without creating a replacement chat.
+   *
+   * FNXC:Chat-ModelSwitch 2026-07-12-21:40:
+   * The PATCH payload must explicitly clear the field the user is switching AWAY from (agentId
+   * when picking a model; modelProvider/modelId when picking an agent), not just the optimistic
+   * local patch. Forwarding only the caller's partial `selection` would leave a stale agentId
+   * (or stale modelProvider/modelId) persisted server-side, so the next send could still resolve
+   * against the PREVIOUS target — silently breaking the retarget this control exists for.
+   */
+  const setSessionModel = useCallback(
+    async (id: string, selection: { agentId?: string; modelProvider?: string | null; modelId?: string | null }) => {
+      const previousSessions = sessions;
+      const previousActiveSession = activeSession;
+      const isAgentSwitch = selection.agentId !== undefined;
+      const optimisticPatch = isAgentSwitch
+        ? { agentId: selection.agentId!, modelProvider: null, modelId: null }
+        : { agentId: FN_AGENT_ID, modelProvider: selection.modelProvider ?? null, modelId: selection.modelId ?? null };
+
+      setSessions((prev) => prev.map((session) => (session.id === id ? { ...session, ...optimisticPatch } : session)));
+      setActiveSession((prev) => (prev?.id === id ? { ...prev, ...optimisticPatch } : prev));
+
+      try {
+        const data = await updateChatSession(id, optimisticPatch, projectId);
+        const updatedSession = data.session;
+        const reconciledPatch = {
+          agentId: updatedSession.agentId,
+          modelProvider: updatedSession.modelProvider,
+          modelId: updatedSession.modelId,
+          updatedAt: updatedSession.updatedAt,
+        };
+        setSessions((prev) =>
+          prev.map((session) => (session.id === id ? { ...session, ...reconciledPatch } : session)),
+        );
+        setActiveSession((prev) => (prev?.id === id ? { ...prev, ...reconciledPatch } : prev));
+      } catch (error) {
+        setSessions(previousSessions);
+        setActiveSession(previousActiveSession);
+        addToast?.("Failed to update chat model", "error");
+        throw error;
+      }
+    },
+    [activeSession, addToast, projectId, sessions],
+  );
+
+  /**
+   * FNXC:Chat-ThinkingLevel 2026-07-12-19:30:
+   * Lets a user change an already-created direct chat session's thinking (reasoning-effort)
+   * level from the in-chat composer control, mid-conversation — FN-7775 only supported picking
+   * it once at session creation. Mirrors renameSession's optimistic-update-with-rollback
+   * contract exactly: update both `sessions` and `activeSession` immediately, reconcile with the
+   * server response, and roll back both on failure with an error toast.
+   */
+  const setSessionThinkingLevel = useCallback(
+    async (id: string, level: string) => {
+      const normalizedLevel = level.trim() || null;
+      const previousSessions = sessions;
+      const previousActiveSession = activeSession;
+
+      setSessions((prev) => prev.map((session) => (session.id === id ? { ...session, thinkingLevel: normalizedLevel } : session)));
+      setActiveSession((prev) => (prev?.id === id ? { ...prev, thinkingLevel: normalizedLevel } : prev));
+
+      try {
+        const data = await updateChatSession(id, { thinkingLevel: normalizedLevel }, projectId);
+        const updatedSession = data.session;
+        setSessions((prev) =>
+          prev.map((session) =>
+            session.id === id
+              ? {
+                  ...session,
+                  thinkingLevel: updatedSession.thinkingLevel,
+                  updatedAt: updatedSession.updatedAt,
+                }
+              : session,
+          ),
+        );
+        setActiveSession((prev) =>
+          prev?.id === id
+            ? {
+                ...prev,
+                thinkingLevel: updatedSession.thinkingLevel,
+                updatedAt: updatedSession.updatedAt,
+              }
+            : prev,
+        );
+      } catch (error) {
+        setSessions(previousSessions);
+        setActiveSession(previousActiveSession);
+        addToast?.("Failed to update thinking level", "error");
         throw error;
       }
     },
@@ -1563,6 +1707,19 @@ export function useChat(
         return;
       }
 
+      /**
+       * FNXC:ChatAttachments 2026-07-12-00:00:
+       * FN-7849 requires direct-chat uploaded attachments to render immediately after send. During streaming, reconcile the optimistic temp user bubble with the persisted user-message SSE echo because that echo carries the real id and attachment filenames; otherwise images/files only appear after leaving and re-entering the thread.
+       */
+      if (
+        activeSessionRef.current?.id === message.sessionId &&
+        isStreamingRef.current &&
+        message.role === "user"
+      ) {
+        setMessages((prev) => reconcileOptimisticSentMessage(prev, message));
+        return;
+      }
+
       // Recovery mode: isStreaming is true but there's no active stream (streamRef is null).
       // This happens after a page reload/HMR when the server is still generating.
       // When the assistant message arrives via SSE, add it and clear the recovery state.
@@ -1649,6 +1806,8 @@ export function useChat(
     createSession,
     archiveSession,
     renameSession,
+    setSessionModel,
+    setSessionThinkingLevel,
     deleteSession,
     sendMessage,
     editMessageAndResend,

@@ -22,10 +22,12 @@ import {
   __resetPlanningState,
   __setCreateFnAgent,
   cancelSession,
+  createDraftSession,
   createSession,
   getCurrentQuestion,
   rehydrateFromStore,
   setAiSessionStore as setPlanningAiSessionStore,
+  startExistingSession,
   submitResponse,
 } from "../planning.js";
 import {
@@ -196,6 +198,20 @@ describe("session persistence round-trip", () => {
     expect(JSON.parse(afterComplete?.conversationHistory ?? "[]")).toHaveLength(3);
     expect(JSON.parse(afterComplete?.inputPayload ?? "{}").pendingSummary).toBeUndefined();
     expect(JSON.parse(afterComplete?.result ?? "null")?.title).toBe("Planned");
+  });
+
+  it("persists planning thinkingLevel across draft, fresh streaming, and start-existing agent construction", async () => {
+    __setCreateFnAgent(async () => createMockAgent([JSON.stringify({ type: "question", data: { id: "q-thinking", type: "text", question: "Scope?" } })]));
+
+    const draft = await createDraftSession("127.0.0.41", "Draft plan", "/tmp/project", "anthropic", "claude", "high", undefined, { projectId: "proj" });
+    expect(JSON.parse(aiSessionStore.get(draft.sessionId)?.inputPayload ?? "{}")).toMatchObject({ thinkingLevel: "high" });
+
+    aiSessionStore.updateDraft(draft.sessionId, { initialPlan: "Draft plan updated", modelProvider: "anthropic", modelId: "claude" });
+    expect(JSON.parse(aiSessionStore.get(draft.sessionId)?.inputPayload ?? "{}").thinkingLevel).toBe("high");
+
+    await startExistingSession(draft.sessionId, "/tmp/project", taskStore, "anthropic", "claude");
+    expect(JSON.parse(aiSessionStore.get(draft.sessionId)?.inputPayload ?? "{}").thinkingLevel).toBe("high");
+
   });
 
   it("rehydrates awaiting deepening checkpoint sessions without exposing pending summary as complete", () => {

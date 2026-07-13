@@ -141,6 +141,9 @@ Larger grab target for the docked terminal top resize handle: it straddles the p
 /*
 FNXC:TerminalLayout 2026-07-04-19:22:
 Pinned terminal mode is an in-flow project-shell child instead of a portaled overlay. Reserve a smaller, clamped panel below the application so the board, chat, and right dock stay visible and usable above it.
+
+FNXC:TerminalLayout 2026-07-12-18:50:
+FN-7897 fixed the pinned terminal rendering underneath the fixed ExecutorStatusBar footer. .terminal-below-host is a sibling of .dashboard-project-shell inside .dashboard-project-stack (not a descendant), so unlike .left-sidebar-nav--with-footer/.right-dock--with-footer it cannot rely on --executor-footer-height inherited from the shell; the --with-footer modifier below redeclares the token at this consumer, matching the .project-content--with-footer precedent.
 */
 .terminal-below-host {
   display: flex;
@@ -149,6 +152,15 @@ Pinned terminal mode is an in-flow project-shell child instead of a portaled ove
   width: 100%;
   border-top: 1px solid var(--border);
   background: var(--surface);
+}
+
+/*
+FNXC:TerminalLayout 2026-07-12-18:50:
+FN-7897: reserve space for the fixed ExecutorStatusBar footer when it is rendered (footerVisible prop), so the pinned/below terminal's own bottom .terminal-status-bar action row stays fully visible above the footer instead of being painted over. --executor-footer-height is redeclared here (not inherited — see comment above) to match the .project-content--with-footer precedent; --icb-bottom-offset mirrors the same Android Chrome ICB compensation already applied to .terminal-modal--docked's bottom calc.
+*/
+.terminal-below-host--with-footer {
+  --executor-footer-height: 36px;
+  padding-bottom: calc(var(--icb-bottom-offset, 0px) + var(--executor-footer-height));
 }
 
 .modal.terminal-modal.terminal-modal--below {
@@ -456,6 +468,56 @@ The floating-mode header is the move grip. `touch-action: none` is required so a
 .terminal-mobile-tab-action:disabled {
   cursor: not-allowed;
   opacity: var(--opacity-disabled, 0.5);
+}
+
+.terminal-tab-region {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.terminal-tab-region .terminal-tabs,
+.terminal-tab-region .terminal-mobile-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.terminal-tab-region .terminal-mobile-tabs {
+  display: flex;
+}
+
+.terminal-tabs--measuring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  visibility: hidden;
+  pointer-events: none;
+  overflow: hidden;
+  scrollbar-width: none;
+}
+
+.terminal-tabs--measuring::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+FNXC:TerminalFooter 2026-07-11-20:36:
+FN-7829 makes the terminal status footer unconditional for mobile, tablet, desktop, and embedded terminals because the header no longer renders `.terminal-actions`. Keep the FN-7550/FN-7621 min-width, horizontal-scroll, nowrap, and touch-action safeguards here so the single shared action cluster remains reachable without clipping at every breakpoint.
+*/
+.terminal-status-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: var(--space-xs);
+  border-top: 1px solid var(--border);
+  padding: var(--space-xs);
+  padding-bottom: max(var(--space-xs), env(safe-area-inset-bottom, 0));
+  min-height: calc(var(--space-xl) + var(--space-sm));
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  touch-action: pan-x pan-y;
 }
 
 /*
@@ -844,22 +906,6 @@ The terminal header pop-out/dock affordance is an icon-only utility control. It 
   font-size: 12px;
   font-family: var(--font-mono);
   color: var(--text-muted);
-}
-
-.terminal-shortcuts {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.terminal-shortcuts kbd {
-  display: inline-block;
-  padding: 2px 6px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text);
 }
 
 .terminal-history {
@@ -1252,8 +1298,103 @@ The shortcut bar (modifier keys + arrow keys) must sit on ONE line, not stack in
   justify-self: start;
 }
 
+.terminal-shortcut-btn--custom {
+  border-color: var(--accent);
+  background: var(--surface-elevated);
+}
+
+.terminal-custom-shortcuts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  grid-column: 1 / -1;
+  padding: var(--space-sm);
+  border: var(--btn-border-width) solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+
+.terminal-custom-shortcuts__header,
+.terminal-custom-shortcuts__row,
+.terminal-custom-shortcuts__form,
+.terminal-custom-shortcuts__form-actions,
+.terminal-custom-shortcuts__actions {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.terminal-custom-shortcuts__header {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.terminal-custom-shortcuts__header h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.terminal-custom-shortcuts__count,
+.terminal-custom-shortcuts__empty {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.terminal-custom-shortcuts__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.terminal-custom-shortcuts__row {
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-xs);
+  border: var(--btn-border-width) solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.terminal-custom-shortcuts__summary {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.terminal-custom-shortcuts__summary code {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-custom-shortcuts__actions,
+.terminal-custom-shortcuts__form-actions {
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.terminal-custom-shortcuts__form {
+  align-items: flex-end;
+}
+
+.terminal-custom-shortcuts__form .terminal-preference-field {
+  flex: 1 1 0;
+}
+
+.terminal-custom-shortcuts__submit {
+  white-space: nowrap;
+}
+
 .terminal-connection-status {
   font-weight: 500;
+  white-space: nowrap;
 }
 
 .terminal-connection-status.connected {
@@ -1643,10 +1784,6 @@ The Android keyboard-open recurrence can start with a touch-primary visualViewpo
     font-size: 11px;
   }
 
-  .terminal-shortcuts {
-    font-size: 11px;
-  }
-
   .terminal-shortcut-panel {
     max-height: calc(var(--space-2xl) + var(--space-2xl) + var(--space-2xl) + var(--space-xl));
   }
@@ -1669,14 +1806,21 @@ The Android keyboard-open recurrence can start with a touch-primary visualViewpo
     align-self: stretch;
   }
 
+  .terminal-custom-shortcuts__header,
+  .terminal-custom-shortcuts__row,
+  .terminal-custom-shortcuts__form,
+  .terminal-custom-shortcuts__form-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .terminal-custom-shortcuts__actions {
+    flex-wrap: wrap;
+  }
+
   .terminal-font-size-btn {
     min-width: calc(var(--space-xl) + var(--space-md));
     min-height: calc(var(--space-xl) + var(--space-md));
-  }
-
-  .terminal-shortcuts kbd {
-    padding: 1px 4px;
-    font-size: 10px;
   }
 
   .terminal-input-area {
@@ -1748,80 +1892,59 @@ The Android keyboard-open recurrence can start with a touch-primary visualViewpo
     display: none;
   }
 
-  /*
-  FNXC:TerminalFooter 2026-07-04-20:00:
-  FN-7560: on mobile the terminal action controls (font-size, Clear, Shortcuts,
-  Preferences, connection status, exit code) render in this bottom footer bar
-  instead of the header, restoring pre-FN-7502 footer ergonomics so the narrow
-  header only has to fit the tab dropdown and close button. Reuses the same
-  min-width: 0 + overflow-x: auto flex-scroll pattern as .terminal-actions and
-  .terminal-shortcut-panel (FN-7550) so a crowded footer scrolls horizontally
-  instead of clipping/wrapping. padding-bottom composes with the iOS safe-area
-  inset so the bar clears the home indicator; it stays in-flow at the bottom of
-  the panel's flex column, so the .terminal-modal[style*="--keyboard-overlap"]
-  height clamp shrinks .terminal-container (flex: 1) rather than the footer.
-  */
-  .terminal-status-bar {
-    display: flex;
-    align-items: center;
-    flex-wrap: nowrap;
-    gap: var(--space-xs);
-    border-top: 1px solid var(--border);
-    padding: var(--space-xs);
-    padding-bottom: max(var(--space-xs), env(safe-area-inset-bottom, 0));
-    min-height: 36px;
-    min-width: 0;
-    overflow-x: auto;
-    scrollbar-width: thin;
-    /*
-    FNXC:Terminal 2026-07-06-19:45:
-    FN-7621: this footer shares .terminal-shortcut-panel's FN-7550 min-width/
-    overflow-x pattern but never had ITS OWN touch-action opt-in, so real
-    mobile swipes on it were also defeated by the ancestor-chain touch-action
-    intersection from styles.css's mobile lockdown (see the .modal.terminal-modal
-    and .modal-overlay.terminal-modal-overlay carve-outs above/elsewhere in
-    this file). Give it the same pan-x pan-y opt-in as .terminal-shortcut-panel.
-    */
-    touch-action: pan-x pan-y;
-  }
-
-  .terminal-shortcuts--header,
   .terminal-connection-status {
     display: none;
   }
 }
 
 /*
-FNXC:TerminalFooter 2026-07-08-15:00:
-FN-7684: extend the FN-7560 mobile footer relocation to the project's canonical
-tablet tier (769-1024px, `--tablet-breakpoint: 1024px`, matching the JS
-`isTabletTerminal` flag). A tablet keeps the desktop display modes (docked/
-floating/pinned-below, unlike mobile's fullscreen shell) but its header still
-overflows if it renders the full `.terminal-actions` cluster — the help text
-and zoom controls collide with the pin/pop-out/close icons. TerminalModal.tsx
-stops rendering `.terminal-actions` in the header at <=1024px and instead
-renders the SAME shared `terminalActionControls` fragment here, mirroring every
-mobile footer declaration (not just a display:flex override) so the tablet
-footer keeps the same min-width: 0 + overflow-x: auto horizontal-scroll safety
-net as mobile (FN-7550/FN-7560) plus the FN-7621 touch-action carve-out.
-Unlike mobile, the tablet footer has more room, so it intentionally does NOT
-reapply the mobile-only `.terminal-shortcuts--header, .terminal-connection-status
-{ display: none }` hide above — both stay visible on tablet.
+FNXC:Terminal 2026-07-10-00:00:
+FN-7813 embeds the shared terminal inside Task Detail. The host must fill the parent tab panel, keep scroll/resize inside the terminal surface, and avoid overlay/floating dimensions so Task Detail owns layout at every breakpoint.
 */
-@media (min-width: 769px) and (max-width: 1024px) {
-  .terminal-status-bar {
-    display: flex;
-    align-items: center;
-    flex-wrap: nowrap;
-    gap: var(--space-xs);
-    border-top: 1px solid var(--border);
-    padding: var(--space-xs);
-    padding-bottom: max(var(--space-xs), env(safe-area-inset-bottom, 0));
-    min-height: 36px;
+.terminal-embedded-host {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+  background: var(--surface);
+  border: thin solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.modal.terminal-modal.terminal-modal--embedded {
+  position: relative;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-width: none;
+  max-height: none;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  resize: none;
+}
+
+.terminal-modal--embedded .terminal-header {
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+@media (max-width: 768px) {
+  .terminal-embedded-host {
+    border-radius: var(--radius-md);
+  }
+
+  .terminal-modal--embedded .terminal-header {
+    align-items: stretch;
+  }
+
+  .terminal-modal--embedded .terminal-tabs,
+  .terminal-modal--embedded .terminal-workspace-picker,
+  .terminal-modal--embedded .terminal-actions {
     min-width: 0;
-    overflow-x: auto;
-    scrollbar-width: thin;
-    touch-action: pan-x pan-y;
   }
 }
 

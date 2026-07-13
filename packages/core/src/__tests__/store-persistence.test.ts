@@ -60,6 +60,51 @@ describe("TaskStore", () => {
   });
 
   /*
+   * FNXC:WorkflowLifecycle 2026-07-12-00:00:
+   * FN-7863's execute self-requeue loop guard is progress-anchored, so both the no-progress streak
+   * and the compact step-status signature must round-trip through SQLite and list surfaces.
+   */
+  describe("executeRequeueLoop persistence", () => {
+    it("round-trips execute loop counters through updateTask, getTask, and listTasks", async () => {
+      const task = await harness.store().createTask({ description: "Execute requeue loop task" });
+      const updated = await harness.store().updateTask(task.id, {
+        executeRequeueLoopCount: 3,
+        executeRequeueLoopSignature: JSON.stringify({ currentStep: 1, steps: ["done", "pending"] }),
+      });
+
+      expect(updated.executeRequeueLoopCount).toBe(3);
+      expect(updated.executeRequeueLoopSignature).toBe('{"currentStep":1,"steps":["done","pending"]}');
+
+      const detail = await harness.store().getTask(task.id);
+      expect(detail.executeRequeueLoopCount).toBe(3);
+      expect(detail.executeRequeueLoopSignature).toBe('{"currentStep":1,"steps":["done","pending"]}');
+
+      const listed = (await harness.store().listTasks()).find((candidate) => candidate.id === task.id);
+      expect(listed?.executeRequeueLoopCount).toBe(3);
+      expect(listed?.executeRequeueLoopSignature).toBe('{"currentStep":1,"steps":["done","pending"]}');
+    });
+
+    it("clears execute loop state with explicit null updates", async () => {
+      const task = await harness.store().createTask({ description: "Execute requeue loop clear task" });
+      await harness.store().updateTask(task.id, {
+        executeRequeueLoopCount: 2,
+        executeRequeueLoopSignature: "sig",
+      });
+
+      const cleared = await harness.store().updateTask(task.id, {
+        executeRequeueLoopCount: null,
+        executeRequeueLoopSignature: null,
+      });
+      expect(cleared.executeRequeueLoopCount).toBeUndefined();
+      expect(cleared.executeRequeueLoopSignature).toBeUndefined();
+
+      const detail = await harness.store().getTask(task.id);
+      expect(detail.executeRequeueLoopCount).toBe(0);
+      expect(detail.executeRequeueLoopSignature).toBeUndefined();
+    });
+  });
+
+  /*
    * FNXC:PlanApproval 2026-07-04-22:41:
    * FN-7569 — approvedPlanFingerprint must survive create/update/null-clear round trips through
    * SQLite so the manual plan-approval gate can compare it against the freshly written PROMPT.md

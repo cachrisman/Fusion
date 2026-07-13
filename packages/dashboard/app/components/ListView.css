@@ -746,6 +746,16 @@ In the split sidebar the title cell must allow the title to wrap to two lines (h
   background: var(--status-in-review-bg);
   color: var(--in-review);
 }
+
+/*
+FNXC:TaskCardPlanReviewBadge 2026-07-11-12:16:
+ListView uses the same active-review token as TaskCard for the FN-7831 Reviewing badge. Keep the modifier styling token-only and geometry-neutral so grouped cards and table rows preserve existing responsive layout.
+*/
+.list-status-badge--reviewing {
+  background: color-mix(in srgb, var(--in-review) 18%, transparent);
+  color: var(--in-review);
+  box-shadow: inset 0 0 0 var(--btn-border-width) color-mix(in srgb, var(--in-review) 35%, transparent);
+}
 .list-status-badge--done {
   background: var(--status-done-bg);
   color: var(--done);

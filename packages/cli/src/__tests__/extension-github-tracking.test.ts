@@ -19,6 +19,12 @@ const registerGithubTrackingHookMock = vi.hoisted(() => vi.fn(() => {
 
 vi.mock("@fusion/dashboard", () => ({
   registerGithubTrackingHook: registerGithubTrackingHookMock,
+  // FNXC:CliTests 2026-07-13-09:40: Missing dashboard barrel exports added for mock completeness (scripts/check-mock-completeness.mjs gate).
+  GitLabClient: vi.fn(),
+  resolveGitlabAuth: vi.fn(() => ({})),
+  buildGitLabTaskProvenance: vi.fn(() => ({})),
+  isGitLabAlreadyImported: vi.fn(),
+  buildGitLabTaskDescription: vi.fn(),
 }));
 
 vi.mock("@fusion/core/gh-cli", () => ({
@@ -37,6 +43,7 @@ vi.mock("@fusion/engine", () => ({
   createWorkflowAuthoringTools: vi.fn(() => ({})),
   workflowListParams: {},
   workflowGetParams: {},
+  workflowValidateParams: {}, // FNXC:Round10 FN-7911 added this export to @fusion/engine barrel
   workflowSelectParams: {},
   workflowCreateParams: {},
   workflowUpdateParams: {},

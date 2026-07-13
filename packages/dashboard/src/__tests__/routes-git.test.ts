@@ -766,6 +766,49 @@ describe("Git Management endpoints", () => {
     });
   });
 
+  /*
+  FNXC:MergePush 2026-07-11-23:45:
+  Backs the Merge settings push-target branch dropdown: branch names known on a remote,
+  read from local remote-tracking refs (offline-fast), excluding the HEAD symbolic ref.
+  */
+  describe("GET /git/remotes/:name/branches", () => {
+    it("returns the branches known on the remote", async () => {
+      const res = await GET(buildApp(), "/api/git/remotes/origin/branches");
+
+      expect(res.status).toBe(200);
+      expect(res.body).toContain("main");
+      expect(res.body).not.toContain("HEAD");
+    });
+
+    it("returns 400 for an invalid remote name", async () => {
+      const res = await GET(buildApp(), "/api/git/remotes/invalid;rm%20-rf%20/branches");
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("Invalid remote name");
+    });
+
+    it("returns an empty array for a non-existent remote", async () => {
+      const res = await GET(buildApp(), "/api/git/remotes/nonexistent-remote-xyz/branches");
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+    });
+
+    it("returns 400 when not a git repository", async () => {
+      const nonGitStore = createMockStore({
+        getRootDir: vi.fn().mockReturnValue("/tmp/nonexistent-git-dir-for-test"),
+      });
+      const app = express();
+      app.use(express.json());
+      app.use("/api", createApiRoutes(nonGitStore));
+
+      const res = await GET(app, "/api/git/remotes/origin/branches");
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("Not a git repository");
+    });
+  });
+
   describe("GET /git/branches", () => {
     it("returns branches array", async () => {
       const res = await GET(buildApp(), "/api/git/branches");

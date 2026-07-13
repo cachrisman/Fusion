@@ -65,6 +65,22 @@ describe("resolve model-lane thinking levels", () => {
     })).toBe("medium");
   });
 
+  it("documents caller precedence for per-task planning and validator thinking overrides", () => {
+    const settings = { planningThinkingLevel: "minimal", validatorThinkingLevel: "low", defaultThinkingLevel: "off" } as const;
+    const task = { thinkingLevel: "medium", planningThinkingLevel: "high", validatorThinkingLevel: "xhigh" } as const;
+
+    expect(resolvePlanningThinkingLevel(settings, task.planningThinkingLevel ?? task.thinkingLevel)).toBe("high");
+    expect(resolveValidatorThinkingLevel(task.validatorThinkingLevel ?? task.thinkingLevel, settings)).toBe("xhigh");
+
+    const legacyTask = { thinkingLevel: "medium", planningThinkingLevel: undefined, validatorThinkingLevel: undefined } as const;
+    expect(resolvePlanningThinkingLevel(settings, legacyTask.planningThinkingLevel ?? legacyTask.thinkingLevel)).toBe("medium");
+    expect(resolveValidatorThinkingLevel(legacyTask.validatorThinkingLevel ?? legacyTask.thinkingLevel, settings)).toBe("medium");
+
+    const nodeThinkingLevel = "minimal" as const;
+    expect(resolveValidatorThinkingLevel(nodeThinkingLevel ?? task.validatorThinkingLevel ?? task.thinkingLevel, settings)).toBe("minimal");
+  });
+
+
   it("resolves fallback thinking through fallback key then executor lane then defaults", () => {
     expect(resolveExecutorFallbackThinkingLevel("task", { fallbackThinkingLevel: "high", executionThinkingLevel: "low" })).toBe("high");
     expect(resolveExecutorFallbackThinkingLevel(undefined, { executionThinkingLevel: "minimal", defaultThinkingLevel: "low" })).toBe("minimal");
@@ -680,47 +696,84 @@ describe("createResolvedAgentSession", () => {
   });
 
   /*
-  FNXC:DelegatedRuntimeCompletion 2026-07-11-23:50 (test):
-  FUSI-071 Step 4 — assert the describeModel dispatch-attach gating: a
-  non-default (plugin) runtime session gets the runtime's own describeModel
-  bound so pi.ts's describeModel dispatch reports the plugin's description
-  (e.g. "cursor/auto") instead of reading the pi-native model.provider/.id
-  shape. The default pi runtime session must NOT get this attached (it would
-  recurse into pi.ts's describeModel, which itself checks this same dispatch
-  hook) — regression guard for the pi-native path.
+  FNXC:GrokAcp 2026-07-12-06:30:
+  PR #2011 Greptile P1: non-pi runtimes must receive action-gated customTools so
+  Grok ACP loopback execute cannot bypass AgentPermissionPolicy.
   */
-  it("attaches the resolved runtime's describeModel on a non-default (plugin) runtime session", async () => {
-    const mockSession = { prompt: vi.fn(), model: "auto" } as any;
+  it("wraps customTools with action gate for non-pi runtimes before createSession", async () => {
+    const mockSession = { prompt: vi.fn() } as any;
     const createSessionMock = vi.fn().mockResolvedValue({ session: mockSession });
-    const runtimeDescribeModel = vi.fn(() => "cursor/auto");
     resolveRuntimeMock.mockResolvedValue({
       runtime: {
-        id: "cursor",
-        name: "Cursor Runtime",
+        id: "grok",
+        name: "Grok Runtime",
         createSession: createSessionMock,
         promptWithFallback: vi.fn(),
-        describeModel: runtimeDescribeModel,
+        describeModel: vi.fn(() => "grok/default"),
       },
-      runtimeId: "cursor",
+      runtimeId: "grok",
       wasConfigured: true,
     });
 
-    const { createResolvedAgentSession } = await import("../agent-session-helpers.js");
+    const execute = vi.fn().mockResolvedValue({ ok: true });
+    const rawTool = {
+      name: "fn_workflow_delete",
+      label: "Delete Workflow",
+      description: "",
+      parameters: {},
+      execute,
+    };
+    const lockedDownPolicy = {
+      presetId: "locked-down",
+      rules: {
+        git_write: "block",
+        file_write_delete: "block",
+        command_execution: "block",
+        network_api: "block",
+        task_agent_mutation: "block",
+        review_gate_bypass: "block",
+        file_scope: "block",
+      },
+    };
 
-    const { session } = await createResolvedAgentSession({
+    const { createResolvedAgentSession } = await import("../agent-session-helpers.js");
+    await createResolvedAgentSession({
       sessionPurpose: "executor",
-      runtimeHint: "cursor",
       cwd: "/tmp/project",
       systemPrompt: "system",
+      customTools: [rawTool as any],
+      actionGateContext: {
+        agentId: "agent-1",
+        agentName: "Agent",
+        isEphemeral: false,
+        taskId: "FN-1",
+        permissionPolicy: lockedDownPolicy as any,
+        createApprovalRequest: vi.fn(),
+        findApprovalByDedupeKey: vi.fn().mockResolvedValue(null),
+      } as any,
     });
 
-    expect(typeof (session as any).describeModel).toBe("function");
-    expect((session as any).describeModel()).toBe("cursor/auto");
-    expect(runtimeDescribeModel).toHaveBeenCalledWith(mockSession);
+    expect(createSessionMock).toHaveBeenCalledTimes(1);
+    const passedTools = createSessionMock.mock.calls[0][0].customTools as Array<{
+      name: string;
+      execute: (...args: unknown[]) => Promise<unknown>;
+    }>;
+    expect(passedTools).toHaveLength(1);
+    expect(passedTools[0].name).toBe("fn_workflow_delete");
+    expect(passedTools[0].execute).not.toBe(execute);
+    // Gated execute must not call the raw tool when policy blocks.
+    const blocked = await passedTools[0].execute("call-1", { workflow_id: "WF-1" });
+    expect(blocked).toEqual(
+      expect.objectContaining({
+        isError: true,
+      }),
+    );
+    expect(execute).not.toHaveBeenCalled();
   });
 
-  it("does not attach describeModel on the default pi runtime session (avoids infinite recursion into pi.ts's dispatch)", async () => {
-    const mockSession = { prompt: vi.fn(), model: { provider: "anthropic", id: "claude-sonnet-4-5" } } as any;
+  it("does not pre-wrap customTools for the pi runtime (createFnAgent owns the chain)", async () => {
+    const mockSession = { prompt: vi.fn() } as any;
+
     const createSessionMock = vi.fn().mockResolvedValue({ session: mockSession });
     resolveRuntimeMock.mockResolvedValue({
       runtime: {
@@ -728,21 +781,42 @@ describe("createResolvedAgentSession", () => {
         name: "Default PI Runtime",
         createSession: createSessionMock,
         promptWithFallback: vi.fn(),
-        describeModel: vi.fn(() => "anthropic/claude-sonnet-4-5"),
+        describeModel: vi.fn(() => "mock/model"),
+
       },
       runtimeId: "pi",
       wasConfigured: false,
     });
 
-    const { createResolvedAgentSession } = await import("../agent-session-helpers.js");
+    const execute = vi.fn().mockResolvedValue({ ok: true });
+    const rawTool = {
+      name: "fn_workflow_delete",
+      label: "Delete",
+      description: "",
+      parameters: {},
+      execute,
+    };
 
-    const { session } = await createResolvedAgentSession({
+    const { createResolvedAgentSession } = await import("../agent-session-helpers.js");
+    await createResolvedAgentSession({
       sessionPurpose: "executor",
       cwd: "/tmp/project",
       systemPrompt: "system",
+      customTools: [rawTool as any],
+      actionGateContext: {
+        agentId: "agent-1",
+        agentName: "Agent",
+        isEphemeral: false,
+        taskId: "FN-1",
+        permissionPolicy: { defaultDisposition: "block", rules: {} } as any,
+        createApprovalRequest: vi.fn(),
+        findApprovalByDedupeKey: vi.fn(),
+      } as any,
     });
 
-    expect((session as any).describeModel).toBeUndefined();
+    const passedTools = createSessionMock.mock.calls[0][0].customTools;
+    expect(passedTools[0]).toBe(rawTool);
+
   });
 });
 

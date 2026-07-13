@@ -13,13 +13,15 @@ import * as nodeFs from "node:fs";
 import os from "node:os";
 import v8 from "node:v8";
 
-import type { AnthropicProviderRegistration, TaskStore, ScheduleType, ActivityEventType, ModelPreset, RoutineTriggerType, McpServerDefinition, McpSecretRef, ResolvedMcpServerDefinition } from "@fusion/core";
-import { isMcpSecretRef } from "@fusion/core";import {
+import type { AnthropicProviderRegistration, TaskStore, ScheduleType, ActivityEventType, ModelPreset, RoutineTriggerType, McpServerDefinition, McpSecretRef, ResolvedMcpServerDefinition, ThinkingLevel } from "@fusion/core";
+import { isMcpSecretRef } from "@fusion/core";
+import {
   type Task,
   type PiExtensionEntry,
   type PiExtensionSettings,
   AutomationStore,
   AUTOMATION_SELECTABLE_TOOLS,
+  THINKING_LEVELS,
   MemoryBackendError,
   RoutineStore,
   discoverPiExtensions,
@@ -183,6 +185,7 @@ import { registerRuntimeProviderRoutes } from "./routes/register-runtime-provide
 import { registerFnBinaryRoutes } from "./routes/register-fn-binary-routes.js";
 import { registerUpdateCheckRoutes } from "./routes/register-update-check-routes.js";
 import { registerDiagnosticsRoutes } from "./routes/register-diagnostics-routes.js";
+import { registerSystemRoutes } from "./routes/register-system-routes.js";
 import { registerCliAgentHooksRoute } from "./routes/cli-agent-hooks.js";
 import { registerCliAgentSettingsRoutes } from "./routes/cli-agent-settings.js";
 import { registerIntegratedRouters, registerIntegratedDevServerRouter } from "./routes/register-integrated-routers.js";
@@ -3666,6 +3669,17 @@ export function createApiRoutes(store: TaskStore, options?: ServerOptions): Rout
     isMemoryBackendError: (error): error is { code: string; backend?: string; message: string } => error instanceof MemoryBackendError,
   });
 
+  // ── System Panel Routes (Command Center → System) ─────────────────────────
+  // FNXC:SystemPanel 2026-07-12-11:25: operator restart/rebuild/logs/debug
+  // controls. Registered here so the same heartbeat-monitor resolution used by
+  // agent runtime routes powers "restart all agents".
+  registerSystemRoutes(routeContext, {
+    hasHeartbeatExecutor,
+    heartbeatMonitor,
+    isHeartbeatMonitorForProject,
+    resolveHeartbeatMonitor,
+  });
+
   // ── Agent Reflection Routes ──────────────────────────────────────────────
 
   registerAgentReflectionRatingRoutes(routeContext);
@@ -4611,7 +4625,7 @@ export function createApiRoutes(store: TaskStore, options?: ServerOptions): Rout
   /**
    * PATCH /api/ai-sessions/:id/draft
    * Keep planning draft title/text synchronized while editing.
-   * Body: { title: string, initialPlan: string }
+   * Body: { title: string, initialPlan: string, thinkingLevel?: ThinkingLevel }
    */
   router.patch("/ai-sessions/:id/draft", (req, res) => {
     if (!aiSessionStore) {
@@ -4643,7 +4657,12 @@ export function createApiRoutes(store: TaskStore, options?: ServerOptions): Rout
     const modelProvider = rawProvider && rawModelId ? rawProvider : undefined;
     const modelId = rawProvider && rawModelId ? rawModelId : undefined;
 
-    const updated = aiSessionStore.updateDraft(id, { initialPlan, modelProvider, modelId });
+    const thinkingLevel = req.body?.thinkingLevel;
+    if (thinkingLevel !== undefined && !THINKING_LEVELS.includes(thinkingLevel as ThinkingLevel)) {
+      throw badRequest("thinkingLevel must be one of: " + THINKING_LEVELS.join(", "));
+    }
+
+    const updated = aiSessionStore.updateDraft(id, { initialPlan, modelProvider, modelId, thinkingLevel });
     if (!updated) {
       throw notFound("Session not found");
     }
@@ -5286,6 +5305,15 @@ function validateAutomationSteps(steps: unknown[]): string | null {
     if ((hasProvider && !hasModelId) || (!hasProvider && hasModelId)) {
       return `Step ${i + 1}: modelProvider and modelId must both be present or both absent`;
     }
+    /*
+    FNXC:Automations 2026-07-12-19:14:
+    Schedule and routine AI-capable steps can persist an optional reasoning-effort override. Validate it against the central THINKING_LEVELS set so routes accept omission/inherit plus known levels and reject drift before JSON step storage.
+    */
+    if (step.thinkingLevel !== undefined) {
+      if (typeof step.thinkingLevel !== "string" || !THINKING_LEVELS.includes(step.thinkingLevel as (typeof THINKING_LEVELS)[number])) {
+        return `Step ${i + 1}: thinkingLevel must be one of ${THINKING_LEVELS.join(", ")}`;
+      }
+    }
   }
   return null;
 }
@@ -5691,8 +5719,12 @@ async function executeAiPromptStep(
   /*
    * FNXC:McpConfig 2026-06-26-00:00:
    * Manual AI-prompt workflow runs are operator-triggered coding-agent sessions, so they must receive the task-store resolved MCP set just like task executor lanes. Do not log resolved MCP payloads because env/header values may contain materialized secrets.
+   *
+   * FNXC:Automations 2026-07-12-20:30:
+   * Manual/inline automation AI runs bypass CronRunner's executor seam, so they must pass the persisted step thinking level directly as createFnAgent.defaultThinkingLevel. Undefined or blank values preserve inherited defaults.
    */
   const { mcpServers, scopeByServerName } = await resolveManualAiPromptMcpServersWithScope(taskStore);
+  const defaultThinkingLevel = step.thinkingLevel?.trim() || undefined;
 
   /*
    * FNXC:McpConfig 2026-07-12-00:00:
@@ -5708,6 +5740,7 @@ async function executeAiPromptStep(
     toolsAllowlist: step.allowedTools,
     defaultProvider: modelProvider,
     defaultModelId: modelId,
+    defaultThinkingLevel,
     mcpServers,
     mcpSettingsStore: taskStore,
     mcpServerScopeByName: scopeByServerName,
@@ -5777,12 +5810,17 @@ async function executeCreateTaskStep(
   }
 
   try {
+    /*
+    FNXC:Automations 2026-07-12-20:30:
+    Manual/inline create-task automation runs map the persisted step thinking level onto the created task so manual execution matches scheduled and routine behavior.
+    */
     const task = await taskStore.createTask({
       title: step.taskTitle?.trim() || undefined,
       description: step.taskDescription.trim(),
       column: (step.taskColumn as import("@fusion/core").Column) || "triage",
       modelProvider: step.modelProvider?.trim() || undefined,
       modelId: step.modelId?.trim() || undefined,
+      thinkingLevel: (step.thinkingLevel?.trim() || undefined) as import("@fusion/core").TaskCreateInput["thinkingLevel"],
       source: {
         sourceType: "workflow_step",
         sourceMetadata: { stepId: step.id },

@@ -43,6 +43,7 @@ coverage/
 .hai/
 .worktrees/
 .factory/
+.orca/
 kb.db/
 
 # Stray worktrees accidentally created at the repo root by the executor

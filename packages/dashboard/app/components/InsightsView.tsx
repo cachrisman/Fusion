@@ -93,6 +93,9 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
   const [selectedModel, setSelectedModel] = useState<string>(
     () => localStorage.getItem("fusion-insight-model") ?? ""
   );
+  const [selectedThinking, setSelectedThinking] = useState<string>(
+    () => localStorage.getItem("fusion-insight-thinking") ?? ""
+  );
 
   // Fetch models internally if not provided via prop
   const [fetchedModels, setFetchedModels] = useState<ModelInfo[]>([]);
@@ -166,6 +169,15 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
     }
   }, []);
 
+  const handleThinkingChange = useCallback((value: string) => {
+    setSelectedThinking(value);
+    if (value) {
+      localStorage.setItem("fusion-insight-thinking", value);
+    } else {
+      localStorage.removeItem("fusion-insight-thinking");
+    }
+  }, []);
+
   const populatedSections = useMemo(
     () => sections.filter((section) => section.items.length > 0),
     [sections],
@@ -234,7 +246,7 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
         }
       }
 
-      await runInsights(modelProvider, modelId);
+      await runInsights(modelProvider, modelId, selectedThinking || undefined);
       setStatusMessage(t("insights.generationStarted", "Insight generation started"));
       setStatusType("success");
       addToast(t("insights.generationStarted", "Insight generation started"), "success");
@@ -250,7 +262,7 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
       setStatusType("error");
       addToast(message, "error");
     }
-  }, [runInsights, addToast, selectedModel, t]);
+  }, [runInsights, addToast, selectedModel, selectedThinking, t]);
 
   const handleDismiss = useCallback(
     async (id: string, title: string) => {
@@ -374,7 +386,7 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
       >
         <div className="insights-section-header">
           <div className="insights-section-title">
-            <IconComponent size={20} className="insights-section-icon" />
+            <IconComponent size={18} className="insights-section-icon" />
             <h3>{activeSection.label}</h3>
             <span className="insights-section-count">{activeSection.items.length}</span>
           </div>
@@ -414,7 +426,7 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
                           aria-label={t("insights.unarchiveLabel", "Unarchive this insight")}
                           data-testid={`unarchive-${insight.id}`}
                         >
-                          {isUnarchiveInFlight ? <RefreshCw size={20} className="spin" /> : <ArchiveRestore size={20} />}
+                          {isUnarchiveInFlight ? <RefreshCw size={16} className="spin" /> : <ArchiveRestore size={16} />}
                         </button>
                       ) : (
                         <>
@@ -426,7 +438,7 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
                             aria-label={t("insights.createTaskLabel", "Create task from this insight")}
                             data-testid={`create-task-${insight.id}`}
                           >
-                            {isCreateInFlight ? <RefreshCw size={20} className="spin" /> : <Plus size={20} />}
+                            {isCreateInFlight ? <RefreshCw size={16} className="spin" /> : <Plus size={16} />}
                           </button>
                           <button
                             className="insight-item-action-btn"
@@ -436,7 +448,7 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
                             aria-label={t("insights.archiveLabel", "Archive this insight")}
                             data-testid={`archive-${insight.id}`}
                           >
-                            {isArchiveInFlight ? <RefreshCw size={20} className="spin" /> : <Archive size={20} />}
+                            {isArchiveInFlight ? <RefreshCw size={16} className="spin" /> : <Archive size={16} />}
                           </button>
                         </>
                       )}
@@ -449,9 +461,9 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
                         data-testid={`dismiss-${insight.id}`}
                       >
                         {isDismissInFlight ? (
-                          <RefreshCw size={20} className="spin" />
+                          <RefreshCw size={16} className="spin" />
                         ) : (
-                          <X size={20} />
+                          <X size={16} />
                         )}
                       </button>
                     </div>
@@ -577,6 +589,10 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
 
       {showModelConfig && (
         <div className="insights-model-config" data-testid="model-config">
+          {/*
+          FNXC:Insights-ThinkingLevel 2026-07-12-19:24:
+          The insight model-config popover must expose the shared inline reasoning-effort selector and persist the operator's choice next to the model override so Generate Insights can send a real per-run selection.
+          */}
           <label htmlFor="insight-model-select" className="insights-model-label">
             {t("insights.model", "Model")}
           </label>
@@ -592,6 +608,10 @@ export function InsightsView({ projectId, addToast, onClose, onCreateTask, model
             favoriteModels={favoriteModels}
             onToggleFavorite={handleToggleProviderFavorite}
             onToggleModelFavorite={handleToggleModelFavorite}
+            showThinkingLevel
+            thinkingLevel={selectedThinking}
+            onThinkingLevelChange={handleThinkingChange}
+            defaultThinkingLevel="off"
           />
         </div>
       )}

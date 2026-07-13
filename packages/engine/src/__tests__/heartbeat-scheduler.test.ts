@@ -99,6 +99,7 @@ describe("HeartbeatTriggerScheduler", () => {
       runtimeConfig: patch.runtimeConfig,
       lastHeartbeatAt: patch.lastHeartbeatAt,
       taskId: patch.taskId,
+      lastError: patch.lastError,
     }) as Agent;
 
     function createLifecycleStore(initialAgents: Agent[] = []): LifecycleStore {
@@ -161,6 +162,50 @@ describe("HeartbeatTriggerScheduler", () => {
       expect(callback).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
       expect(callback).toHaveBeenCalledWith(explicitAgent.id, "timer", expect.objectContaining({ intervalMs: 15_000 }));
+    });
+
+    it("keeps recoverable error agents timer-eligible and dispatches their next tick", async () => {
+      const recoverable = baseAgent("agent-recoverable", {
+        state: "error",
+        runtimeConfig: { enabled: true, heartbeatIntervalMs: 1_000 },
+        lastError: "socket hang up",
+      });
+      const exhausted = baseAgent("agent-exhausted", {
+        state: "error",
+        runtimeConfig: { enabled: true, heartbeatIntervalMs: 1_000 },
+        lastError: "socket hang up",
+        metadata: { heartbeatErrorRecovery: { consecutiveAttempts: 5 } },
+      });
+      const disabled = baseAgent("agent-disabled-error", {
+        state: "error",
+        runtimeConfig: { enabled: false, heartbeatIntervalMs: 1_000 },
+      });
+      const ephemeral = baseAgent("agent-ephemeral-error", {
+        state: "error",
+        runtimeConfig: { enabled: true, heartbeatIntervalMs: 1_000 },
+        metadata: { agentKind: "task-worker" },
+      });
+      const operatorActionable = baseAgent("agent-operator-error", {
+        state: "error",
+        runtimeConfig: { enabled: true, heartbeatIntervalMs: 1_000 },
+        lastError: "invalid api key",
+      });
+      const eventStore = createLifecycleStore([recoverable, exhausted, disabled, ephemeral, operatorActionable]);
+      scheduler = new HeartbeatTriggerScheduler(eventStore as unknown as AgentStore, callback);
+      scheduler.start();
+
+      for (const agent of [recoverable, exhausted, disabled, ephemeral, operatorActionable]) {
+        eventStore.emit("agent:created", agent);
+      }
+
+      expect(scheduler.getRegisteredAgents()).toContain(recoverable.id);
+      expect(scheduler.getRegisteredAgents()).not.toContain(exhausted.id);
+      expect(scheduler.getRegisteredAgents()).not.toContain(disabled.id);
+      expect(scheduler.getRegisteredAgents()).not.toContain(ephemeral.id);
+      expect(scheduler.getRegisteredAgents()).not.toContain(operatorActionable.id);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(callback).toHaveBeenCalledWith(recoverable.id, "timer", expect.objectContaining({ intervalMs: 1_000 }));
     });
 
     it("keeps unrelated updates stable, re-arms interval changes, and clears paused timers", async () => {
@@ -324,6 +369,36 @@ describe("HeartbeatTriggerScheduler", () => {
       await vi.advanceTimersByTimeAsync(60_000);
 
       expect(scheduler.getRegisteredAgents()).toContain("agent-001");
+    });
+
+    it("re-arms a recoverable error agent when timer entry is missing and no lifecycle event fires", async () => {
+      vi.useFakeTimers();
+      const agent = {
+        id: "agent-error-audit",
+        name: "Agent Error Audit",
+        role: "executor",
+        state: "error",
+        lastHeartbeatAt: "2026-01-01T00:00:00.000Z",
+        runtimeConfig: { enabled: true, heartbeatIntervalMs: 30_000 },
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        lastError: "socket hang up",
+        metadata: { heartbeatErrorRecovery: { consecutiveAttempts: 1 } },
+      } as Agent;
+      vi.mocked(store.listAgents).mockResolvedValue([agent]);
+      vi.mocked(store.getActiveHeartbeatRun).mockResolvedValue(null);
+
+      scheduler = new HeartbeatTriggerScheduler(store, callback);
+      scheduler.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(scheduler.getRegisteredAgents()).toContain(agent.id);
+      scheduler.unregisterAgent(agent.id);
+      expect(scheduler.getRegisteredAgents()).not.toContain(agent.id);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(scheduler.getRegisteredAgents()).toContain(agent.id);
     });
 
     it("marks repaired agent metadata as stale when last heartbeat exceeds the default 2x threshold", async () => {
@@ -1935,11 +2010,11 @@ describe("HeartbeatTriggerScheduler", () => {
       expect(callback).not.toHaveBeenCalled();
     });
 
-    it("timer is unregistered when agent becomes error state (should clear timer)", async () => {
+    it("timer remains registered when agent becomes recoverable error state", async () => {
       scheduler.registerAgent("agent-001", { heartbeatIntervalMs: 5000 });
       expect(scheduler.getRegisteredAgents()).toContain("agent-001");
 
-      // Update to error state
+      // Update to a recoverable durable error state.
       (eventStore.getAgent as ReturnType<typeof vi.fn>).mockImplementation((agentId: string) => ({
         id: agentId,
         name: `Agent ${agentId}`,
@@ -1947,15 +2022,15 @@ describe("HeartbeatTriggerScheduler", () => {
         state: "error" as const,
         createdAt: "2026-01-01T00:00:00.000Z",
         updatedAt: "2026-01-01T00:00:00.000Z",
+        lastError: "socket hang up",
         metadata: {},
       }));
-      eventStore.emit("agent:updated", { id: "agent-001", state: "error", metadata: {} } as import("@fusion/core").Agent);
+      eventStore.emit("agent:updated", { id: "agent-001", state: "error", lastError: "socket hang up", metadata: {} } as import("@fusion/core").Agent);
 
-      // Timer should be cleared for error agents
-      expect(scheduler.getRegisteredAgents()).not.toContain("agent-001");
+      expect(scheduler.getRegisteredAgents()).toContain("agent-001");
 
-      await vi.advanceTimersByTimeAsync(10000);
-      expect(callback).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(callback).toHaveBeenCalledWith("agent-001", "timer", expect.objectContaining({ intervalMs: 5000 }));
     });
 
     it("timer is unregistered when agent becomes paused state (should clear timer)", async () => {

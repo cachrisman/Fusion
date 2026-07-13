@@ -1354,6 +1354,94 @@ describe("InsightsView", () => {
   });
 
   describe("responsive CSS contracts", () => {
+    it("FN-7830: renders the maximal header action cluster without dropping the Insights title or controls", () => {
+      const maximalSections = [
+        {
+          category: "workflow" as const,
+          label: "Workflow",
+          items: [
+            {
+              id: "INS-BACKLOG",
+              projectId: "test",
+              title: "Backlog pressure detected 2026-07-11",
+              content: "Backlog health content",
+              category: "workflow" as const,
+              status: "generated" as const,
+              fingerprint: "fp-backlog",
+              provenance: { trigger: "manual" as const },
+              lastRunId: null,
+              createdAt: "2024-01-01T00:00:00Z",
+              updatedAt: "2024-01-01T00:00:00Z",
+            },
+            {
+              id: "INS-ARCHIVED",
+              projectId: "test",
+              title: "Archived mobile header insight",
+              content: "Archived content",
+              category: "workflow" as const,
+              status: "archived" as const,
+              fingerprint: "fp-archived",
+              provenance: { trigger: "manual" as const },
+              lastRunId: null,
+              createdAt: "2024-01-01T00:00:00Z",
+              updatedAt: "2024-01-01T00:00:00Z",
+            },
+          ],
+          isLoading: false,
+          error: null,
+        },
+        ...mockSections,
+      ];
+
+      mockUseInsights.mockReturnValue({
+        sections: maximalSections,
+        loading: false,
+        error: null,
+        latestRun: null,
+        isRunInFlight: false,
+        runError: null,
+        refresh: vi.fn(),
+        runInsights: vi.fn(),
+        dismiss: vi.fn(),
+        createTask: vi.fn(),
+        archive: vi.fn(),
+        unarchive: vi.fn(),
+        toggleShowArchived: vi.fn(),
+        dismissStates: new Map(),
+        createTaskStates: new Map(),
+        archiveStates: new Map(),
+        unarchiveStates: new Map(),
+        totalCount: 2,
+        dismissedCount: 0,
+        archivedCount: 1,
+        showArchived: false,
+      });
+
+      render(<InsightsView {...defaultProps} />);
+
+      expect(screen.getByText("Insights").closest("h2")).toHaveClass("view-header__title");
+      expect(screen.getByText("2 total")).toHaveClass("insights-view-count");
+      expect(screen.getByTestId("toggle-backlog-health")).toHaveTextContent("Backlog (1)");
+      expect(screen.getByLabelText("Close insights view")).toHaveClass("insights-view-close");
+      expect(screen.getByTestId("toggle-archived-insights")).toHaveTextContent("Archived (1)");
+      expect(screen.getByTestId("refresh-insights")).toHaveClass("insights-refresh-btn");
+      expect(screen.getByTestId("toggle-model-config")).toHaveClass("insights-model-toggle");
+      expect(screen.getByTestId("run-insights")).toHaveTextContent("Generate Insights");
+    });
+
+    it("FN-7830: stacks the Insights title above wrapped actions only in the mobile header tier", () => {
+      const css = loadAllAppCss();
+
+      expect(css).toMatch(/@media[^{}]*\(max-width:\s*768px\)[^{]*\{[\s\S]*?\.insights-view\s+\.view-header\s*\{[^}]*flex-wrap:\s*wrap;[^}]*\}/);
+      expect(css).toMatch(/@media[^{}]*\(max-width:\s*768px\)[^{]*\{[\s\S]*?\.insights-view\s+\.view-header__title\s*\{[^}]*flex:\s*1\s+0\s+100%;[^}]*min-width:\s*100%;[^}]*\}/);
+      expect(css).toMatch(/@media[^{}]*\(max-width:\s*768px\)[^{]*\{[\s\S]*?\.insights-view\s+\.view-header__title\s+span\s*\{[^}]*overflow:\s*visible;[^}]*text-overflow:\s*clip;[^}]*\}/);
+      expect(css).toMatch(/@media[^{}]*\(max-width:\s*768px\)[^{]*\{[\s\S]*?\.insights-view\s+\.view-header__actions\s*\{[^}]*justify-content:\s*flex-start;[^}]*width:\s*100%;[^}]*margin-left:\s*0;[^}]*\}/);
+
+      expect(css).toMatch(/@media[^{}]*\(min-width:\s*769px\)\s*and\s*\(min-height:\s*481px\)[^{]*\{[\s\S]*?\.view-header\s*\{[^}]*height:\s*var\(--view-header-min-height\);[^}]*\}/);
+      expect(css).toMatch(/@media[^{}]*\(min-width:\s*769px\)\s*and\s*\(min-height:\s*481px\)[^{]*\{[\s\S]*?\.view-header__actions\s*\{[^}]*flex-wrap:\s*nowrap;[^}]*height:\s*var\(--view-header-content-row\);[^}]*\}/);
+      expect(css).toMatch(/@media[^{}]*\(min-width:\s*769px\)\s*and\s*\(max-width:\s*1024px\)[^{]*\{[\s\S]*?\.insights-body\s*\{[^}]*flex-direction:\s*column;[^}]*\}/);
+    });
+
     it("FN-6764: adds a tablet full-width reflow without regressing desktop or mobile tiers", () => {
       const baseCss = loadAllAppCssBaseOnly();
       const css = loadAllAppCss();
