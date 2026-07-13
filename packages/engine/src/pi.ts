@@ -1597,6 +1597,29 @@ async function registerPluginCliProvider(
       return;
     }
 
+    /*
+     * FNXC:SessionRouting 2026-07-13-00:00:
+     * FUSI-090: this placeholder MUST NOT reuse a shared/real api id like
+     * "openai-completions". `@earendil-works/pi-ai`'s api-provider dispatch
+     * table (`apiProviderRegistry` in its compat.js) is a single
+     * PROCESS-GLOBAL Map keyed ONLY by the `api` string, not by provider name
+     * and not scoped per ModelRegistry instance/task. `ModelRegistry.
+     * applyProviderConfig()` calls the SDK's `registerApiProvider()` (a plain
+     * last-writer-wins Map.set) whenever a provider config declares
+     * `streamSimple` — so registering this placeholder under
+     * "openai-completions" clobbered the SAME global dispatch slot used by
+     * every real openai-compatible provider (built-in OpenAI/OpenRouter and
+     * any custom provider such as Ollama/LM Studio/vLLM) for the remainder of
+     * the process, causing a same-session (no concurrency required) or
+     * cross-task Ollama/custom-provider stream to hit this throwing
+     * placeholder instead of its own real HTTP path (FUSI-090). Each plugin
+     * cliProvider gets a dedicated, per-provider-unique api id instead
+     * (`@earendil-works/pi-ai`'s `Api` type is an open string type, so this is
+     * fully supported) — this gives the placeholder its own isolated slot in
+     * the global dispatch map that no other provider's models ever share,
+     * structurally preventing the cross-wire in both directions.
+     */
+    const placeholderApi = `fusion-plugin-cli:${providerId}`;
     modelRegistry.registerProvider(providerId, {
       name: contribution.displayName ?? providerId,
       // No real HTTP endpoint: `cursor-agent` (and any plugin cliProvider) is
@@ -1604,7 +1627,7 @@ async function registerPluginCliProvider(
       // pi's registerProvider() requires a baseUrl when models are supplied;
       // this placeholder is never dialed because streamSimple below always
       // throws before any network call would be attempted.
-      api: "openai-completions",
+      api: placeholderApi,
       baseUrl: "fusion-plugin-cli-provider://" + providerId,
       // No credentials are ever sent: streamSimple below throws before any
       // request would be constructed. This placeholder only satisfies pi's
