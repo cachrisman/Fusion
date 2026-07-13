@@ -15335,6 +15335,39 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
           : resolveExecutorFallbackThinkingLevel(workflowStepThinkingSource, settings))
         : resolveExecutorThinkingLevel(workflowStepThinkingSource, settings);
       const workflowStepFallbackThinkingLevel = resolveExecutorFallbackThinkingLevel(workflowStepThinkingSource, settings);
+      /*
+       * FNXC:SessionWiring 2026-07-13-00:00:
+       * FUSI-088 root cause: this workflow-step path accumulated `output`
+       * (later parsed for a REVISE/APPROVE verdict) ONLY inside the
+       * `session.subscribe(...)` listener below, and called it unguarded. A
+       * resolved runtime session that does not implement the pi
+       * `subscribe(listener)` API (delegated CLI runtimes such as
+       * cursor/droid/grok, which stream via their own `onText` callback)
+       * threw `session.subscribe is not a function`, and — even if merely
+       * caught — would have left `output` empty, still producing the
+       * Runfusion/Fusion#1946-class "(no feedback captured)" / "failed before
+       * producing a verdict" no-verdict failure. `streamOutputFromOnText` is
+       * flipped on below only when `subscribe` is absent, so a
+       * subscribe-capable session keeps accumulating solely via its own
+       * `subscribe` listener (avoiding double-counted deltas) while a
+       * subscribe-less session falls back to these `onText`/`onThinking`
+       * handlers to still capture streamed text into `output`.
+       */
+      let output = "";
+      let streamOutputFromOnText = false;
+      const handleWorkflowStepText = (delta: string): void => {
+        if (!streamOutputFromOnText) {
+          return;
+        }
+        output += delta;
+        agentLogger.onText(delta);
+      };
+      const handleWorkflowStepThinking = (delta: string): void => {
+        if (!streamOutputFromOnText) {
+          return;
+        }
+        agentLogger.onThinking(delta);
+      };
       const { session } = await createResolvedAgentSession({
         sessionPurpose: "executor",
         runtimeHint: workflowRuntimeHint,
@@ -15342,6 +15375,8 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
         cwd: worktreePath,
         systemPrompt: stepSystemPrompt,
         tools: toolMode,
+        onText: handleWorkflowStepText,
+        onThinking: handleWorkflowStepThinking,
         defaultProvider: provider,
         defaultModelId: modelId,
         fallbackProvider: settings.fallbackProvider,
@@ -15378,31 +15413,43 @@ You have access to the file system to review changes.${inlineFixBlock}${verdictB
       );
       this.setActiveWorkflowStepSession(task.id, session, worktreePath, this.createSeenSteeringIds(task));
 
-      let output = "";
       const deltaNormalizer = createStreamingDeltaNormalizer();
-      session.subscribe((event) => {
-        if (event.type === "message_update") {
-          const msgEvent = event.assistantMessageEvent;
-          if (msgEvent.type === "text_delta") {
-            // Repair dropped sentence-boundary spaces at the shared engine delta chokepoint,
-            // including tool-call cross-message boundaries (see streaming-delta.ts).
-            const delta = deltaNormalizer.normalize(msgEvent.partial, msgEvent.contentIndex, msgEvent.delta, "text");
-            output += delta;
-            agentLogger.onText(delta);
-          } else if (msgEvent.type === "thinking_delta") {
-            // Repair dropped sentence-boundary spaces at the shared engine delta chokepoint,
-            // including tool-call cross-message boundaries (see streaming-delta.ts).
-            const delta = deltaNormalizer.normalize(msgEvent.partial, msgEvent.contentIndex, msgEvent.delta, "thinking");
-            agentLogger.onThinking(delta);
+      /*
+       * FNXC:SessionWiring 2026-07-13-00:00:
+       * Guard: only wire the pi-style `subscribe(listener)` when the resolved
+       * runtime session actually implements it. When absent, do NOT throw —
+       * `handleWorkflowStepText`/`handleWorkflowStepThinking` (passed as
+       * `onText`/`onThinking` at session creation above) take over via
+       * `streamOutputFromOnText`, so `output` is still accumulated for verdict
+       * parsing (FUSI-088 / Runfusion/Fusion#1946).
+       */
+      if (typeof session.subscribe === "function") {
+        session.subscribe((event) => {
+          if (event.type === "message_update") {
+            const msgEvent = event.assistantMessageEvent;
+            if (msgEvent.type === "text_delta") {
+              // Repair dropped sentence-boundary spaces at the shared engine delta chokepoint,
+              // including tool-call cross-message boundaries (see streaming-delta.ts).
+              const delta = deltaNormalizer.normalize(msgEvent.partial, msgEvent.contentIndex, msgEvent.delta, "text");
+              output += delta;
+              agentLogger.onText(delta);
+            } else if (msgEvent.type === "thinking_delta") {
+              // Repair dropped sentence-boundary spaces at the shared engine delta chokepoint,
+              // including tool-call cross-message boundaries (see streaming-delta.ts).
+              const delta = deltaNormalizer.normalize(msgEvent.partial, msgEvent.contentIndex, msgEvent.delta, "thinking");
+              agentLogger.onThinking(delta);
+            }
           }
-        }
-        if (event.type === "tool_execution_start") {
-          agentLogger.onToolStart(event.toolName, event.args as Record<string, unknown> | undefined);
-        }
-        if (event.type === "tool_execution_end") {
-          agentLogger.onToolEnd(event.toolName, event.isError, event.result);
-        }
-      });
+          if (event.type === "tool_execution_start") {
+            agentLogger.onToolStart(event.toolName, event.args as Record<string, unknown> | undefined);
+          }
+          if (event.type === "tool_execution_end") {
+            agentLogger.onToolEnd(event.toolName, event.isError, event.result);
+          }
+        });
+      } else {
+        streamOutputFromOnText = true;
+      }
 
       let timedOut = false;
       let timeoutHandle: ReturnType<typeof setTimeout> | undefined;

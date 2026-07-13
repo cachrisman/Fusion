@@ -2902,26 +2902,41 @@ export async function createFnAgent(options: AgentOptions): Promise<AgentResult>
     );
     (targetSession as any).__fusionMemoryAppendAvailable = options.customTools?.some((tool) => tool.name === FN_MEMORY_APPEND_TOOL_NAME) === true;
     const deltaNormalizer = createStreamingDeltaNormalizer();
-    targetSession.subscribe((event) => {
-      if (event.type === "message_update") {
-        const msgEvent = event.assistantMessageEvent;
-        if (msgEvent.type === "text_delta") {
-          // Repair dropped sentence-boundary spaces at the shared engine delta chokepoint,
-          // including tool-call cross-message boundaries (see streaming-delta.ts).
-          options.onText?.(deltaNormalizer.normalize(msgEvent.partial, msgEvent.contentIndex, msgEvent.delta, "text"));
-        } else if (msgEvent.type === "thinking_delta") {
-          // Repair dropped sentence-boundary spaces at the shared engine delta chokepoint,
-          // including tool-call cross-message boundaries (see streaming-delta.ts).
-          options.onThinking?.(deltaNormalizer.normalize(msgEvent.partial, msgEvent.contentIndex, msgEvent.delta, "thinking"));
+    /*
+     * FNXC:SessionWiring 2026-07-13-00:00:
+     * Not every resolved runtime session implements the pi `subscribe(listener)`
+     * API — delegated CLI runtimes (cursor/droid/grok) stream through their own
+     * `onText`/`onThinking` callbacks instead. Calling `.subscribe` unguarded on
+     * such a session throws `session.subscribe is not a function`, which the
+     * workflow-graph executor surfaces as a no-verdict "failed before producing
+     * a verdict" failure that burns the task's entire retry budget (FUSI-088,
+     * observed on FUSI-082; same class as Runfusion/Fusion#1946). Streaming
+     * already flows through `options.onText`/`options.onThinking` at session
+     * creation for non-subscribe runtimes, so simply skip resubscribing here
+     * when `subscribe` is absent instead of throwing.
+     */
+    if (typeof targetSession.subscribe === "function") {
+      targetSession.subscribe((event) => {
+        if (event.type === "message_update") {
+          const msgEvent = event.assistantMessageEvent;
+          if (msgEvent.type === "text_delta") {
+            // Repair dropped sentence-boundary spaces at the shared engine delta chokepoint,
+            // including tool-call cross-message boundaries (see streaming-delta.ts).
+            options.onText?.(deltaNormalizer.normalize(msgEvent.partial, msgEvent.contentIndex, msgEvent.delta, "text"));
+          } else if (msgEvent.type === "thinking_delta") {
+            // Repair dropped sentence-boundary spaces at the shared engine delta chokepoint,
+            // including tool-call cross-message boundaries (see streaming-delta.ts).
+            options.onThinking?.(deltaNormalizer.normalize(msgEvent.partial, msgEvent.contentIndex, msgEvent.delta, "thinking"));
+          }
         }
-      }
-      if (event.type === "tool_execution_start") {
-        options.onToolStart?.(event.toolName, event.args as Record<string, unknown> | undefined);
-      }
-      if (event.type === "tool_execution_end") {
-        options.onToolEnd?.(event.toolName, event.isError, event.result);
-      }
-    });
+        if (event.type === "tool_execution_start") {
+          options.onToolStart?.(event.toolName, event.args as Record<string, unknown> | undefined);
+        }
+        if (event.type === "tool_execution_end") {
+          options.onToolEnd?.(event.toolName, event.isError, event.result);
+        }
+      });
+    }
   };
 
   const swapPromptSession = async (modelToUse: typeof selectedModel): Promise<PromptableSession> => {
@@ -3076,26 +3091,38 @@ export async function createFnAgent(options: AgentOptions): Promise<AgentResult>
 
   // Wire up event listeners
   const deltaNormalizer = createStreamingDeltaNormalizer();
-  promptableSession.subscribe((event) => {
-    if (event.type === "message_update") {
-      const msgEvent = event.assistantMessageEvent;
-      if (msgEvent.type === "text_delta") {
-        // Repair dropped sentence-boundary spaces at the shared engine delta chokepoint,
-        // including tool-call cross-message boundaries (see streaming-delta.ts).
-        options.onText?.(deltaNormalizer.normalize(msgEvent.partial, msgEvent.contentIndex, msgEvent.delta, "text"));
-      } else if (msgEvent.type === "thinking_delta") {
-        // Repair dropped sentence-boundary spaces at the shared engine delta chokepoint,
-        // including tool-call cross-message boundaries (see streaming-delta.ts).
-        options.onThinking?.(deltaNormalizer.normalize(msgEvent.partial, msgEvent.contentIndex, msgEvent.delta, "thinking"));
+  /*
+   * FNXC:SessionWiring 2026-07-13-00:00:
+   * Same guard as `wireFallbackHooks` above: a resolved runtime session may not
+   * implement the pi `subscribe(listener)` API (delegated CLI runtimes stream
+   * via their own `onText`/`onThinking`). Guard the call so a subscribe-less
+   * session doesn't throw `session.subscribe is not a function` and no-verdict
+   * the calling review/workflow-step (FUSI-088 / Runfusion/Fusion#1946);
+   * `options.onText`/`options.onThinking` were already forwarded at session
+   * creation and remain the streaming path for such runtimes.
+   */
+  if (typeof promptableSession.subscribe === "function") {
+    promptableSession.subscribe((event) => {
+      if (event.type === "message_update") {
+        const msgEvent = event.assistantMessageEvent;
+        if (msgEvent.type === "text_delta") {
+          // Repair dropped sentence-boundary spaces at the shared engine delta chokepoint,
+          // including tool-call cross-message boundaries (see streaming-delta.ts).
+          options.onText?.(deltaNormalizer.normalize(msgEvent.partial, msgEvent.contentIndex, msgEvent.delta, "text"));
+        } else if (msgEvent.type === "thinking_delta") {
+          // Repair dropped sentence-boundary spaces at the shared engine delta chokepoint,
+          // including tool-call cross-message boundaries (see streaming-delta.ts).
+          options.onThinking?.(deltaNormalizer.normalize(msgEvent.partial, msgEvent.contentIndex, msgEvent.delta, "thinking"));
+        }
       }
-    }
-    if (event.type === "tool_execution_start") {
-      options.onToolStart?.(event.toolName, event.args as Record<string, unknown> | undefined);
-    }
-    if (event.type === "tool_execution_end") {
-      options.onToolEnd?.(event.toolName, event.isError, event.result);
-    }
-  });
+      if (event.type === "tool_execution_start") {
+        options.onToolStart?.(event.toolName, event.args as Record<string, unknown> | undefined);
+      }
+      if (event.type === "tool_execution_end") {
+        options.onToolEnd?.(event.toolName, event.isError, event.result);
+      }
+    });
+  }
 
   return {
     session: promptableSession,
