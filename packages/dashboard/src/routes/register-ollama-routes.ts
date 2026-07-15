@@ -7,7 +7,7 @@ import {
 } from "@fusion/core";
 import { ApiError, badRequest } from "../api-error.js";
 import { invalidateAllGlobalSettingsCaches } from "../project-store-resolver.js";
-import { discoverOllamaModels, normalizeOllamaEndpoint } from "../ollama-probe.js";
+import { discoverOllamaModels, normalizeOllamaEndpoint, probeOllamaEndpoint } from "../ollama-probe.js";
 import type { AuthStorageLike } from "../routes.js";
 import type { ApiRouteRegistrar } from "./types.js";
 
@@ -103,9 +103,12 @@ function applyEndpointAuthUpdate(authStorage: AuthStorageLike | undefined, endpo
 }
 
 async function statusResponse(ollama: OllamaSettings, authStorage: AuthStorageLike | undefined) {
+  const endpointAuthToken = await readEndpointAuthToken(authStorage, ollama.endpoint);
+  const availability = await probeOllamaEndpoint(ollama.endpoint, endpointAuthToken);
   return {
     ollama,
-    endpointAuthConfigured: Boolean(await readEndpointAuthToken(authStorage, ollama.endpoint)),
+    endpointAuthConfigured: Boolean(endpointAuthToken),
+    availability,
     ready: ollama.enabled && ollama.models.length > 0,
   };
 }
@@ -118,6 +121,11 @@ async function statusResponse(ollama: OllamaSettings, authStorage: AuthStorageLi
  * in responses, and is passed server-to-server only for native probes. Its
  * serialized secret is endpoint-bound, so a failed endpoint change cannot
  * redirect credentials from the active endpoint.
+ *
+ * FNXC:OllamaAvailability 2026-07-15-00:00:
+ * `/ollama/status` includes a bounded, read-only endpoint availability snapshot so Settings can
+ * present disabled native Ollama as Available. Status never discovers or persists models, mutates
+ * enabled state, or treats `ollama-native` as an operator credential.
  */
 export const registerOllamaRoutes: ApiRouteRegistrar = (ctx) => {
   const { router, store, options, rethrowAsApiError } = ctx;

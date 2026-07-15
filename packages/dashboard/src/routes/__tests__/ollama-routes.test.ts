@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import express from "express";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   OLLAMA_ENDPOINT_AUTH_PROVIDER_ID,
   parseOllamaEndpointAuthCredential,
@@ -47,6 +47,11 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("native Ollama discovery contract", () => {
+  beforeEach(() => {
+    // Status now probes `/api/tags`; keep route tests hermetic rather than contacting localhost.
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ models: [] })));
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -112,6 +117,64 @@ describe("native Ollama discovery contract", () => {
       throw new TypeError("socket details must not reach the operator");
     }));
     await expect(discoverOllamaModels("https://ollama.example.test")).rejects.toThrow("Could not connect to the Ollama endpoint");
+  });
+
+  it("reports default localhost availability without a credential or mutation", async () => {
+    const settings: GlobalSettings = {
+      ollama: {
+        endpoint: "http://localhost:11434",
+        enabled: false,
+        think: false,
+        numCtx: 32768,
+        executorEnabled: false,
+        models: [{ id: "saved", name: "saved", capabilities: [], toolCallingVerified: false }],
+      },
+    };
+    const fetchMock = vi.fn(async () => jsonResponse({ models: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { app, store } = createApp(settings);
+
+    const response = await request(app, "GET", "/api/ollama/status");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      ollama: { endpoint: "http://localhost:11434", enabled: false, models: [{ id: "saved" }] },
+      availability: { available: true, reason: "Ollama endpoint is reachable" },
+      endpointAuthConfigured: false,
+    });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:11434/api/tags", expect.objectContaining({ method: "GET" }));
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
+    expect(store.updateGlobalSettings).not.toHaveBeenCalled();
+    expect(JSON.stringify(response.body)).not.toContain("endpointAuthToken");
+  });
+
+  it("returns a bounded redacted unavailable status without failing the settings request", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("socket internals must stay private"); }));
+    const { app } = createApp({});
+
+    const response = await request(app, "GET", "/api/ollama/status");
+
+    expect(response.status).toBe(200);
+    expect(response.body.availability).toEqual({ available: false, reason: "Could not reach the Ollama endpoint" });
+    expect(JSON.stringify(response.body)).not.toContain("socket internals");
+  });
+
+  it("uses an exact endpoint-bound token for a protected status probe without serializing it", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ models: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { app } = createApp({}, createEndpointAuthStorage({
+      [OLLAMA_ENDPOINT_AUTH_PROVIDER_ID]: serializeOllamaEndpointAuthCredential({ endpoint: "https://protected-ollama.test", token: "protected-token" }),
+    }));
+
+    const mismatched = await request(app, "GET", "/api/ollama/status");
+    expect(mismatched.body.endpointAuthConfigured).toBe(false);
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
+
+    const configured = await request(app, "PUT", "/api/ollama/config", { endpoint: "https://protected-ollama.test" });
+    expect(configured.status).toBe(200);
+    expect(configured.body).toMatchObject({ endpointAuthConfigured: true, availability: { available: true } });
+    expect(fetchMock.mock.calls[1]?.[1]?.headers).toMatchObject({ Authorization: "Bearer protected-token" });
+    expect(JSON.stringify(configured.body)).not.toContain("protected-token");
   });
 
   it("persists native status/configuration without accepting client capability metadata", async () => {

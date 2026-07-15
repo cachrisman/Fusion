@@ -1,12 +1,19 @@
 import type { OllamaModelMetadata } from "@fusion/core";
 
 const DISCOVERY_TIMEOUT_MS = 10_000;
+const AVAILABILITY_TIMEOUT_MS = 3_000;
 const MAX_DISCOVERED_MODELS = 100;
 const MAX_CAPABILITIES = 20;
 
 export interface OllamaDiscoveryResult {
   endpoint: string;
   models: OllamaModelMetadata[];
+}
+
+/** Safe, redacted availability snapshot for the Settings-only native card. */
+export interface OllamaEndpointAvailability {
+  available: boolean;
+  reason: string;
 }
 
 type OllamaTag = {
@@ -112,6 +119,43 @@ async function fetchNativeJson(endpoint: string, path: string, signal: AbortSign
     return await response.json();
   } catch {
     throw new Error("Ollama endpoint returned invalid JSON");
+  }
+}
+
+/*
+FNXC:OllamaAvailability 2026-07-15-00:00:
+Settings detection is a short, read-only native `/api/tags` reachability check. It must not
+perform model discovery or persist metadata, and `ollama-native` remains an SDK placeholder
+rather than an operator credential; only an exact endpoint-bound auth-storage token may authorize
+this server-side request.
+*/
+export async function probeOllamaEndpoint(inputEndpoint: unknown, endpointAuthToken?: string): Promise<OllamaEndpointAvailability> {
+  const endpoint = normalizeOllamaEndpoint(inputEndpoint);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AVAILABILITY_TIMEOUT_MS);
+
+  try {
+    let response: Response;
+    try {
+      response = await fetch(nativeApiUrl(endpoint, "api/tags"), {
+        method: "GET",
+        headers: nativeHeaders({ Accept: "application/json" }, endpointAuthToken),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      return {
+        available: false,
+        reason: (error as { name?: string }).name === "AbortError"
+          ? "Ollama endpoint did not respond in time"
+          : "Could not reach the Ollama endpoint",
+      };
+    }
+
+    return response.ok
+      ? { available: true, reason: "Ollama endpoint is reachable" }
+      : { available: false, reason: `Ollama endpoint returned HTTP ${response.status}` };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

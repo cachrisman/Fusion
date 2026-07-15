@@ -1,5 +1,5 @@
-import type { Dispatch, SetStateAction } from "react";
-import type { AuthProvider, ManualOAuthCodeInfo, OAuthDeviceCodeInfo } from "../../../api";
+import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { fetchOllamaStatus, type AuthProvider, type ManualOAuthCodeInfo, type OllamaProviderStatus, type OAuthDeviceCodeInfo } from "../../../api";
 import type { ToastType } from "../../../hooks/useToast";
 import { useTranslation } from "react-i18next";
 import { ClaudeCliProviderCard } from "../../ClaudeCliProviderCard";
@@ -76,16 +76,30 @@ const compareAuthProviderDisplayOrder = (a: AuthProvider, b: AuthProvider) => {
 export function AuthenticationSection({ auth }: AuthenticationSectionProps) {
     const { t } = useTranslation("app");
     const { projectId, addToast, authProviders, authLoading, authActionInProgress, apiKeyInputs, setApiKeyInputs, apiKeyErrors, opencodeApiKeyRefreshStatus, deviceCodes, loginInstructions, manualCodeConfigs, manualCodeInputs, setManualCodeInputs, manualCodeSubmitInProgress, loadAuthStatus, handleLogin, handleLogout, handleCancelLogin, handleSaveApiKey, handleClearApiKey, handleSubmitManualCode, onReopenOnboarding, } = auth;
+    const [ollamaStatus, setOllamaStatus] = useState<OllamaProviderStatus | null>(null);
+    const loadOllamaStatus = useCallback(async () => {
+        try {
+            setOllamaStatus(await fetchOllamaStatus());
+        }
+        catch {
+            // The card keeps its redacted probing state and provides Test as the retry action.
+            setOllamaStatus(null);
+        }
+    }, []);
+    useEffect(() => {
+        void loadOllamaStatus();
+    }, [loadOllamaStatus]);
     const hasSeparatedAnthropicProvider = authProviders.some((p) => p.id === "anthropic-subscription" || p.id === "anthropic-api-key");
     /*
     FNXC:ProviderAuth 2026-06-29-23:50:
     Settings must render Anthropic subscription OAuth and raw Anthropic API-key auth as separate cards; when a mixed/legacy status payload includes the old `anthropic` OAuth id alongside separated cards, hide the legacy card so users never see two OAuth-looking Anthropic entries or a resurrected dual-card surface.
     */
     /*
-    FNXC:OllamaEndpointAuth 2026-07-15-00:00:
-    `ollama` is the canonical native registry identity, whose SDK-required
-    placeholder is not an operator API key. Keep its sole configuration card
-    above this generic list; unrelated Custom Provider IDs remain untouched.
+    FNXC:OllamaAvailability 2026-07-15-00:00:
+    Native Ollama enabled state comes from its redacted native status, never the generic AuthProvider
+    placeholder. Disabled localhost is deliberately an Available provider so operators can discover
+    and test it; an enabled native endpoint moves the same sole card to Authenticated. Filter only
+    the canonical ID so Custom Providers that happen to mention Ollama remain visible.
     */
     const visibleAuthProviders = (hasSeparatedAnthropicProvider
         ? authProviders.filter((p) => p.id !== "anthropic")
@@ -101,6 +115,7 @@ export function AuthenticationSection({ auth }: AuthenticationSectionProps) {
         .sort(compareAuthProviderDisplayOrder);
     const authenticatedProviders = sortedProviders.filter((p) => p.authenticated);
     const unauthenticatedProviders = sortedProviders.filter((p) => !p.authenticated);
+    const nativeOllamaEnabled = ollamaStatus?.ollama.enabled === true;
     /*
     FNXC:ModelCatalog 2026-07-08-00:00:
     FN-7710: A CLI provider toggle (Cursor, Grok, Claude CLI, llama.cpp) must refresh the
@@ -112,10 +127,14 @@ export function AuthenticationSection({ auth }: AuthenticationSectionProps) {
     `onToggled` handler so the fix applies uniformly — no per-card duplication — and both the
     enable and disable transitions call it (the cards invoke `onToggled` on every toggle result).
     */
-    const handleCliProviderToggled = () => {
+    const handleCliProviderToggled = useCallback(() => {
         void loadAuthStatus();
         void refreshModelsCache();
-    };
+    }, [loadAuthStatus]);
+    const handleOllamaStatusChanged = useCallback((next: OllamaProviderStatus) => {
+        setOllamaStatus(next);
+        handleCliProviderToggled();
+    }, [handleCliProviderToggled]);
     const renderCliProviderCard = (provider: AuthProvider) => {
         if (provider.id === "claude-cli") {
             return (<ClaudeCliProviderCard key={provider.id} compact authenticated={provider.authenticated} onToggled={handleCliProviderToggled}/>);
@@ -128,8 +147,8 @@ export function AuthenticationSection({ auth }: AuthenticationSectionProps) {
         }
         return (<LlamaCppProviderCard key={provider.id} compact authenticated={provider.authenticated} onToggled={handleCliProviderToggled}/>);
     };
-    const showAuthenticatedGroup = authenticatedProviders.length > 0;
-    const showAvailableGroup = unauthenticatedProviders.length > 0;
+    const showAuthenticatedGroup = authenticatedProviders.length > 0 || nativeOllamaEnabled;
+    const showAvailableGroup = unauthenticatedProviders.length > 0 || !nativeOllamaEnabled;
     const providerSupportsApiKey = (provider: AuthProvider) => provider.type === "api_key";
     const renderApiKeySection = (provider: AuthProvider) => (<div className="auth-apikey-section">
       <div className="auth-apikey-input-row">
@@ -203,10 +222,7 @@ export function AuthenticationSection({ auth }: AuthenticationSectionProps) {
     */
     return (<>
       <h4 className="settings-section-heading">{t("settings.auth.title", "Authentication")}</h4>
-      <OllamaProviderCard onChanged={handleCliProviderToggled} />
-      {authLoading ? (<div className="settings-empty-state"><LoadingSpinner label={t("settings.auth.loadingStatus", "Loading authentication status…")} /></div>) : authProviders.length === 0 ? (<div className="settings-empty-state settings-muted">
-          {t("settings.auth.noProviders", "No providers available")}
-        </div>) : (<div className="auth-panel-body">
+      {authLoading ? (<div className="settings-empty-state"><LoadingSpinner label={t("settings.auth.loadingStatus", "Loading authentication status…")} /></div>) : (<div className="auth-panel-body">
           <PluginSlot slotId="settings-provider-card" projectId={projectId} renderPlaceholder={false} actions={{ refreshAuthProviders: () => { void loadAuthStatus(); } }}/>
           <PluginSlot slotId="settings-integration-card" projectId={projectId} renderPlaceholder={false} actions={{ refreshAuthProviders: () => { void loadAuthStatus(); } }}/>
           {!showAuthenticatedGroup && (<div className="auth-section-hint">
@@ -214,6 +230,7 @@ export function AuthenticationSection({ auth }: AuthenticationSectionProps) {
             </div>)}
           {showAuthenticatedGroup && (<div className="auth-provider-group">
               <div className="auth-group-label">{t("settings.auth.groupAuthenticated", "Authenticated")}</div>
+              {nativeOllamaEnabled && <OllamaProviderCard status={ollamaStatus} onStatusChanged={handleOllamaStatusChanged} />}
               {authenticatedProviders.map((provider) => provider.type === "cli" ? renderCliProviderCard(provider) : (<div key={provider.id} className="auth-provider-card auth-provider-card--authenticated">
                   <div className="auth-provider-header">
                     <div className="auth-provider-info">
@@ -234,6 +251,7 @@ export function AuthenticationSection({ auth }: AuthenticationSectionProps) {
             </div>)}
           {showAvailableGroup && (<div className="auth-provider-group">
               <div className="auth-group-label">{t("settings.auth.groupAvailable", "Available")}</div>
+              {!nativeOllamaEnabled && <OllamaProviderCard status={ollamaStatus} onStatusChanged={handleOllamaStatusChanged} />}
               {unauthenticatedProviders.map((provider) => provider.type === "cli" ? renderCliProviderCard(provider) : (<div key={provider.id} className="auth-provider-card">
                   <div className="auth-provider-header">
                     <div className="auth-provider-info">

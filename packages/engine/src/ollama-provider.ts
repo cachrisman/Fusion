@@ -56,12 +56,13 @@ export function registerNativeOllamaProvider(modelRegistry: ModelRegistryLike, s
 
 export function isNativeOllamaModel(provider: string | undefined): boolean { return provider === OLLAMA_PROVIDER_ID; }
 
-type NativeMessage = { role: "system" | "user" | "assistant" | "tool"; content: string; tool_calls?: Array<{ function: { name: string; arguments: Record<string, unknown> } }> };
+type NativeMessage = { role: "system" | "user" | "assistant" | "tool"; content: string; tool_name?: string; tool_calls?: Array<{ function: { name: string; arguments: Record<string, unknown> } }> };
 function nativeMessages(context: Context): NativeMessage[] {
   const result: NativeMessage[] = context.systemPrompt ? [{ role: "system", content: context.systemPrompt }] : [];
   for (const message of context.messages) {
     if (message.role === "user") result.push({ role: "user", content: typeof message.content === "string" ? message.content : message.content.map((part) => part.type === "text" ? part.text : "").join("") });
-    else if (message.role === "toolResult") result.push({ role: "tool", content: message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n") });
+    /* FNXC:OllamaNativeTools 2026-07-15-19:31: Native `/api/chat` tool-result messages require the originating tool name; omitting it breaks executor tool-call continuations even for models verified as tool-capable. */
+    else if (message.role === "toolResult") result.push({ role: "tool", tool_name: message.toolName, content: message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n") });
     else result.push({ role: "assistant", content: message.content.filter((part) => part.type === "text").map((part) => part.text).join(""), ...(message.content.some((part) => part.type === "toolCall") ? { tool_calls: message.content.filter((part) => part.type === "toolCall").map((part) => ({ function: { name: part.name, arguments: part.arguments } })) } : {}) });
   }
   return result;

@@ -2052,6 +2052,11 @@ export interface OllamaProviderStatus {
   ollama: OllamaProviderSettings;
   /** Redacted state only; endpoint-auth token never enters browser status data. */
   endpointAuthConfigured: boolean;
+  /** Read-only native endpoint probe; its reason is safe for Settings display. */
+  availability: {
+    available: boolean;
+    reason: string;
+  };
   ready: boolean;
 }
 
@@ -2141,10 +2146,12 @@ export function updateOllamaConfig(config: Partial<Omit<OllamaProviderSettings, 
 }
 
 /** Save or remove the optional protected-endpoint token without exposing its value in status data. */
-export function updateOllamaEndpointAuth(endpointAuthToken: string | null): Promise<OllamaProviderStatus> {
+export function updateOllamaEndpointAuth(endpointAuthToken: string | null, endpoint?: string): Promise<OllamaProviderStatus> {
   return api<OllamaProviderStatus>("/ollama/config", {
     method: "PUT",
-    body: JSON.stringify(endpointAuthToken === null ? { clearEndpointAuth: true } : { endpointAuthToken }),
+    body: JSON.stringify(endpointAuthToken === null
+      ? { clearEndpointAuth: true }
+      : { endpointAuthToken, ...(endpoint ? { endpoint } : {}) }),
   });
 }
 

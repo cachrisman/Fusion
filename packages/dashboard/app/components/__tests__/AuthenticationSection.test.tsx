@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { AuthenticationSection, type AuthenticationSectionData } from "../settings/sections/AuthenticationSection";
 import type { AuthProvider } from "../../api";
+
+const api = vi.hoisted(() => ({ fetchOllamaStatus: vi.fn() }));
+vi.mock("../../api", () => api);
 
 vi.mock("../ProviderIcon", () => ({
   ProviderIcon: ({ provider }: { provider: string }) => <span data-testid={`mock-icon-${provider}`}>{provider}</span>,
@@ -39,7 +42,7 @@ vi.mock("../CursorCliProviderCard", () => ({
   ),
 }));
 vi.mock("../OllamaProviderCard", () => ({
-  OllamaProviderCard: () => <div data-testid="ollama-provider-card" />,
+  OllamaProviderCard: ({ status }: { status: { ollama: { enabled: boolean } } | null }) => <div data-testid="ollama-provider-card" data-enabled={status?.ollama.enabled ? "true" : "false"} />,
 }));
 vi.mock("../LlamaCppProviderCard", () => ({
   LlamaCppProviderCard: ({ authenticated }: { authenticated: boolean }) => (
@@ -104,12 +107,20 @@ function renderAuthSection(providers: AuthProvider[], overrides: Partial<Authent
 describe("AuthenticationSection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    api.fetchOllamaStatus.mockResolvedValue({
+      ready: false,
+      endpointAuthConfigured: false,
+      availability: { available: false, reason: "Could not reach the Ollama endpoint" },
+      ollama: { enabled: false, endpoint: "http://localhost:11434", think: false, numCtx: 32768, executorEnabled: false, models: [] },
+    });
   });
 
-  it("renders exactly one native Ollama card outside generic and Custom Provider rows", () => {
+  it("renders exactly one disabled native Ollama card in Available, never above or outside provider groups", () => {
     renderAuthSection([{ id: "openai", name: "OpenAI", authenticated: false, type: "api_key" }]);
+    const card = screen.getByTestId("ollama-provider-card");
     expect(screen.getAllByTestId("ollama-provider-card")).toHaveLength(1);
-    expect(screen.getByTestId("custom-providers-section")).not.toContainElement(screen.getByTestId("ollama-provider-card"));
+    expect(card.closest(".auth-provider-group")).toContainElement(screen.getByText("Available"));
+    expect(screen.getByTestId("custom-providers-section")).not.toContainElement(card);
   });
 
   it("suppresses only the canonical native Ollama API-key shell while retaining unrelated custom provider rows", () => {
@@ -121,6 +132,23 @@ describe("AuthenticationSection", () => {
     expect(screen.queryByTestId("auth-provider-icon-ollama")).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText("Enter API key")).toBeInTheDocument();
     expect(screen.getByTestId("auth-provider-icon-operator-ollama-proxy")).toBeInTheDocument();
+    expect(screen.getAllByTestId("ollama-provider-card")).toHaveLength(1);
+  });
+
+  it("moves the sole native card to Authenticated only when native status becomes enabled", async () => {
+    api.fetchOllamaStatus.mockResolvedValueOnce({
+      ready: true,
+      endpointAuthConfigured: false,
+      availability: { available: true, reason: "Ollama endpoint is reachable" },
+      ollama: { enabled: true, endpoint: "http://localhost:11434", think: false, numCtx: 32768, executorEnabled: false, models: [] },
+    });
+    renderAuthSection([{ id: "ollama", name: "Ollama", authenticated: false, type: "api_key" }]);
+
+    await screen.findByTestId("ollama-provider-card");
+    await waitFor(() => expect(screen.getByTestId("ollama-provider-card")).toHaveAttribute("data-enabled", "true"));
+    const card = screen.getByTestId("ollama-provider-card");
+    expect(card.closest(".auth-provider-group")).toContainElement(screen.getByText("Authenticated"));
+    expect(screen.queryByTestId("auth-provider-icon-ollama")).not.toBeInTheDocument();
     expect(screen.getAllByTestId("ollama-provider-card")).toHaveLength(1);
   });
 

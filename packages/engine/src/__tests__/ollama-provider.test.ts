@@ -73,6 +73,22 @@ describe("native Ollama registry", () => {
     expect(nativeOllamaRequestHeaders(undefined, "protected-token")).toMatchObject({ authorization: "Bearer protected-token", "content-type": "application/json" });
   });
 
+  it("identifies the originating tool on native chat tool-result messages", async () => {
+    const fetchMock = vi.fn(async () => new Response('{"message":{"content":"done"},"done":true}\n'));
+    vi.stubGlobal("fetch", fetchMock);
+    authStorage.getApiKey.mockResolvedValueOnce(undefined);
+
+    streamNativeOllama(
+      { id: "qwen", provider: "ollama", api: OLLAMA_NATIVE_API_ID, baseUrl: "http://localhost:11434" } as any,
+      { systemPrompt: "", messages: [{ role: "toolResult", toolCallId: "call-1", toolName: "read_file", content: [{ type: "text", text: "contents" }], isError: false, timestamp: 0 }], tools: [] } as any,
+    );
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      messages: [{ role: "tool", tool_name: "read_file", content: "contents" }],
+    });
+  });
+
   it("does not register disabled or empty configurations", () => {
     const registerProvider = vi.fn(); registerNativeOllamaProvider({ registerProvider }, DEFAULT_OLLAMA_SETTINGS);
     expect(registerProvider).not.toHaveBeenCalled();
