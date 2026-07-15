@@ -2031,6 +2031,28 @@ export interface GrokCliStatus {
   ready: boolean;
 }
 
+export interface OllamaProviderSettings {
+  enabled: boolean;
+  endpoint: string;
+  think: boolean;
+  numCtx: number;
+  executorEnabled: boolean;
+  models: Array<{
+    id: string;
+    name: string;
+    digest?: string;
+    sizeBytes?: number;
+    modifiedAt?: string;
+    capabilities: string[];
+    toolCallingVerified: boolean;
+  }>;
+}
+
+export interface OllamaProviderStatus {
+  ollama: OllamaProviderSettings;
+  ready: boolean;
+}
+
 export interface LlamaCppStatus {
   enabled: boolean;
   extension: {
@@ -2105,6 +2127,23 @@ export function fetchCursorCliStatus(): Promise<CursorCliStatus> {
 
 export function fetchGrokCliStatus(): Promise<GrokCliStatus> {
   return api<GrokCliStatus>("/providers/grok-cli/status");
+}
+
+/** Read first-class native Ollama configuration and safe discovered model metadata. */
+export function fetchOllamaStatus(): Promise<OllamaProviderStatus> {
+  return api<OllamaProviderStatus>("/ollama/status");
+}
+
+export function updateOllamaConfig(config: Partial<Omit<OllamaProviderSettings, "models">>): Promise<OllamaProviderStatus> {
+  return api<OllamaProviderStatus>("/ollama/config", { method: "PUT", body: JSON.stringify(config) });
+}
+
+export function connectOllama(config: Partial<Omit<OllamaProviderSettings, "models">>): Promise<OllamaProviderStatus> {
+  return api<OllamaProviderStatus>("/ollama/connect", { method: "POST", body: JSON.stringify(config) });
+}
+
+export function refreshOllamaModels(): Promise<OllamaProviderStatus> {
+  return api<OllamaProviderStatus>("/ollama/refresh", { method: "POST" });
 }
 
 /** Probe llama.cpp server + setting + extension state. */

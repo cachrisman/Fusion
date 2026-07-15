@@ -14,6 +14,9 @@ import type { StalePausedTodoSignal } from "./stale-paused-todo.js";
 import type { StalledReviewSignal } from "./stalled-review-detector.js";
 import type { TaskAgeStalenessSignal } from "./task-age-staleness.js";
 import type { SecretScope } from "./secrets-store.js";
+import type { OllamaSettings } from "./ollama-settings.js";
+export { DEFAULT_OLLAMA_SETTINGS, resolveOllamaSettings } from "./ollama-settings.js";
+export type { OllamaModelMetadata, OllamaSettings } from "./ollama-settings.js";
 
 export {
   computeCapacityRisk,
@@ -3428,6 +3431,8 @@ export interface GlobalSettings {
   /** Pluggable notification providers configuration. Additive to legacy ntfy
    *  settings so existing ntfy configuration continues working unchanged. */
   notificationProviders?: NotificationProviderConfig[];
+  /** Named native Ollama configuration and safe discovered model metadata. */
+  ollama?: OllamaSettings;
   /** User-defined OpenAI/Anthropic-compatible API providers. */
   customProviders?: CustomProvider[];
   /** The default project ID for CLI operations when --project flag is not provided.

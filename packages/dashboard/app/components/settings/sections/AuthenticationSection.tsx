@@ -6,6 +6,7 @@ import { ClaudeCliProviderCard } from "../../ClaudeCliProviderCard";
 import { CursorCliProviderCard } from "../../CursorCliProviderCard";
 import { GrokCliProviderCard } from "../../GrokCliProviderCard";
 import { LlamaCppProviderCard } from "../../LlamaCppProviderCard";
+import { OllamaProviderCard } from "../../OllamaProviderCard";
 import { ProviderIcon } from "../../ProviderIcon";
 import { PluginSlot } from "../../PluginSlot";
 import { LoginInstructions } from "../../LoginInstructions";
@@ -195,6 +196,7 @@ export function AuthenticationSection({ auth }: AuthenticationSectionProps) {
     */
     return (<>
       <h4 className="settings-section-heading">{t("settings.auth.title", "Authentication")}</h4>
+      <OllamaProviderCard onChanged={handleCliProviderToggled} />
       {authLoading ? (<div className="settings-empty-state"><LoadingSpinner label={t("settings.auth.loadingStatus", "Loading authentication status…")} /></div>) : authProviders.length === 0 ? (<div className="settings-empty-state settings-muted">
           {t("settings.auth.noProviders", "No providers available")}
         </div>) : (<div className="auth-panel-body">

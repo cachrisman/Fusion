@@ -68,6 +68,7 @@ import { createFusionAuthStorage, getModelRegistryModelsPath } from "./auth-stor
 import { piLog, extensionsLog } from "./logger.js";
 import { readCustomProviders } from "./custom-providers.js";
 import { buildCustomProviderModels } from "./custom-provider-registry.js";
+import { readNativeOllamaSettings, registerNativeOllamaApiProvider, registerNativeOllamaProvider } from "./ollama-provider.js";
 import {
   buildGateRejection,
   evaluateAgentActionGate,
@@ -2338,11 +2339,13 @@ function withMcpPromptOptions(promptOptions: unknown, mcpServers: ResolvedMcpSer
  * `validateModelSlotSelection`.
  */
 export async function buildExecutionModelRegistry(cwd: string): Promise<ModelRegistry> {
+  registerNativeOllamaApiProvider();
   const authStorage = createFusionAuthStorage();
   const modelRegistry = ModelRegistry.create(authStorage, getModelRegistryModelsPath());
   const resolvedProjectRoot = getProjectRootFromWorktree(cwd) ?? resolvePiExtensionProjectRoot(cwd);
   await registerExtensionProviders(resolvedProjectRoot, modelRegistry);
 
+  registerNativeOllamaProvider(modelRegistry, readNativeOllamaSettings());
   const customProviders = readCustomProviders();
   for (const provider of customProviders) {
     try {
@@ -2367,6 +2370,7 @@ export async function buildExecutionModelRegistry(cwd: string): Promise<ModelReg
 }
 
 export async function createFnAgent(options: AgentOptions): Promise<AgentResult> {
+  registerNativeOllamaApiProvider();
   piLog.log(`createFnAgent called (tools=${options.tools}, provider=${options.defaultProvider}, model=${options.defaultModelId})`);
   // FNXC:McpConfig 2026-06-25-22:02:
   // The pi session is the final shared forwarding seam for direct createFnAgent lanes. Forward the resolved MCP set only to MCP-capable provider/runtime combinations and keep unsupported lanes content-free by logging just provider/runtime/count metadata.
@@ -2384,6 +2388,7 @@ export async function createFnAgent(options: AgentOptions): Promise<AgentResult>
   const resolvedProjectRoot = getProjectRootFromWorktree(options.cwd) ?? resolvePiExtensionProjectRoot(options.cwd);
   await registerExtensionProviders(resolvedProjectRoot, modelRegistry, options.pluginRunner);
 
+  registerNativeOllamaProvider(modelRegistry, readNativeOllamaSettings());
   const customProviders = readCustomProviders();
   for (const provider of customProviders) {
     try {

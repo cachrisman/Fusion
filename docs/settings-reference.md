@@ -1716,3 +1716,7 @@ Hard cap → pause with `pausedReason: "token_budget_exceeded"`. Soft cap → on
 ## Model presets
 
 Standardize executor/validator pairs; auto-selectable by task size (Small → Budget, Medium → Normal, Large → Complex).
+
+### `ollama` (global)
+
+Native Ollama machine settings: `enabled` (false), `endpoint` (`http://localhost:11434`), `think` (false), `numCtx` (32768), safe discovered `models`, and `executorEnabled` (false). Models record normalized native capabilities and `toolCallingVerified`; executor use requires both the opt-in and that flag. This setting is separate from `customProviders`; no existing Ollama-compatible record is migrated or altered.

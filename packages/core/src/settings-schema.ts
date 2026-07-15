@@ -1,4 +1,5 @@
 import { DEFAULT_MAX_AUTO_MERGE_RETRIES } from "./in-review-stall.js";
+import { DEFAULT_OLLAMA_SETTINGS } from "./ollama-settings.js";
 import type { CliAgentSettings, GlobalSettings, McpOAuthAuth, McpSecretRef, McpServerDefinition, ProjectSettings, Settings } from "./types.js";
 
 export interface MergeRequestContractShadowSettingsSource {
@@ -155,6 +156,12 @@ export const DEFAULT_GLOBAL_SETTINGS = {
   webhookFormat: "generic",
   webhookEvents: [],
   notificationProviders: [],
+  /*
+  FNXC:OllamaProvider 2026-07-15-00:00:
+  FUSI-099 seeds machine-global native `/api/*` Ollama settings here so old
+  settings files safely hydrate without any Custom Provider migration.
+  */
+  ollama: { ...DEFAULT_OLLAMA_SETTINGS },
   customProviders: [],
   defaultProjectId: undefined,
   setupComplete: undefined,

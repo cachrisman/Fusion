@@ -175,6 +175,7 @@ import { registerPluginsAutomationRoutes } from "./routes/register-plugins-autom
 import { registerProxyRoutes } from "./routes/register-proxy-routes.js";
 import { registerModelRoutes } from "./routes/register-model-routes.js";
 import { registerCustomProviderRoutes } from "./routes/register-custom-provider-routes.js";
+import { registerOllamaRoutes } from "./routes/register-ollama-routes.js";
 import { registerUsageRoutes } from "./routes/register-usage-routes.js";
 import { registerCommandCenterRoutes } from "./routes/register-command-center-routes.js";
 import { registerKnowledgeRoutes } from "./routes/register-knowledge-routes.js";
@@ -2244,6 +2245,7 @@ export function createApiRoutes(store: TaskStore, options?: ServerOptions): Rout
   // Models
   registerModelRoutes(routeContext);
   registerCustomProviderRoutes(routeContext);
+  registerOllamaRoutes(routeContext);
 
   // ---------- Auth routes ----------
   registerAuthRoutes(routeContext);

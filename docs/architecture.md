@@ -2286,3 +2286,7 @@ Reliability-layer changes are in scope. Interaction regression backstops live in
 - FN-5223 backstop: `packages/engine/src/__tests__/reliability-interactions/engine-active-since-floor.test.ts` covers engine-activation floor + grace composition across startup, pause/unpause, global-pause gating, and StuckTaskDetector lifecycle interactions.
 
 The auto-recovery dispatcher at `packages/engine/src/auto-recovery.ts` (FN-4533) composes on top of existing layers (FN-4500 fast-path, FN-4508 deterministic branch-conflict, FN-4499 bootstrap-misbinding, FN-4428 contamination, `mergeAuditAutoRecovery` Stages 1–5, self-healing) to handle six residual classes: file-scope violation at squash, branch misbinding / ghost worktree, verification-fix scope leak, contamination, `branch-conflict-unrecoverable` residuals, and room-post/message-send failures. Invocation is additive — no existing layer's behavior changes.
+
+### Native Ollama provider
+
+Dashboard routes `/api/ollama/status`, `/api/ollama/config`, `/api/ollama/connect`, and `/api/ollama/refresh` persist the named global native provider and discover models through `/api/tags` and `/api/show`. Runtime registration uses `ollama/<id>` and the unique `fusion-ollama-native` pi dispatch API for native `/api/chat` NDJSON streaming; it never shares the OpenAI-compatible dispatch path.

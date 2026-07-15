@@ -19,6 +19,7 @@ import {
   registerBuiltInGrokProvider,
   registerBuiltInZaiProvider,
   type CustomProvider,
+  type OllamaSettings,
   type TaskStore,
 } from "@fusion/core";
 import type { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
@@ -27,10 +28,11 @@ import {
   type DashboardAuthStorage,
 } from "./provider-auth.js";
 import { registerCustomProviders, reregisterCustomProviders } from "./custom-provider-registry.js";
+import { registerNativeOllamaProvider } from "./ollama-provider.js";
 
 export interface SeedDashboardProvidersStore {
   getGlobalSettingsStore(): {
-    getSettings(): Promise<{ customProviders?: CustomProvider[] }>;
+    getSettings(): Promise<{ customProviders?: CustomProvider[]; ollama?: OllamaSettings }>;
   };
   on: TaskStore["on"];
   off: TaskStore["off"];
@@ -78,24 +80,27 @@ export async function seedDashboardProviders(
       globalSettings.customProviders,
       (message) => log("custom-providers", message),
     );
+    if (globalSettings.ollama) registerNativeOllamaProvider(modelRegistry, globalSettings.ollama);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log("custom-providers", `Failed to load custom providers from global settings: ${message}`);
   }
 
-  const onSettingsUpdated = (data: { settings: { customProviders?: CustomProvider[] }; previous: { customProviders?: CustomProvider[] } }) => {
+  const onSettingsUpdated = (data: { settings: { customProviders?: CustomProvider[]; ollama?: OllamaSettings }; previous: { customProviders?: CustomProvider[]; ollama?: OllamaSettings } }) => {
     const currentProviders = data.settings.customProviders;
     const previousProviders = data.previous.customProviders;
-    if (JSON.stringify(currentProviders ?? []) === JSON.stringify(previousProviders ?? [])) {
-      return;
+    if (JSON.stringify(currentProviders ?? []) !== JSON.stringify(previousProviders ?? [])) {
+      reregisterCustomProviders(
+        modelRegistry,
+        previousProviders,
+        currentProviders,
+        (message) => log("custom-providers", message),
+      );
+    }
+    if (JSON.stringify(data.settings.ollama ?? null) !== JSON.stringify(data.previous.ollama ?? null) && data.settings.ollama) {
+      registerNativeOllamaProvider(modelRegistry, data.settings.ollama);
     }
 
-    reregisterCustomProviders(
-      modelRegistry,
-      previousProviders,
-      currentProviders,
-      (message) => log("custom-providers", message),
-    );
   };
 
   store.on("settings:updated", onSettingsUpdated);

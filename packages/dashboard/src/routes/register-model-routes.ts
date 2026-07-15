@@ -169,6 +169,7 @@ export const registerModelRoutes: ApiRouteRegistrar = (ctx) => {
     let resolvedPlanningProvider: string | undefined;
     let resolvedPlanningModelId: string | undefined;
     let customProviders: CustomProvider[] = [];
+    let nativeOllamaEnabled = false;
     if (store) {
       try {
         const globalStore = store.getGlobalSettingsStore();
@@ -206,6 +207,7 @@ export const registerModelRoutes: ApiRouteRegistrar = (ctx) => {
         grokCliBinaryPath =
           typeof rawGrokCliBinaryPath === "string" ? rawGrokCliBinaryPath.trim() || undefined : undefined;
         customProviders = globalSettings.customProviders ?? [];
+        nativeOllamaEnabled = globalSettings.ollama?.enabled === true && (globalSettings.ollama.models?.length ?? 0) > 0;
 
         const mergedSettings = await store.getSettingsFast();
         const resolvedPlanningModel = resolvePlanningSettingsModel(mergedSettings);
@@ -294,6 +296,9 @@ export const registerModelRoutes: ApiRouteRegistrar = (ctx) => {
       }
       if (!useGrokCli) {
         models = models.filter((m) => m.provider !== "grok-cli");
+      }
+      if (!nativeOllamaEnabled) {
+        models = models.filter((m) => m.provider !== "ollama");
       }
 
       /*
@@ -438,6 +443,7 @@ export const registerModelRoutes: ApiRouteRegistrar = (ctx) => {
       // above, mirroring the useClaudeCli/useDroidCli toggle pattern (Hermes
       // has no separate settings toggle — profile presence IS the signal).
       if (hermesRowsAdded) configuredProviders.add(HERMES_PICKER_PROVIDER_ID);
+      if (nativeOllamaEnabled) configuredProviders.add("ollama");
       // Custom providers are configured in Fusion's global settings rather than
       // the auth.json/models.json stores, so add their registry keys explicitly.
       for (const provider of customProviders) {

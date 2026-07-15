@@ -38,6 +38,7 @@ import {
 } from "./pi.js";
 import type { RunAuditor } from "./run-audit.js";
 import { MockAgentRuntime } from "./providers/mock-provider.js";
+import { assertNativeOllamaExecutorAllowed } from "./ollama-provider.js";
 
 /** Logger for agent session helpers */
 const sessionLog = createLogger("agent-session");
@@ -629,6 +630,12 @@ export async function createResolvedAgentSession(
   options: ResolvedSessionOptions,
 ): Promise<ResolvedSessionResult> {
   const { sessionPurpose, pluginRunner, runtimeHint, runAuditor, settings, ...runtimeOptionsRaw } = options;
+
+  /* FNXC:OllamaExecutorSafety 2026-07-15-00:00: every executor-purpose session, including retries and workflow/child sessions that use this shared seam, requires opt-in plus exact verified native tools. */
+  if (sessionPurpose === "executor") {
+    assertNativeOllamaExecutorAllowed(runtimeOptionsRaw.defaultProvider, runtimeOptionsRaw.defaultModelId, settings ?? {});
+    assertNativeOllamaExecutorAllowed(runtimeOptionsRaw.fallbackProvider, runtimeOptionsRaw.fallbackModelId, settings ?? {});
+  }
 
   const skillNamesFromSelection = extractSkillNamesFromSelection(runtimeOptionsRaw.skillSelection);
   const mergedSkillNames = runtimeOptionsRaw.skills && runtimeOptionsRaw.skills.length > 0

@@ -2056,3 +2056,7 @@ done
 ```
 
 If the endpoint is unavailable on the running dashboard build, the response will be `{"error":"Not found"}` until a build containing the branch-group router is deployed.
+
+### Native Ollama
+
+Settings → Authentication includes a native Ollama card. Configure its HTTP(S) endpoint (default `http://localhost:11434`), use Connect/Test or Refresh models, and select discovered `ollama/<model>` entries. Fusion uses Ollama's native `/api/*` endpoints, not a Custom Provider; existing Custom Provider records are not changed. `think` defaults to off and `num_ctx` to 32768. Executor sessions additionally require the global executor opt-in and tools verified for that exact discovered model.

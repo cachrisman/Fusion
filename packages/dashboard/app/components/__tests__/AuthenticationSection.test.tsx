@@ -38,6 +38,9 @@ vi.mock("../CursorCliProviderCard", () => ({
     <div data-testid="cursor-cli-provider-card" data-authenticated={authenticated ? "true" : "false"} />
   ),
 }));
+vi.mock("../OllamaProviderCard", () => ({
+  OllamaProviderCard: () => <div data-testid="ollama-provider-card" />,
+}));
 vi.mock("../LlamaCppProviderCard", () => ({
   LlamaCppProviderCard: ({ authenticated }: { authenticated: boolean }) => (
     <div data-testid="llama-cpp-provider-card" data-authenticated={authenticated ? "true" : "false"} />
@@ -101,6 +104,12 @@ function renderAuthSection(providers: AuthProvider[], overrides: Partial<Authent
 describe("AuthenticationSection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("renders exactly one native Ollama card outside generic and Custom Provider rows", () => {
+    renderAuthSection([{ id: "openai", name: "OpenAI", authenticated: false, type: "api_key" }]);
+    expect(screen.getAllByTestId("ollama-provider-card")).toHaveLength(1);
+    expect(screen.getByTestId("custom-providers-section")).not.toContainElement(screen.getByTestId("ollama-provider-card"));
   });
 
   it("sorts visible Anthropic standard providers together near the top", () => {
