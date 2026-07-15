@@ -159,11 +159,88 @@ describe("execute requeue loop guard", () => {
     );
   });
 
-  it("resets the streak on real step progress and never terminalizes", async () => {
-    const h = harness(task({ id: "FN-7863-PROGRESS", column: "todo" }));
+  it("terminalizes drifting-signature execute self-requeues with no monotonic step progress", async () => {
+    const h = harness(task({
+      id: "FN-7941-DRIFT",
+      column: "todo",
+      steps: [
+        { name: "Preflight", status: "pending" },
+        { name: "Implement", status: "pending" },
+      ],
+      currentStep: 0,
+    }));
 
-    for (let i = 0; i < MAX_EXECUTE_REQUEUE_LOOP_CYCLES + 3; i += 1) {
-      h.setLive({ currentStep: i, steps: [{ name: `Step ${i}`, status: i % 2 === 0 ? "pending" : "in-progress" }] as any });
+    for (let i = 0; i < MAX_EXECUTE_REQUEUE_LOOP_CYCLES; i += 1) {
+      h.setLive({
+        currentStep: i % 2,
+        steps: [
+          { name: "Preflight", status: i % 2 === 0 ? "pending" : "in-progress" },
+          { name: "Implement", status: i % 2 === 0 ? "in-progress" : "pending" },
+        ],
+      });
+      await failAtExecute(h.executor, h.live);
+    }
+
+    expect(h.store.updateTask).toHaveBeenCalledWith(
+      "FN-7941-DRIFT",
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringMatching(/^EXECUTION_DISPATCH_LOOP_EXHAUSTED:/),
+        executeRequeueLoopCount: MAX_EXECUTE_REQUEUE_LOOP_CYCLES,
+      }),
+      undefined,
+    );
+    expect(h.store.recordRunAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      mutationType: "task:execution-dispatch-loop-terminalized",
+      metadata: expect.objectContaining({
+        taskId: "FN-7941-DRIFT",
+        cycleCount: MAX_EXECUTE_REQUEUE_LOOP_CYCLES,
+      }),
+    }));
+  });
+
+  it("bounds done-to-in-progress signature oscillation after the terminal-step high-water stops increasing", async () => {
+    const h = harness(task({
+      id: "FN-7941-DONE-OSCILLATION",
+      column: "todo",
+      steps: [{ name: "Implement", status: "in-progress" }],
+      currentStep: 0,
+    }));
+
+    for (let i = 0; i < MAX_EXECUTE_REQUEUE_LOOP_CYCLES + 1; i += 1) {
+      h.setLive({
+        steps: [{ name: "Implement", status: i % 2 === 0 ? "in-progress" : "done" }],
+      });
+      await failAtExecute(h.executor, h.live);
+    }
+
+    expect(h.store.updateTask).toHaveBeenCalledWith(
+      "FN-7941-DONE-OSCILLATION",
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringMatching(/^EXECUTION_DISPATCH_LOOP_EXHAUSTED:/),
+        executeRequeueLoopCount: MAX_EXECUTE_REQUEUE_LOOP_CYCLES,
+      }),
+      undefined,
+    );
+  });
+
+  it("resets the streak on real step progress and never terminalizes", async () => {
+    const stepCount = MAX_EXECUTE_REQUEUE_LOOP_CYCLES + 3;
+    const h = harness(task({
+      id: "FN-7863-PROGRESS",
+      column: "todo",
+      steps: Array.from({ length: stepCount }, (_, index) => ({ name: `Step ${index}`, status: "pending" })),
+    }));
+
+    for (let i = 0; i < stepCount; i += 1) {
+      h.setLive({
+        currentStep: i,
+        steps: Array.from({ length: stepCount }, (_, index) => ({
+          name: `Step ${index}`,
+          status: index <= i ? "done" : index === i + 1 ? "in-progress" : "pending",
+        })) as any,
+      });
       await failAtExecute(h.executor, h.live);
     }
 

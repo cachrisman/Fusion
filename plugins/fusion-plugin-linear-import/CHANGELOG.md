@@ -1,5 +1,12 @@
 # @fusion-plugin-examples/linear-import
 
+## 0.1.7
+
+### Patch Changes
+
+- @fusion/core@0.60.0
+- @fusion/plugin-sdk@0.60.0
+
 ## 0.1.6
 
 ### Patch Changes

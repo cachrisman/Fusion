@@ -1,5 +1,34 @@
 # @runfusion/fusion
 
+## 0.60.0
+
+### Minor Changes
+
+- f0888d4: summary: Open tasks as popups now applies to List clicks with the same movable task window as the Board.
+  category: feature
+  dev: Threads openMobileTasksInPopup App -> MainContent -> ListView; ListView.handleRowClick routes to onPopOut/popOutTaskDetail (floating-window--task-detail) when enabled, on both desktop split-pane and mobile/tablet single-pane, preserving docked behavior when off.
+- 7cc622b: summary: Planning Mode now auto-retries a stuck AI generation up to 3 times before showing an error.
+  category: feature
+  dev: Bounded client-side auto-retry in PlanningModeModal reusing the existing /planning/:id/retry endpoint; counter resets on successful progress and is single-flighted across SSE onError, reopen, and the stuck poll.
+- 4e7e013: summary: Add a Plan action to planning/ideas/hold task cards that opens Planning Mode from the card.
+  category: feature
+  dev: Board and List task context menus now gate Plan on pre-execution hold/intake columns and wired planning handlers.
+- d4001ab: summary: Make the merger AI model configurable under Global and Project Models.
+  category: feature
+  dev: Adds project `mergerProvider`/`mergerModelId`/`mergerThinkingLevel` and global `mergerGlobalProvider`/`mergerGlobalModelId`/`mergerGlobalThinkingLevel`. Resolution is project merger → global merger → project/global default; does not inherit executor/planner/reviewer lanes.
+
+### Patch Changes
+
+- 281bb05: summary: Fix bundled example plugins failing to enable with a missing @fusion/core package error.
+  category: fix
+  dev: Aliases bundlePluginEntry @fusion/core imports to pluginSdkCoreRuntimeShim for self-contained bundled.js outputs.
+- e35620c: summary: Fix agents silently going stale for hours even though the heartbeat repair audit was running.
+  category: fix
+  dev: HeartbeatTriggerScheduler now supervises its own audit setInterval (a stalled/dropped audit driver is re-armed within a bounded window) and bounds/escalates non-advancing zombie-timer re-arms instead of churning silently, closing the ~62,348s silent-heartbeat window that survived the FN-7645/FN-7718 fixes (FN-7939).
+- cf1b33b: summary: Settings search now surfaces Project Models Chat default settings when searching for chat.
+  category: fix
+  dev: Adds chat-default searchableText/searchableKeys to the project-models entry in SETTINGS_SECTIONS (SettingsModal.tsx); fixes FN-7907 search-index drift.
+
 ## 0.59.0
 
 ### Minor Changes

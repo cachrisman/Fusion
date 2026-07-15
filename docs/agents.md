@@ -1275,17 +1275,19 @@ Heartbeat runs from the Agents panel run on a **separate control-plane lane** th
 Cadence:
 - **Immediate startup audit**: runs once in `start()` after lifecycle watchers are attached
 - **Periodic audit**: runs every 60s while the scheduler is active
-- **Cleanup**: periodic sweep interval is cleared in `stop()`
+- **FN-7939 audit watchdog**: an independent watchdog supervises the 60s audit driver and re-arms/runs it when the audit liveness timestamp is stale for a bounded multiple of the cadence
+- **Cleanup**: periodic sweep and watchdog intervals are cleared in `stop()`
 
 Repair eligibility:
 - Durable (non-ephemeral/task-worker) agent
 - `runtimeConfig.enabled !== false`
 - Agent state is tickable: `active`, `running`, or `idle`
-- Agent is missing from the scheduler's in-memory `timers` map
+- Agent is missing from the scheduler's in-memory `timers` map, or has a present timer entry but `lastHeartbeatAt` is stale beyond the repair threshold (zombie timer)
 
 Repair outcomes:
 - **Missing timer, not stale**: timer is re-armed and INFO diagnostics are logged (`agentId`, resolved interval, elapsed time since `lastHeartbeatAt`)
-- **Missing timer, stale**: timer is re-armed, WARN diagnostics are logged, and `agent.metadata.heartbeatTimerRepair` is updated (`repairedAt`, `staleAtRepair`, `elapsedMs`, `staleThresholdMs`)
+- **Missing/present timer, stale**: timer is re-armed, WARN diagnostics are logged, and `agent.metadata.heartbeatTimerRepair` is updated (`repairedAt`, `staleAtRepair`, `staleRepairReason`)
+- **Repeated non-advancing zombie repair**: after the bounded scheduler threshold, metadata includes the consecutive count/escalation flag and logs `reason=heartbeat-rearm-nonadvancing-escalated` instead of silently churning forever
 
 Stale threshold:
 - Repair staleness defaults to **`2 × heartbeatIntervalMs`**

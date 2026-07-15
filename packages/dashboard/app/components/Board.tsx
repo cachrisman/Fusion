@@ -943,6 +943,7 @@ export function Board({ tasks, projectId, maxConcurrent, showWorktreeGrouping, o
                   onDuplicateTask={onDuplicateTask}
                   onMergeTask={onMergeTask}
                   onOpenDetail={onOpenDetail}
+                  onPlanningMode={onPlanningMode}
                   onOpenRefine={onOpenRefine}
                   onOpenGroupModal={onOpenGroupModal}
                   addToast={addToast}
@@ -973,7 +974,7 @@ export function Board({ tasks, projectId, maxConcurrent, showWorktreeGrouping, o
                   mergeStrategy={mergeStrategy}
                   // FNXC:PlanApproval 2026-07-07-00:00: FN-7653 — the plan auto-approve shortcut belongs only to the intake/planning column, never to hold (Todo-like) columns; the built-in Coding workflow's Todo column carries the hold trait and was wrongly receiving this prop pair.
                   {...((columnDef.flags.intake && !columnDef.flags.archived && !columnDef.flags.complete && !columnDef.flags.countsTowardWip && !columnDef.flags.mergeBlocker && !columnDef.flags.humanReview) ? { planAutoApproveEnabled, onTogglePlanAutoApprove } : {})}
-                  {...(isCreateColumn && aggregateQuickCreateTarget ? { workflowId: aggregateQuickCreateTarget.workflowId, workflowOptions, defaultWorkflowId: boardWorkflows?.defaultWorkflowId ?? null, onQuickCreate: handleAggregateWorkflowQuickCreate, onNewTask, onPlanningMode, onSubtaskBreakdown } : {})}
+                  {...(isCreateColumn && aggregateQuickCreateTarget ? { workflowId: aggregateQuickCreateTarget.workflowId, workflowOptions, defaultWorkflowId: boardWorkflows?.defaultWorkflowId ?? null, onQuickCreate: handleAggregateWorkflowQuickCreate, onNewTask, onSubtaskBreakdown } : {})}
                   {...(columnDef.flags.mergeBlocker || columnDef.flags.humanReview ? { onToggleAutoMerge: handleToggleAutoMerge } : {})}
                   {...(columnDef.id === "done" ? { onArchiveAllDone } : {})}
                   {...(isDoneLikeColumn ? { doneSortMode, onDoneSortModeChange: setDoneSortMode } : {})}
@@ -1028,6 +1029,7 @@ export function Board({ tasks, projectId, maxConcurrent, showWorktreeGrouping, o
                 onDuplicateTask={onDuplicateTask}
                 onMergeTask={onMergeTask}
                 onOpenDetail={onOpenDetail}
+                onPlanningMode={onPlanningMode}
                 onOpenRefine={onOpenRefine}
                 onOpenGroupModal={onOpenGroupModal}
                 addToast={addToast}
@@ -1056,7 +1058,7 @@ export function Board({ tasks, projectId, maxConcurrent, showWorktreeGrouping, o
                 mergeStrategy={mergeStrategy}
                 // FNXC:PlanApproval 2026-07-07-00:00: FN-7653 — the plan auto-approve shortcut belongs only to the intake/planning column, never to hold (Todo-like) columns; the built-in Coding workflow's Todo column carries the hold trait and was wrongly receiving this prop pair.
                 {...((columnDef.flags.intake && !columnDef.flags.archived && !columnDef.flags.complete && !columnDef.flags.countsTowardWip && !columnDef.flags.mergeBlocker && !columnDef.flags.humanReview) ? { planAutoApproveEnabled, onTogglePlanAutoApprove } : {})}
-                {...(isCreateColumn ? { workflowOptions, defaultWorkflowId: selectedWorkflow.id, onQuickCreate: handleWorkflowQuickCreate, onNewTask, onPlanningMode, onSubtaskBreakdown } : {})}
+                {...(isCreateColumn ? { workflowOptions, defaultWorkflowId: selectedWorkflow.id, onQuickCreate: handleWorkflowQuickCreate, onNewTask, onSubtaskBreakdown } : {})}
                 {...(columnDef.flags.mergeBlocker || columnDef.flags.humanReview ? { onToggleAutoMerge: handleToggleAutoMerge } : {})}
                 {...(columnDef.id === "done" ? { onArchiveAllDone } : {})}
                 {...(isWorkflowDoneLikeColumn ? { doneSortMode, onDoneSortModeChange: setDoneSortMode } : {})}
@@ -1087,6 +1089,7 @@ export function Board({ tasks, projectId, maxConcurrent, showWorktreeGrouping, o
               onDuplicateTask={onDuplicateTask}
               onMergeTask={onMergeTask}
               onOpenDetail={onOpenDetail}
+              onPlanningMode={onPlanningMode}
               onOpenRefine={onOpenRefine}
               onOpenGroupModal={onOpenGroupModal}
               addToast={addToast}
@@ -1143,6 +1146,7 @@ export function Board({ tasks, projectId, maxConcurrent, showWorktreeGrouping, o
             onDuplicateTask={onDuplicateTask}
             onMergeTask={onMergeTask}
             onOpenDetail={onOpenDetail}
+            onPlanningMode={onPlanningMode}
             onOpenRefine={onOpenRefine}
             onOpenGroupModal={onOpenGroupModal}
             addToast={addToast}
@@ -1171,7 +1175,7 @@ export function Board({ tasks, projectId, maxConcurrent, showWorktreeGrouping, o
             autoMerge={autoMerge}
             mergeStrategy={mergeStrategy}
             {...(col === "triage" ? { planAutoApproveEnabled, onTogglePlanAutoApprove } : {})}
-            {...(col === "triage" ? { onQuickCreate, onNewTask, onPlanningMode, onSubtaskBreakdown } : {})}
+            {...(col === "triage" ? { onQuickCreate, onNewTask, onSubtaskBreakdown } : {})}
             {...(col === "in-review" ? { onToggleAutoMerge: handleToggleAutoMerge } : {})}
             {...(col === "done" ? { onArchiveAllDone, doneSortMode, onDoneSortModeChange: setDoneSortMode } : {})}
             {...(col === "archived" ? { collapsed: archivedCollapsed, onToggleCollapse: handleToggleArchivedCollapse, archivedHasMore, archivedLoadingMore, onLoadMoreArchived: onLoadMoreArchivedTasks } : {})}

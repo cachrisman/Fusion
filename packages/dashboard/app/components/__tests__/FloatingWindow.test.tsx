@@ -8,6 +8,15 @@ const floatingWindowCss = readFileSync("app/components/FloatingWindow.css", "utf
 const allAppCss = loadAllAppCss();
 const stylesCss = loadStylesCss();
 
+const QUICK_CHAT_PORTALED_MENU_CLASSES = [
+  "model-combobox-dropdown--portal",
+  "model-nested-menu--portal",
+  "dep-dropdown--portal",
+  "node-picker-dropdown--portal",
+  "agent-picker-dropdown--portal",
+  "priority-picker-dropdown--portal",
+] as const;
+
 function cssRuleFor(css: string, selector: string): string {
   const start = css.indexOf(`${selector} {`);
   if (start === -1) return "";
@@ -372,6 +381,47 @@ describe("FloatingWindow", () => {
       surface.remove();
       unmount();
     }
+  });
+
+  it("does not close when pointerdown targets Quick Chat's body-portaled dropdown surfaces", () => {
+    for (const portalClassName of QUICK_CHAT_PORTALED_MENU_CLASSES) {
+      const onClose = vi.fn();
+      const { unmount } = render(
+        <FloatingWindow windowKey={`portal-safe-${portalClassName}`} title="Portal safe" onClose={onClose} closeOnOutsidePointerDown>
+          <div>chat body</div>
+        </FloatingWindow>
+      );
+      const portalSurface = document.createElement("div");
+      portalSurface.className = portalClassName;
+      document.body.appendChild(portalSurface);
+
+      fireEvent.pointerDown(portalSurface);
+
+      expect(onClose).not.toHaveBeenCalled();
+      portalSurface.remove();
+      unmount();
+    }
+  });
+
+  it("does not close when pointerdown targets an element inside a Quick Chat body-portaled dropdown", () => {
+    const onClose = vi.fn();
+    render(
+      <FloatingWindow windowKey="portal-child-safe" title="Portal child safe" onClose={onClose} closeOnOutsidePointerDown>
+        <div>chat body</div>
+      </FloatingWindow>
+    );
+    const portalSurface = document.createElement("div");
+    portalSurface.className = "model-combobox-dropdown--portal";
+    const option = document.createElement("button");
+    option.type = "button";
+    option.textContent = "Model option";
+    portalSurface.appendChild(option);
+    document.body.appendChild(portalSurface);
+
+    fireEvent.pointerDown(option);
+
+    expect(onClose).not.toHaveBeenCalled();
+    portalSurface.remove();
   });
 
   it("does not close from outside pointerdown while a resize gesture is active", () => {

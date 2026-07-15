@@ -514,6 +514,102 @@ describe("TaskCard", () => {
     }
   });
 
+  it("opens Planning Mode from eligible pre-execution card menus only when wired", async () => {
+    const cleanupGeometry = mockBoardContextMenuGeometry();
+    const onPlanningMode = vi.fn();
+    try {
+      const { rerender } = render(
+        <TaskCard
+          task={makeTask({ column: "triage", description: "Plan from description", title: "Fallback title" })}
+          onOpenDetail={noop}
+          onPlanningMode={onPlanningMode}
+          planningWorkflowId="WF-intake"
+          addToast={noop}
+        />,
+      );
+
+      fireEvent.click(screen.getByTestId("card-menu-btn-FN-001"));
+      await waitFor(() => expectBoardContextMenuPortaled());
+      fireEvent.click(screen.getByRole("menuitem", { name: "Plan" }));
+      expect(onPlanningMode).toHaveBeenCalledWith("Plan from description", "WF-intake");
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+
+      rerender(
+        <TaskCard
+          task={makeTask({ column: "ideas" as any, description: "", title: "Custom intake title" })}
+          taskColumnFlags={{ intake: true }}
+          onOpenDetail={noop}
+          onPlanningMode={onPlanningMode}
+          planningWorkflowId="WF-custom"
+          addToast={noop}
+        />,
+      );
+      fireEvent.click(screen.getByTestId("card-menu-btn-FN-001"));
+      await waitFor(() => expectBoardContextMenuPortaled());
+      fireEvent.click(screen.getByRole("menuitem", { name: "Plan" }));
+      expect(onPlanningMode).toHaveBeenLastCalledWith("Custom intake title", "WF-custom");
+
+      rerender(
+        <TaskCard
+          task={makeTask({ column: "todo" })}
+          onOpenDetail={noop}
+          onPlanningMode={onPlanningMode}
+          addToast={noop}
+        />,
+      );
+      fireEvent.click(screen.getByTestId("card-menu-btn-FN-001"));
+      await waitFor(() => expectBoardContextMenuPortaled());
+      expect(screen.queryByRole("menuitem", { name: "Plan" })).not.toBeInTheDocument();
+      fireEvent.keyDown(document, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+
+      rerender(
+        <TaskCard
+          task={makeTask({ column: "triage" })}
+          onOpenDetail={noop}
+          addToast={noop}
+          onDeleteTask={vi.fn()}
+        />,
+      );
+      fireEvent.contextMenu(document.querySelector(".card")!, { clientX: 24, clientY: 28 });
+      expect(screen.queryByRole("menuitem", { name: "Plan" })).not.toBeInTheDocument();
+    } finally {
+      cleanupGeometry();
+    }
+  });
+
+  it("opens Planning Mode from the mobile/touch long-press menu for custom hold cards", async () => {
+    vi.useFakeTimers();
+    const cleanupGeometry = mockBoardContextMenuGeometry();
+    const onPlanningMode = vi.fn();
+    try {
+      render(
+        <TaskCard
+          task={makeTask({ column: "waiting" as any, description: "Touch plan seed" })}
+          taskColumnFlags={{ hold: true }}
+          onOpenDetail={noop}
+          onPlanningMode={onPlanningMode}
+          planningWorkflowId="WF-hold"
+          addToast={noop}
+        />,
+      );
+
+      const card = document.querySelector(".card") as HTMLElement;
+      fireEvent.pointerDown(card, { pointerType: "touch", pointerId: 1, clientX: 32, clientY: 36 });
+      act(() => vi.advanceTimersByTime(550));
+
+      expectBoardContextMenuPortaled();
+      fireEvent.pointerUp(screen.getByRole("menuitem", { name: "Plan" }), { pointerType: "touch", pointerId: 2 });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(onPlanningMode).toHaveBeenCalledWith("Touch plan seed", "WF-hold");
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    } finally {
+      cleanupGeometry();
+    }
+  });
+
   it("enables GitHub tracking from the board card context menu and hides the action after refresh", async () => {
     const cleanupGeometry = mockBoardContextMenuGeometry();
     const onOpenDetail = vi.fn();

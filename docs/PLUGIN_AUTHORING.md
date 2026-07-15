@@ -767,6 +767,9 @@ Bundled workspace plugin pattern:
 - Register the lazy dashboard component in host code (currently `packages/dashboard/app/plugins/registerBundledPluginViews.ts`)
 - CLI bundling inlines backend plugin code from workspace packages; dashboard view modules are imported by the dashboard build via the host registry
 
+<!-- FNXC:BundledPlugins 2026-07-13-00:00: FN-7936 requires `@runfusion/fusion` bundled plugin backend outputs to be install-self-contained. The CLI bundler resolves plugin-sdk runtime re-exports from `@fusion/core` through `plugin-sdk-core-runtime-shim.ts`, so `packages/cli/dist/plugins/<id>/bundled.js` must not ship private `@fusion/*` runtime specifiers that npm installs cannot resolve. -->
+Bundled `bundled.js` outputs must be self-contained at runtime. Do not leave private workspace package imports such as `@fusion/core` in emitted bundled plugin code; `@fusion/plugin-sdk` core runtime re-exports are resolved through the CLI runtime shim during packaging.
+
 ### Bundled plugin build-freshness guard
 
 <!-- FNXC:BundledPlugins 2026-06-17-22:31: Bundled plugins can load gitignored compiled artifacts before source during workspace/dev resolution, so plugin authors need a documented recovery path when the generic freshness guard detects stale dist output. -->

@@ -868,6 +868,8 @@ function ColumnComponent({ column, tasks, projectId, maxConcurrent, showWorktree
                   projectId={projectId}
                   onOpenDetail={onOpenDetail}
                   onOpenRefine={onOpenRefine}
+                  onPlanningMode={onPlanningMode}
+                  workflowId={workflowMode ? workflowId : undefined}
                   onMoveTask={onMoveTask}
                   addToast={addToast}
                   globalPaused={globalPaused}
@@ -909,6 +911,8 @@ function ColumnComponent({ column, tasks, projectId, maxConcurrent, showWorktree
                   task={task}
                   projectId={projectId}
                   onOpenDetail={onOpenDetail}
+                  onPlanningMode={onPlanningMode}
+                  planningWorkflowId={workflowMode ? workflowId : taskWorkflowBadges?.get(task.id)?.workflowId ?? null}
                   onOpenRefine={onOpenRefine}
                   onOpenGroupModal={onOpenGroupModal}
                   addToast={addToast}

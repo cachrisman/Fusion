@@ -485,6 +485,13 @@ interface TaskCardProps {
   projectId?: string;
   queued?: boolean;
   onOpenDetail: (task: Task | TaskDetail) => void;
+  /**
+   * FNXC:TaskCardPlanning 2026-07-13-00:00:
+   * Board/List cards in pre-execution hold columns can seed Planning Mode from their own task description/title. The callback is optional so read-only/dock hosts omit the Plan menu item instead of rendering a dead shell.
+   */
+  onPlanningMode?: (initialPlan: string, workflowId?: string | null) => void;
+  /** Workflow selection to preserve when Planning Mode is launched from workflow-aware board cards. */
+  planningWorkflowId?: string | null;
   onOpenRefine?: (task: Task | TaskDetail) => void;
   onOpenGroupModal?: (groupId: string) => void;
   addToast: (message: string, type?: ToastType) => void;
@@ -715,6 +722,7 @@ function areTaskCardPropsEqual(previous: TaskCardProps, next: TaskCardProps): bo
     previous.workflowBadge?.workflowId === next.workflowBadge?.workflowId &&
     previous.workflowBadge?.workflowName === next.workflowBadge?.workflowName &&
     previous.workflowBadge?.workflowIcon === next.workflowBadge?.workflowIcon &&
+    previous.planningWorkflowId === next.planningWorkflowId &&
     previous.taskColumnFlags === next.taskColumnFlags &&
     previous.taskMoveColumns === next.taskMoveColumns &&
     previous.cardFieldDefs === next.cardFieldDefs &&
@@ -722,6 +730,7 @@ function areTaskCardPropsEqual(previous: TaskCardProps, next: TaskCardProps): bo
       ? true
       : JSON.stringify(previousTask.customFields ?? null) === JSON.stringify(nextTask.customFields ?? null)) &&
     previous.onOpenDetail === next.onOpenDetail &&
+    previous.onPlanningMode === next.onPlanningMode &&
     previous.onOpenGroupModal === next.onOpenGroupModal &&
     previous.addToast === next.addToast &&
     previous.onUpdateTask === next.onUpdateTask &&
@@ -862,6 +871,8 @@ function TaskCardComponent({
   projectId,
   queued,
   onOpenDetail,
+  onPlanningMode,
+  planningWorkflowId,
   onOpenRefine,
   onOpenGroupModal,
   addToast,
@@ -2228,6 +2239,12 @@ function TaskCardComponent({
       .catch((err) => addToast(getErrorMessage(err), "error"));
   }, [addToast, confirm, onMergeTask, task.id, t]);
 
+  const handleTaskActionPlan = useCallback(() => {
+    const seed = (task.description ?? "").trim() || task.title || task.id;
+    const taskWorkflowId = (task as Task & { workflowId?: string | null }).workflowId;
+    onPlanningMode?.(seed, taskWorkflowId ?? planningWorkflowId ?? null);
+  }, [onPlanningMode, planningWorkflowId, task, task.description, task.id, task.title]);
+
   const handleTaskActionRespecify = useCallback(async () => {
     const shouldRebuild = await confirm({
       title: t("taskDetail.plan.rebuildTitle", "Rebuild Plan"),
@@ -2335,6 +2352,7 @@ function TaskCardComponent({
     prAutomationLabel: getTaskPrAutomationLabel(t, task.status),
     onDelete: onDeleteTask ? handleTaskActionDelete : undefined,
     onDuplicate: onDuplicateTask ? handleTaskActionDuplicate : undefined,
+    onPlan: onPlanningMode ? handleTaskActionPlan : undefined,
     onOpenRefine: onOpenRefine ? () => onOpenRefine(task) : undefined,
     onRespecify: handleTaskActionRespecify,
     onRetry: onRetryTask ? handleTaskActionRetry : undefined,
@@ -2362,6 +2380,7 @@ function TaskCardComponent({
     handleTaskActionEnableGithubTracking,
     handleTaskActionDuplicate,
     handleTaskActionMerge,
+    handleTaskActionPlan,
     handleTaskActionReset,
     handleTaskActionRespecify,
     handleTaskActionRetry,
@@ -2372,6 +2391,7 @@ function TaskCardComponent({
     onMergeTask,
     onUpdateTask,
     onOpenDetail,
+    onPlanningMode,
     onOpenRefine,
     onPauseTask,
     onUnpauseTask,
@@ -2381,7 +2401,7 @@ function TaskCardComponent({
     task.prInfo,
   ]);
   const contextMenuActions = useMemo<TaskMenuActionDescriptor[]>(() => {
-    if (!onDeleteTask && !onArchiveTask && !onUnarchiveTask && !onRevertTask && !onDuplicateTask && !onRetryTask && !onResetTask && !onPauseTask && !onUnpauseTask && !onMergeTask && !onMoveTask && !onOpenRefine && !onUpdateTask) {
+    if (!onDeleteTask && !onArchiveTask && !onUnarchiveTask && !onRevertTask && !onDuplicateTask && !onRetryTask && !onResetTask && !onPauseTask && !onUnpauseTask && !onMergeTask && !onMoveTask && !onPlanningMode && !onOpenRefine && !onUpdateTask) {
       return [];
     }
     const actions = [...taskActionMenuModel.actions];
@@ -2419,7 +2439,7 @@ function TaskCardComponent({
       }
     }
     return actions.filter((action) => action.tone === "note" || action.disabled === true || Boolean(action.onSelect));
-  }, [handleTaskActionArchive, handleTaskActionMove, handleTaskActionRevert, handleTaskActionUnarchive, isRevertable, onArchiveTask, onDeleteTask, onDuplicateTask, onMergeTask, onMoveTask, onOpenRefine, onPauseTask, onResetTask, onRetryTask, onRevertTask, onUnarchiveTask, onUnpauseTask, onUpdateTask, t, task.column, taskActionMenuModel.actions, taskActionMenuModel.moveTransitions, taskActionMenuModel.reviewAction]);
+  }, [handleTaskActionArchive, handleTaskActionMove, handleTaskActionRevert, handleTaskActionUnarchive, isRevertable, onArchiveTask, onDeleteTask, onDuplicateTask, onMergeTask, onMoveTask, onPlanningMode, onOpenRefine, onPauseTask, onResetTask, onRetryTask, onRevertTask, onUnarchiveTask, onUnpauseTask, onUpdateTask, t, task.column, taskActionMenuModel.actions, taskActionMenuModel.moveTransitions, taskActionMenuModel.reviewAction]);
   const hasContextMenuActions = contextMenuActions.length > 0;
 
   const closeContextMenu = useCallback(() => {

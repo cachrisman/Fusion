@@ -519,11 +519,53 @@ const LOOP_COMPACTION_TIMEOUT_MS = 60_000;
 
 const TASK_DONE_REFUSAL_SUFFIX = "Either finish the work and resubmit, or do not call fn_task_done — exit the session and the engine will requeue.";
 
+function countExecuteRequeueTerminalSteps(live: TaskDetail): number {
+  return live.steps?.filter((step) => step.status === "done" || step.status === "skipped").length ?? 0;
+}
+
+function parseExecuteRequeueLoopProgressSignature(signature: string | null | undefined): { terminalStepCount: number; totalSteps: number } | null {
+  if (!signature) return null;
+  try {
+    const parsed = JSON.parse(signature) as { terminalStepCount?: unknown; totalSteps?: unknown };
+    if (typeof parsed.terminalStepCount !== "number" || typeof parsed.totalSteps !== "number") return null;
+    return {
+      terminalStepCount: parsed.terminalStepCount,
+      totalSteps: parsed.totalSteps,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function buildExecuteRequeueLoopSignature(live: TaskDetail): string {
+  /*
+  FNXC:WorkflowLifecycle 2026-07-13-07:42:
+  FN-7941: human reports #2043/#2045/#2046/#2047 showed that FN-7863's raw currentStep/status signature could drift on every execute self-requeue while no step reached a terminal state, resetting the loop counter to 1 forever. Anchor the bounded streak to monotonic terminal-step progress instead: pending/in-progress/currentStep oscillation still counts toward exhaustion, while real done/skipped progress resets the streak and FN-7926 still diverts completed-blocked work before this guard can fail it.
+  */
   return JSON.stringify({
-    currentStep: live.currentStep ?? null,
-    steps: live.steps?.map((step) => step.status) ?? [],
+    terminalStepCount: countExecuteRequeueTerminalSteps(live),
+    totalSteps: live.steps?.length ?? 0,
   });
+}
+
+function buildExecuteRequeueLoopHighWaterSignature(live: TaskDetail, previousSignature: string | null | undefined): { signature: string; madeForwardProgress: boolean } {
+  // FNXC:WorkflowLifecycle 2026-07-13-08:20: derive current terminal-step
+  // progress by parsing buildExecuteRequeueLoopSignature's own output rather
+  // than duplicating countExecuteRequeueTerminalSteps/totalSteps inline, so
+  // the two functions cannot silently drift out of sync.
+  const current = parseExecuteRequeueLoopProgressSignature(buildExecuteRequeueLoopSignature(live));
+  const currentTerminalStepCount = current?.terminalStepCount ?? countExecuteRequeueTerminalSteps(live);
+  const totalSteps = current?.totalSteps ?? (live.steps?.length ?? 0);
+  const previous = parseExecuteRequeueLoopProgressSignature(previousSignature);
+  const previousTerminalStepCount = previous?.terminalStepCount ?? currentTerminalStepCount;
+  const madeForwardProgress = previous != null && currentTerminalStepCount > previousTerminalStepCount;
+  return {
+    madeForwardProgress,
+    signature: JSON.stringify({
+      terminalStepCount: Math.max(previousTerminalStepCount, currentTerminalStepCount),
+      totalSteps,
+    }),
+  };
 }
 
 const TRANSIENT_WORKTREE_TASK_JSON_ENOENT_PATTERN = /ENOENT:\s+no such file or directory,\s+open\s+'([^']+\/\.fusion\/tasks\/([^/]+)\/task\.json)'/;
@@ -9114,10 +9156,10 @@ export class TaskExecutor {
           await this.persistTokenUsage(task.id);
           return;
         }
-        const signature = buildExecuteRequeueLoopSignature(live);
-        const nextCount = live.executeRequeueLoopSignature === signature
-          ? (live.executeRequeueLoopCount ?? 0) + 1
-          : 1;
+        const { signature, madeForwardProgress } = buildExecuteRequeueLoopHighWaterSignature(live, live.executeRequeueLoopSignature);
+        const nextCount = madeForwardProgress || live.executeRequeueLoopSignature == null
+          ? 1
+          : (live.executeRequeueLoopCount ?? 0) + 1;
         if (live.executeRequeueLoopCount !== nextCount || live.executeRequeueLoopSignature !== signature) {
           await this.store.updateTask(task.id, {
             executeRequeueLoopCount: nextCount,
