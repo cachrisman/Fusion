@@ -112,6 +112,18 @@ describe("AuthenticationSection", () => {
     expect(screen.getByTestId("custom-providers-section")).not.toContainElement(screen.getByTestId("ollama-provider-card"));
   });
 
+  it("suppresses only the canonical native Ollama API-key shell while retaining unrelated custom provider rows", () => {
+    renderAuthSection([
+      { id: "ollama", name: "Ollama", authenticated: false, type: "api_key" },
+      { id: "operator-ollama-proxy", name: "Ollama Proxy", authenticated: false, type: "api_key" },
+    ]);
+
+    expect(screen.queryByTestId("auth-provider-icon-ollama")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Enter API key")).toBeInTheDocument();
+    expect(screen.getByTestId("auth-provider-icon-operator-ollama-proxy")).toBeInTheDocument();
+    expect(screen.getAllByTestId("ollama-provider-card")).toHaveLength(1);
+  });
+
   it("sorts visible Anthropic standard providers together near the top", () => {
     renderAuthSection([
       { id: "openai", name: "OpenAI", authenticated: false, type: "api_key" },

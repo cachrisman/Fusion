@@ -86,12 +86,16 @@ function toTagMetadata(tag: OllamaTag): Omit<OllamaModelMetadata, "capabilities"
   };
 }
 
-async function fetchNativeJson(endpoint: string, path: string, signal: AbortSignal): Promise<unknown> {
+function nativeHeaders(headers: Record<string, string>, endpointAuthToken: string | undefined): Record<string, string> {
+  return endpointAuthToken ? { ...headers, Authorization: `Bearer ${endpointAuthToken}` } : headers;
+}
+
+async function fetchNativeJson(endpoint: string, path: string, signal: AbortSignal, endpointAuthToken: string | undefined): Promise<unknown> {
   let response: Response;
   try {
     response = await fetch(nativeApiUrl(endpoint, path), {
       method: "GET",
-      headers: { Accept: "application/json" },
+      headers: nativeHeaders({ Accept: "application/json" }, endpointAuthToken),
       signal,
     });
   } catch (error) {
@@ -111,12 +115,12 @@ async function fetchNativeJson(endpoint: string, path: string, signal: AbortSign
   }
 }
 
-async function fetchModelCapabilities(endpoint: string, model: string, signal: AbortSignal): Promise<string[]> {
+async function fetchModelCapabilities(endpoint: string, model: string, signal: AbortSignal, endpointAuthToken: string | undefined): Promise<string[]> {
   let response: Response;
   try {
     response = await fetch(nativeApiUrl(endpoint, "api/show"), {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      headers: nativeHeaders({ "Content-Type": "application/json", Accept: "application/json" }, endpointAuthToken),
       body: JSON.stringify({ model }),
       signal,
     });
@@ -136,15 +140,16 @@ async function fetchModelCapabilities(endpoint: string, model: string, signal: A
  * FNXC:OllamaProvider 2026-07-15-00:00:
  * FUSI-099 discovers only safe native `/api/tags` + `/api/show` fields. A
  * failed show request never guesses tool support, and this never reads or
- * transforms existing Custom Provider records.
+ * transforms existing Custom Provider records. `endpointAuthToken` is resolved
+ * only by server routes and is never returned or logged by this module.
  */
-export async function discoverOllamaModels(inputEndpoint: unknown): Promise<OllamaDiscoveryResult> {
+export async function discoverOllamaModels(inputEndpoint: unknown, endpointAuthToken?: string): Promise<OllamaDiscoveryResult> {
   const endpoint = normalizeOllamaEndpoint(inputEndpoint);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), DISCOVERY_TIMEOUT_MS);
 
   try {
-    const tagsPayload = await fetchNativeJson(endpoint, "api/tags", controller.signal) as { models?: unknown };
+    const tagsPayload = await fetchNativeJson(endpoint, "api/tags", controller.signal, endpointAuthToken) as { models?: unknown };
     if (!Array.isArray(tagsPayload.models)) {
       throw new Error("Ollama endpoint returned an invalid tags response");
     }
@@ -161,7 +166,7 @@ export async function discoverOllamaModels(inputEndpoint: unknown): Promise<Olla
     }
 
     const models = await Promise.all(tags.map(async (tag) => {
-      const capabilities = await fetchModelCapabilities(endpoint, tag.id, controller.signal);
+      const capabilities = await fetchModelCapabilities(endpoint, tag.id, controller.signal, endpointAuthToken);
       return {
         ...tag,
         capabilities,

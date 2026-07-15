@@ -2251,6 +2251,27 @@ export function ModelOnboardingModal({
       );
     }
 
+    /*
+    FNXC:OllamaEndpointAuth 2026-07-15-00:00:
+    Native Ollama has no onboarding API-key flow: a localhost endpoint works
+    without credentials, while protected endpoint tokens are optional and
+    belong only to Settings → Authentication's native card. This redirect
+    state deliberately has no key input, save, clear, icon, or click target.
+    */
+    if (provider.id === "ollama") {
+      return (
+        <div key={provider.id} data-testid="onboarding-provider-card-ollama" className="onboarding-provider-card">
+          <div className="onboarding-provider-card__icon" data-testid="onboarding-provider-icon-ollama" aria-hidden="true">
+            <ProviderIcon provider="ollama" size="md" />
+          </div>
+          <div className="onboarding-provider-card__body">
+            <strong className="onboarding-provider-card__name">Ollama — native API</strong>
+            <span className="onboarding-provider-card__description">Configure native Ollama endpoints in Settings → Authentication. Local endpoints need no API key.</span>
+          </div>
+        </div>
+      );
+    }
+
     if (providerSupportsApiKey(provider)) {
       const providerInfo = getProviderInfo(provider.id, t);
       const apiKeyInfo = getApiKeyInfo(provider, t);

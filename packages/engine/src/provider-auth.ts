@@ -20,6 +20,7 @@ import {
 } from "@fusion/core";
 import { getOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import type { OAuthCredentials } from "@earendil-works/pi-ai/oauth";
+import { OLLAMA_PROVIDER_ID } from "./ollama-provider.js";
 
 export type LoginCallbacks = Parameters<AuthStorage["login"]>[1] & {
   onManualCodeInput?: () => Promise<string>;
@@ -195,8 +196,17 @@ export function wrapAuthStorageWithApiKeyProviders(
 
       for (const model of modelRegistry.getAll()) {
         const providerId = model.provider;
+        /*
+        FNXC:OllamaEndpointAuth 2026-07-15-00:00:
+        The canonical native `ollama` registry provider carries pi-ai's
+        required `ollama-native` schema placeholder, not a user API key.
+        Exclude only this identity from registry-derived generic key cards;
+        arbitrary Custom Provider ids (including an operator-named Ollama)
+        remain independently discoverable and configurable.
+        */
         if (
           !providerId ||
+          providerId === OLLAMA_PROVIDER_ID ||
           oauthProviderIds.has(providerId) ||
           providers.has(providerId) ||
           CLI_PROVIDER_IDS.has(providerId)

@@ -1,7 +1,14 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { resolveGlobalDirForHome, resolveOllamaSettings, type OllamaSettings } from "@fusion/core";
+import {
+  OLLAMA_ENDPOINT_AUTH_PROVIDER_ID,
+  resolveGlobalDirForHome,
+  resolveOllamaEndpointAuthToken,
+  resolveOllamaSettings,
+  type OllamaSettings,
+} from "@fusion/core";
+import { createFusionAuthStorage } from "./auth-storage.js";
 import { createAssistantMessageEventStream, type AssistantMessage, type Context, type Model, type StreamOptions } from "@earendil-works/pi-ai";
 import { registerApiProvider } from "@earendil-works/pi-ai/compat";
 
@@ -36,6 +43,13 @@ export function registerNativeOllamaProvider(modelRegistry: ModelRegistryLike, s
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: settings.numCtx, maxTokens: settings.numCtx,
   }));
   if (!models.length) return;
+  /*
+  FNXC:OllamaEndpointAuth 2026-07-15-00:00:
+  pi-ai validates models-bearing registry providers require an `apiKey` shape.
+  `ollama-native` satisfies only that SDK schema; it is neither a stored
+  operator credential nor an outbound header. Real endpoint auth is resolved
+  separately from protected auth storage immediately before native `/api/chat`.
+  */
   modelRegistry.registerProvider(OLLAMA_PROVIDER_ID, { baseUrl: settings.endpoint, api: OLLAMA_NATIVE_API_ID, apiKey: "ollama-native", models });
   modelRegistry.refresh?.();
 }
@@ -53,6 +67,35 @@ function nativeMessages(context: Context): NativeMessage[] {
   return result;
 }
 function nativeTools(context: Context) { return context.tools?.map((tool) => ({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.parameters } })); }
+
+export async function readNativeOllamaEndpointAuthToken(endpoint: string): Promise<string | undefined> {
+  try {
+    const stored = await createFusionAuthStorage().getApiKey(OLLAMA_ENDPOINT_AUTH_PROVIDER_ID);
+    return resolveOllamaEndpointAuthToken(stored, endpoint);
+  } catch {
+    // Endpoint auth is optional: unavailable credential storage must not block local Ollama.
+    return undefined;
+  }
+}
+
+/**
+ * FNXC:OllamaEndpointAuth 2026-07-15-00:00:
+ * The endpoint-bound auth-storage value is resolved against `model.baseUrl`
+ * before header composition. This protects active sessions retaining an older
+ * model URL while Settings switches endpoints: a token for the new URL must
+ * never cross to the old native chat request.
+ */
+export function nativeOllamaRequestHeaders(headers: StreamOptions["headers"] | undefined, endpointAuthToken: string | undefined): Record<string, string> {
+  const result = new Headers();
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    if (typeof value === "string") result.set(name, value);
+  }
+  result.set("Content-Type", "application/json");
+  result.delete("Authorization");
+  if (endpointAuthToken) result.set("Authorization", `Bearer ${endpointAuthToken}`);
+  return Object.fromEntries(result.entries());
+}
+
 /** FNXC:OllamaNativeStream 2026-07-15-00:00: Native Ollama uses `/api/chat`, `think:false`, and `num_ctx:32768`; never route through OpenAI compatibility. */
 export function streamNativeOllama(model: Model<string>, context: Context, options?: StreamOptions) {
   const stream = createAssistantMessageEventStream();
@@ -62,7 +105,8 @@ export function streamNativeOllama(model: Model<string>, context: Context, optio
     try {
       let payload: unknown = { model: model.id, messages: nativeMessages(context), ...(nativeTools(context) ? { tools: nativeTools(context) } : {}), stream: true, think: settings.think, options: { num_ctx: settings.numCtx } };
       payload = (await options?.onPayload?.(payload, model)) ?? payload;
-      const response = await fetch(`${model.baseUrl.replace(/\/+$/, "")}/api/chat`, { method: "POST", headers: { "Content-Type": "application/json", ...(options?.headers ?? {}) } as Record<string, string>, body: JSON.stringify(payload), signal: options?.signal });
+      const endpointAuthToken = await readNativeOllamaEndpointAuthToken(model.baseUrl);
+      const response = await fetch(`${model.baseUrl.replace(/\/+$/, "")}/api/chat`, { method: "POST", headers: nativeOllamaRequestHeaders(options?.headers, endpointAuthToken), body: JSON.stringify(payload), signal: options?.signal });
       await options?.onResponse?.({ status: response.status, headers: Object.fromEntries(response.headers.entries()) }, model);
       if (!response.ok || !response.body) throw new Error(`Ollama returned HTTP ${response.status}`);
       stream.push({ type: "start", partial: output }); const decoder = new TextDecoder(); let pending = ""; let textStarted = false;

@@ -2,15 +2,37 @@
 
 import express from "express";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { GlobalSettings, TaskStore } from "@fusion/core";
+import {
+  OLLAMA_ENDPOINT_AUTH_PROVIDER_ID,
+  parseOllamaEndpointAuthCredential,
+  serializeOllamaEndpointAuthCredential,
+  type GlobalSettings,
+  type TaskStore,
+} from "@fusion/core";
 import { createApiRoutes } from "../../routes.js";
 import { request as performRequest } from "../../test-request.js";
 import { discoverOllamaModels, normalizeOllamaEndpoint } from "../../ollama-probe.js";
 
-function createApp(settings: GlobalSettings) {
+function createEndpointAuthStorage(credentials: Record<string, string> = {}) {
+  return {
+    reload: vi.fn(),
+    getOAuthProviders: vi.fn(() => []),
+    hasAuth: vi.fn(() => false),
+    login: vi.fn(),
+    logout: vi.fn(),
+    getApiKeyProviders: vi.fn(() => []),
+    hasApiKey: vi.fn((provider: string) => Boolean(credentials[provider])),
+    getApiKey: vi.fn(async (provider: string) => credentials[provider]),
+    setApiKey: vi.fn((provider: string, key: string) => { credentials[provider] = key; }),
+    clearApiKey: vi.fn((provider: string) => { delete credentials[provider]; }),
+    get: vi.fn((provider: string) => credentials[provider] ? { type: "api_key", key: credentials[provider] } : undefined),
+  };
+}
+
+function createApp(settings: GlobalSettings, authStorage = createEndpointAuthStorage()) {
   const globalStore = { getSettings: vi.fn(async () => settings), invalidateCache: vi.fn() };
   const store = { getGlobalSettingsStore: vi.fn(() => globalStore), updateGlobalSettings: vi.fn(async (patch: Partial<GlobalSettings>) => { Object.assign(settings, patch); return settings; }), getSettingsFast: vi.fn(async () => ({})), getRootDir: vi.fn(() => "/fake/root"), getFusionDir: vi.fn(() => "/fake/root/.fusion") } as unknown as TaskStore;
-  const app = express(); app.use(express.json()); app.use("/api", createApiRoutes(store)); return { app, store };
+  const app = express(); app.use(express.json()); app.use("/api", createApiRoutes(store, { authStorage: authStorage as never })); return { app, store, authStorage };
 }
 async function request(app: express.Express, method: string, path: string, body?: unknown) {
   const response = await performRequest(app, method, path, body === undefined ? undefined : JSON.stringify(body), body === undefined ? undefined : { "Content-Type": "application/json" });
@@ -100,6 +122,92 @@ describe("native Ollama discovery contract", () => {
     const saved = await request(app, "PUT", "/api/ollama/config", { enabled: true, endpoint: "http://ollama.test:11434", executorEnabled: true, models: [{ id: "forged" }] });
     expect(saved.status).toBe(200); expect(saved.body.ollama).toMatchObject({ enabled: true, endpoint: "http://ollama.test:11434", executorEnabled: true, models: [] });
     expect(settings.customProviders).toBeUndefined();
+  });
+
+  it("uses no authorization header for a local no-key connect and redacts endpoint-auth status", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ models: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { app, authStorage } = createApp({});
+
+    const connected = await request(app, "POST", "/api/ollama/connect", { enabled: true, endpoint: "http://localhost:11434" });
+
+    expect(connected.status).toBe(200);
+    expect(connected.body).toMatchObject({ endpointAuthConfigured: false, ollama: { enabled: true, endpoint: "http://localhost:11434" } });
+    expect(JSON.stringify(connected.body)).not.toContain("endpointAuthToken");
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
+    expect(authStorage.setApiKey).not.toHaveBeenCalled();
+  });
+
+  it("stores an optional endpoint token outside settings, sends it only to probes, and clears it", async () => {
+    const credentials: Record<string, string> = {};
+    const authStorage = createEndpointAuthStorage(credentials);
+    const fetchMock = vi.fn(async () => jsonResponse({ models: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { app } = createApp({}, authStorage);
+
+    const saved = await request(app, "PUT", "/api/ollama/config", { endpointAuthToken: "protected-token" });
+    expect(saved.status).toBe(200);
+    expect(saved.body).toMatchObject({ endpointAuthConfigured: true });
+    expect(JSON.stringify(saved.body)).not.toContain("protected-token");
+    expect(authStorage.setApiKey).toHaveBeenCalledWith(
+      OLLAMA_ENDPOINT_AUTH_PROVIDER_ID,
+      serializeOllamaEndpointAuthCredential({ endpoint: "http://localhost:11434", token: "protected-token" }),
+    );
+
+    const refreshed = await request(app, "POST", "/api/ollama/refresh");
+    expect(refreshed.status).toBe(200);
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: "Bearer protected-token" });
+
+    const cleared = await request(app, "PUT", "/api/ollama/config", { clearEndpointAuth: true });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body).toMatchObject({ endpointAuthConfigured: false });
+    expect(authStorage.clearApiKey).toHaveBeenCalledWith(OLLAMA_ENDPOINT_AUTH_PROVIDER_ID);
+    expect(credentials[OLLAMA_ENDPOINT_AUTH_PROVIDER_ID]).toBeUndefined();
+  });
+
+  it("returns a redacted error when a protected endpoint rejects its optional token", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "unauthorized" }, 401));
+    vi.stubGlobal("fetch", fetchMock);
+    const { app } = createApp({}, createEndpointAuthStorage({
+      [OLLAMA_ENDPOINT_AUTH_PROVIDER_ID]: serializeOllamaEndpointAuthCredential({ endpoint: "http://localhost:11434", token: "protected-token" }),
+    }));
+
+    const response = await request(app, "POST", "/api/ollama/refresh");
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(String(response.body.error)).toContain("HTTP 401");
+    expect(JSON.stringify(response.body)).not.toContain("protected-token");
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: "Bearer protected-token" });
+  });
+
+  it("keeps an active endpoint token bound when a protected endpoint change fails", async () => {
+    const activeEndpoint = "http://active-ollama.test";
+    const protectedEndpoint = "https://protected-ollama.test";
+    const credentials = {
+      [OLLAMA_ENDPOINT_AUTH_PROVIDER_ID]: serializeOllamaEndpointAuthCredential({ endpoint: activeEndpoint, token: "active-token" }),
+    };
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.startsWith(protectedEndpoint)) return jsonResponse({ error: "unauthorized" }, 401);
+      expect(url).toBe(`${activeEndpoint}/api/tags`);
+      return jsonResponse({ models: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const settings: GlobalSettings = { ollama: { endpoint: activeEndpoint, enabled: true, think: false, numCtx: 32768, models: [], executorEnabled: false } };
+    const { app } = createApp(settings, createEndpointAuthStorage(credentials));
+
+    const failed = await request(app, "POST", "/api/ollama/connect", {
+      endpoint: protectedEndpoint,
+      endpointAuthToken: "protected-token",
+    });
+
+    expect(failed.status).toBeGreaterThanOrEqual(400);
+    expect(settings.ollama?.endpoint).toBe(activeEndpoint);
+    expect(parseOllamaEndpointAuthCredential(credentials[OLLAMA_ENDPOINT_AUTH_PROVIDER_ID])).toEqual({ endpoint: activeEndpoint, token: "active-token" });
+
+    const refreshed = await request(app, "POST", "/api/ollama/refresh");
+    expect(refreshed.status).toBe(200);
+    expect(fetchMock.mock.calls[1]?.[1]?.headers).toMatchObject({ Authorization: "Bearer active-token" });
+    expect(JSON.stringify(failed.body)).not.toContain("protected-token");
   });
 
   it("does not verify tool calling when a show payload is malformed", async () => {

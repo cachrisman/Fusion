@@ -650,6 +650,24 @@ describe("ModelOnboardingModal", () => {
       expect(screen.queryByTestId("onboarding-provider-card-google-antigravity")).toBeNull();
     });
 
+    it("renders native Ollama onboarding as Settings-only no-key guidance without a generic key form", async () => {
+      mockFetchAuthStatus.mockResolvedValueOnce({
+        providers: [
+          { id: "anthropic", name: "Anthropic", authenticated: false, type: "oauth" },
+          { id: "ollama", name: "Ollama", authenticated: false, type: "api_key" },
+        ],
+      });
+
+      render(<ModelOnboardingModal onComplete={vi.fn()} addToast={vi.fn()} projectId="proj_123" />);
+
+      const quickStartSection = await screen.findByTestId("onboarding-quick-start-providers");
+      const ollamaCard = within(quickStartSection).getByTestId("onboarding-provider-card-ollama");
+      expect(within(ollamaCard).getByText(/local endpoints need no api key/i)).toBeTruthy();
+      expect(within(ollamaCard).queryByTestId("onboarding-apikey-save-ollama")).toBeNull();
+      expect(within(ollamaCard).queryByTestId("onboarding-apikey-clear-ollama")).toBeNull();
+      expect(within(ollamaCard).queryByTestId("onboarding-provider-key-icon")).toBeNull();
+    });
+
     it("preserves split Anthropic quick-start cards and suppresses legacy Anthropic fallback", async () => {
       mockFetchAuthStatus.mockResolvedValueOnce({
         providers: [

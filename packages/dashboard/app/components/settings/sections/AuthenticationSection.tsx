@@ -81,9 +81,16 @@ export function AuthenticationSection({ auth }: AuthenticationSectionProps) {
     FNXC:ProviderAuth 2026-06-29-23:50:
     Settings must render Anthropic subscription OAuth and raw Anthropic API-key auth as separate cards; when a mixed/legacy status payload includes the old `anthropic` OAuth id alongside separated cards, hide the legacy card so users never see two OAuth-looking Anthropic entries or a resurrected dual-card surface.
     */
-    const visibleAuthProviders = hasSeparatedAnthropicProvider
+    /*
+    FNXC:OllamaEndpointAuth 2026-07-15-00:00:
+    `ollama` is the canonical native registry identity, whose SDK-required
+    placeholder is not an operator API key. Keep its sole configuration card
+    above this generic list; unrelated Custom Provider IDs remain untouched.
+    */
+    const visibleAuthProviders = (hasSeparatedAnthropicProvider
         ? authProviders.filter((p) => p.id !== "anthropic")
-        : authProviders;
+        : authProviders)
+        .filter((p) => p.id !== "ollama");
     const isSupportedCliProvider = (provider: AuthProvider) => provider.id === "claude-cli" || provider.id === "cursor-cli" || provider.id === "grok-cli" || provider.id === "llama-cpp";
     /*
     FNXC:ProviderAuth 2026-07-02-12:20:

@@ -1,20 +1,23 @@
 import { useCallback, useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
-import { connectOllama, fetchOllamaStatus, refreshOllamaModels, updateOllamaConfig, type OllamaProviderStatus } from "../api";
+import { connectOllama, fetchOllamaStatus, refreshOllamaModels, updateOllamaConfig, updateOllamaEndpointAuth, type OllamaProviderStatus } from "../api";
 import { ProviderIcon } from "./ProviderIcon";
 import "./OllamaProviderCard.css";
 
 interface OllamaProviderCardProps { onChanged?: () => void; }
 
 /**
- * FNXC:OllamaProvider 2026-07-15-00:00:
- * Settings exposes this as one first-class native provider card, rather than a
- * generic API-key or OpenAI-compatible form. Every configuration/discovery
- * mutation refreshes model pickers because `ollama/<id>` identities can change.
+ * FNXC:OllamaEndpointAuth 2026-07-15-00:00:
+ * Local native Ollama endpoints are valid without a key, so Settings provides
+ * one card for endpoint configuration and discovery. Protected reverse-proxy
+ * tokens are explicitly optional, never prefilled or revealed, and remain
+ * scoped to this native card instead of generic API-key authentication.
  */
 export function OllamaProviderCard({ onChanged }: OllamaProviderCardProps) {
   const [status, setStatus] = useState<OllamaProviderStatus | null>(null);
   const [endpoint, setEndpoint] = useState("http://localhost:11434");
+  const [endpointAuthToken, setEndpointAuthToken] = useState("");
+  const [showEndpointAuthInput, setShowEndpointAuthInput] = useState(false);
   const [busy, setBusy] = useState<"connect" | "refresh" | "save" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -34,17 +37,33 @@ export function OllamaProviderCard({ onChanged }: OllamaProviderCardProps) {
   }, [onChanged]);
 
   const config = status?.ollama;
+  const saveEndpointAuth = () => {
+    const token = endpointAuthToken.trim();
+    if (!token) {
+      setError("Enter a token for the protected endpoint");
+      return;
+    }
+    setEndpointAuthToken("");
+    setShowEndpointAuthInput(false);
+    void mutate("save", () => updateOllamaEndpointAuth(token));
+  };
+
   return <section className="ollama-provider-card" data-testid="ollama-provider-card">
     <div className="ollama-provider-card__header"><div className="auth-provider-info"><ProviderIcon provider="ollama" size="sm" /><strong>Ollama — native API</strong></div>
       <label className="ollama-provider-card__enabled"><input aria-label="Enable Ollama" type="checkbox" checked={config?.enabled ?? false} disabled={busy !== null} onChange={(event) => void mutate("save", () => updateOllamaConfig({ enabled: event.target.checked }))} /> Enable</label>
     </div>
-    <p className="auth-hint">Native <code>/api/*</code> connection; existing Custom Providers are unchanged.</p>
-    <div className="ollama-provider-card__controls"><label>Endpoint<input aria-label="Ollama endpoint" value={endpoint} disabled={busy !== null} onChange={(event) => setEndpoint(event.target.value)} /></label>
-      <button className="btn btn-primary btn-sm" data-testid="ollama-connect" disabled={busy !== null} onClick={() => void mutate("connect", () => connectOllama({ endpoint }))}>{busy === "connect" ? <Loader2 size={12} className="animate-spin" /> : "Connect / Test"}</button>
+    <p className="auth-hint">Native <code>/api/*</code> connection; local endpoints need no API key and existing Custom Providers are unchanged.</p>
+    <div className="ollama-provider-card__controls"><label>Endpoint<input className="input" aria-label="Ollama endpoint" value={endpoint} disabled={busy !== null} onChange={(event) => setEndpoint(event.target.value)} /></label>
+      <button className="btn btn-primary btn-sm" data-testid="ollama-connect" disabled={busy !== null} onClick={() => void mutate("connect", () => connectOllama({ endpoint }))}>{busy === "connect" ? <Loader2 className="animate-spin" /> : "Connect / Test"}</button>
       <button className="btn btn-sm" data-testid="ollama-refresh" disabled={busy !== null} onClick={() => void mutate("refresh", refreshOllamaModels)}>{busy === "refresh" ? "Refreshing…" : "Refresh models"}</button>
     </div>
+    <div className="ollama-provider-card__endpoint-auth" data-testid="ollama-endpoint-auth">
+      <div><strong>Endpoint authentication (optional)</strong><small className="auth-hint">For protected or reverse-proxy endpoints only.</small></div>
+      {status?.endpointAuthConfigured ? <><span data-testid="ollama-endpoint-auth-configured">Configured</span><button className="btn btn-sm" disabled={busy !== null} onClick={() => void mutate("save", () => updateOllamaEndpointAuth(null))}>Clear endpoint token</button><button className="btn btn-sm" disabled={busy !== null} onClick={() => setShowEndpointAuthInput((current) => !current)}>Replace token</button></> : <button className="btn btn-sm" disabled={busy !== null} onClick={() => setShowEndpointAuthInput((current) => !current)}>{showEndpointAuthInput ? "Cancel" : "Add endpoint token"}</button>}
+    </div>
+    {showEndpointAuthInput && <div className="ollama-provider-card__endpoint-auth-input"><label>Endpoint token<input className="input" aria-label="Optional Ollama endpoint token" type="password" autoComplete="new-password" value={endpointAuthToken} disabled={busy !== null} onChange={(event) => setEndpointAuthToken(event.target.value)} /></label><button className="btn btn-primary btn-sm" data-testid="ollama-save-endpoint-auth" disabled={busy !== null || !endpointAuthToken.trim()} onClick={saveEndpointAuth}>Save endpoint token</button></div>}
     <div className="ollama-provider-card__controls"><label><input aria-label="Enable Ollama thinking" type="checkbox" checked={config?.think ?? false} disabled={busy !== null} onChange={(event) => void mutate("save", () => updateOllamaConfig({ think: event.target.checked }))} /> Think</label>
-      <label>Context<input aria-label="Ollama context window" type="number" min="1024" value={config?.numCtx ?? 32768} disabled={busy !== null} onChange={(event) => void mutate("save", () => updateOllamaConfig({ numCtx: Number(event.target.value) }))} /></label>
+      <label>Context<input className="input" aria-label="Ollama context window" type="number" min="1024" value={config?.numCtx ?? 32768} disabled={busy !== null} onChange={(event) => void mutate("save", () => updateOllamaConfig({ numCtx: Number(event.target.value) }))} /></label>
       <label><input aria-label="Enable Ollama executor use" type="checkbox" checked={config?.executorEnabled ?? false} disabled={busy !== null} onChange={(event) => void mutate("save", () => updateOllamaConfig({ executorEnabled: event.target.checked }))} /> Enable executor use</label></div>
     <small className="auth-hint">Executor requires this opt-in and a model verified for tools.</small>
     {error && <small className="form-error" data-testid="ollama-error">{error}</small>}

@@ -15,7 +15,15 @@ import type { StalledReviewSignal } from "./stalled-review-detector.js";
 import type { TaskAgeStalenessSignal } from "./task-age-staleness.js";
 import type { SecretScope } from "./secrets-store.js";
 import type { OllamaSettings } from "./ollama-settings.js";
-export { DEFAULT_OLLAMA_SETTINGS, resolveOllamaSettings } from "./ollama-settings.js";
+export {
+  DEFAULT_OLLAMA_SETTINGS,
+  OLLAMA_ENDPOINT_AUTH_PROVIDER_ID,
+  parseOllamaEndpointAuthCredential,
+  resolveOllamaEndpointAuthToken,
+  resolveOllamaSettings,
+  serializeOllamaEndpointAuthCredential,
+} from "./ollama-settings.js";
+export type { OllamaEndpointAuthCredential } from "./ollama-settings.js";
 export type { OllamaModelMetadata, OllamaSettings } from "./ollama-settings.js";
 
 export {

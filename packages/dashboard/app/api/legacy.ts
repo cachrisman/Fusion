@@ -2050,6 +2050,8 @@ export interface OllamaProviderSettings {
 
 export interface OllamaProviderStatus {
   ollama: OllamaProviderSettings;
+  /** Redacted state only; endpoint-auth token never enters browser status data. */
+  endpointAuthConfigured: boolean;
   ready: boolean;
 }
 
@@ -2136,6 +2138,14 @@ export function fetchOllamaStatus(): Promise<OllamaProviderStatus> {
 
 export function updateOllamaConfig(config: Partial<Omit<OllamaProviderSettings, "models">>): Promise<OllamaProviderStatus> {
   return api<OllamaProviderStatus>("/ollama/config", { method: "PUT", body: JSON.stringify(config) });
+}
+
+/** Save or remove the optional protected-endpoint token without exposing its value in status data. */
+export function updateOllamaEndpointAuth(endpointAuthToken: string | null): Promise<OllamaProviderStatus> {
+  return api<OllamaProviderStatus>("/ollama/config", {
+    method: "PUT",
+    body: JSON.stringify(endpointAuthToken === null ? { clearEndpointAuth: true } : { endpointAuthToken }),
+  });
 }
 
 export function connectOllama(config: Partial<Omit<OllamaProviderSettings, "models">>): Promise<OllamaProviderStatus> {

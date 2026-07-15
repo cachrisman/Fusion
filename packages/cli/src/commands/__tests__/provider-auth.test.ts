@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempWorkspace } from "@fusion/test-utils";
@@ -85,6 +86,27 @@ describe("wrapAuthStorageWithApiKeyProviders", () => {
     expect(await merged.getApiKey("minimax")).toBe("legacy-minimax-key");
     expect(merged.get("minimax")).toEqual({ type: "api_key", key: "legacy-minimax-key" });
     expect(merged.list()).toEqual(expect.arrayContaining(["openrouter", "minimax"]));
+  });
+
+  it("excludes the native Ollama registry placeholder without hiding genuine custom API-key providers", () => {
+    const fusionAuth = makeAuthStorage();
+    const registry = ModelRegistry.inMemory(AuthStorage.inMemory());
+    registry.registerProvider("ollama", {
+      baseUrl: "http://localhost:11434",
+      apiKey: "ollama-native",
+      models: [{ id: "qwen", name: "qwen", api: "openai-completions", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32768, maxTokens: 32768 }],
+    });
+    registry.registerProvider("operator-ollama-proxy", {
+      baseUrl: "https://proxy.example.test",
+      apiKey: "operator-key",
+      models: [{ id: "qwen", name: "qwen", api: "openai-completions", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32768, maxTokens: 32768 }],
+    });
+
+    const wrapped = wrapAuthStorageWithApiKeyProviders(fusionAuth, registry);
+    const providerIds = wrapped.getApiKeyProviders().map((provider) => provider.id);
+
+    expect(providerIds).not.toContain("ollama");
+    expect(providerIds).toContain("operator-ollama-proxy");
   });
 
   it("excludes pi-claude-cli models from API key providers", () => {
