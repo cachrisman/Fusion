@@ -990,7 +990,7 @@ export function WorkflowResultsTab({
     setSubmitting(true);
     setResumeError(null);
     try {
-      await submitTaskWorkflowInput(taskId, inputText, projectId);
+      await submitTaskWorkflowInput(taskId, inputText, taskPausedReason ?? "", projectId);
       setInputText("");
       setSubmitted(true);
     } catch (err) {

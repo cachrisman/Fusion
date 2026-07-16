@@ -513,21 +513,101 @@ describe("workflow routes (U4)", () => {
     expect(await store.isWorkflowCliCommandApproved("npm run build")).toBe(false);
   });
 
-  it("POST /workflow/input resumes without clearing pausedReason", async () => {
-    const task = await store.createTask({ description: "T", enabledWorkflowSteps: [] });
-    await store.updateTask(task.id, {
-      paused: true,
-      pausedReason: "workflow-await-input:ask: please confirm",
+  describe("POST /workflow/input", () => {
+    const marker = "workflow-input:approval@1737000000000: Confirm the production rollout?";
+
+    async function createPausedWorkflowInputTask(pausedReason = marker) {
+      const task = await store.createTask({ description: "T", enabledWorkflowSteps: [] });
+      await store.updateTask(task.id, {
+        paused: true,
+        status: "awaiting-user-input",
+        pausedReason,
+      });
+      return task;
+    }
+
+    async function mutationSnapshot(taskId: string) {
+      const task = await store.getTask(taskId);
+      return {
+        status: task.status,
+        paused: task.paused,
+        pausedReason: task.pausedReason,
+        comments: task.comments,
+        steeringComments: task.steeringComments,
+        log: task.log,
+        audit: store.getRunAuditEvents({ taskId, mutationType: "task:workflow-input-submitted" }),
+      };
+    }
+
+    it("uses the shared atomic authority, retains the marker, and returns safe state", async () => {
+      const task = await createPausedWorkflowInputTask();
+      const submit = vi.spyOn(store, "submitWorkflowInput");
+
+      const res = await post(`/api/tasks/${task.id}/workflow/input`, { text: "yes", expected_input_marker: marker });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ ok: true, task: { id: task.id, column: "triage", paused: false } });
+      expect(submit).toHaveBeenCalledWith(task.id, "yes", marker);
+      const detail = await store.getTask(task.id);
+      expect(detail.paused).toBeFalsy();
+      expect(detail.status).toBeUndefined();
+      expect(detail.pausedReason).toBe(marker);
+      expect(detail.comments).toHaveLength(1);
+      expect(detail.steeringComments).toHaveLength(1);
+      expect(detail.log.filter((entry) => entry.action === "Comment added by user")).toHaveLength(1);
+      expect(store.getRunAuditEvents({ taskId: task.id, mutationType: "task:workflow-input-submitted" })).toHaveLength(1);
     });
 
-    const res = await post(`/api/tasks/${task.id}/workflow/input`, { text: "yes" });
-    expect(res.status).toBe(200);
+    it("returns 404 for a missing task and 400 for invalid request payloads", async () => {
+      const missing = await post("/api/tasks/FN-404/workflow/input", { text: "yes", expected_input_marker: marker });
+      expect(missing.status).toBe(404);
 
-    const detail = await store.getTask(task.id);
-    expect(detail.paused).toBeFalsy();
-    // The route deliberately leaves pausedReason intact; the await-input node
-    // consumes the marker itself on re-run.
-    expect(detail.pausedReason).toBe("workflow-await-input:ask: please confirm");
+      const task = await createPausedWorkflowInputTask();
+      expect((await post(`/api/tasks/${task.id}/workflow/input`, { text: "", expected_input_marker: marker })).status).toBe(400);
+      expect((await post(`/api/tasks/${task.id}/workflow/input`, { text: "yes" })).status).toBe(400);
+    });
+
+    it("returns a mutation-free 409 for a retained marker after the first success", async () => {
+      const task = await createPausedWorkflowInputTask();
+      expect((await post(`/api/tasks/${task.id}/workflow/input`, { text: "first", expected_input_marker: marker })).status).toBe(200);
+      const before = await mutationSnapshot(task.id);
+
+      const res = await post(`/api/tasks/${task.id}/workflow/input`, { text: "second", expected_input_marker: marker });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ details: { code: "not-paused", task: { id: task.id, paused: false } } });
+      expect(JSON.stringify(res.body)).not.toContain(marker);
+      expect(await mutationSnapshot(task.id)).toEqual(before);
+    });
+
+    it("returns a mutation-free 409 for a non-workflow pause without disclosing its reason", async () => {
+      const task = await createPausedWorkflowInputTask("operator-requested-pause");
+      const before = await mutationSnapshot(task.id);
+
+      const res = await post(`/api/tasks/${task.id}/workflow/input`, { text: "yes", expected_input_marker: marker });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ details: { code: "not-workflow-input", task: { id: task.id, paused: true } } });
+      expect(JSON.stringify(res.body)).not.toContain("operator-requested-pause");
+      expect(await mutationSnapshot(task.id)).toEqual(before);
+    });
+
+    it("returns a mutation-free 409 with only the current workflow marker for stale or replaced markers", async () => {
+      const task = await createPausedWorkflowInputTask();
+      const beforeWrong = await mutationSnapshot(task.id);
+      const wrong = await post(`/api/tasks/${task.id}/workflow/input`, { text: "yes", expected_input_marker: `${marker} stale` });
+      expect(wrong.status).toBe(409);
+      expect(wrong.body).toMatchObject({ details: { code: "marker-mismatch", current_workflow_input_marker: marker } });
+      expect(await mutationSnapshot(task.id)).toEqual(beforeWrong);
+
+      const replacement = "workflow-input:approval@1737000000001: Confirm the revised rollout?";
+      await store.updateTask(task.id, { pausedReason: replacement });
+      const beforeReplacement = await mutationSnapshot(task.id);
+      const stale = await post(`/api/tasks/${task.id}/workflow/input`, { text: "yes", expected_input_marker: marker });
+      expect(stale.status).toBe(409);
+      expect(stale.body).toMatchObject({ details: { code: "marker-mismatch", current_workflow_input_marker: replacement } });
+      expect(await mutationSnapshot(task.id)).toEqual(beforeReplacement);
+    });
   });
 
   // ── U5: lifecycle reconciliation surfaced through the routes (flag ON) ───────

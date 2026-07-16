@@ -1222,13 +1222,7 @@ const sidebar = screen.getByLabelText("Task documents");
   });
 
   /*
-  FNXC:ArtifactsView 2026-07-10-16:20:
-  First-run review: the preview pane did not communicate that it is view-only. The Read-only
-  badge must render with the preview header in BOTH render modes (plain and markdown) — the
-  header markup is shared between desktop and mobile layouts.
-  */
-  it("shows a Read-only badge in the project file preview header in plain and markdown modes", async () => {
-FNXC:DocumentsView 2026-07-11-14:45:
+  FNXC:DocumentsView 2026-07-11-14:45:
   Operator requirement: Project Files are editable in place with the shared CodeMirror FileEditor (this replaced the former Read-only badge contract). Edit swaps the preview for the editor, Save persists via the "project" workspace file API and updates the preview, Cancel discards without saving, and select-to-comment is suppressed while editing.
   */
   it("edits a project file in the shared file editor and saves via the workspace file API", async () => {
@@ -1240,12 +1234,10 @@ FNXC:DocumentsView 2026-07-11-14:45:
 
     fireEvent.click(screen.getByRole("button", { name: "Open README.md" }));
     await screen.findByText(/Hello docs/);
-    expect(screen.getByText("Read-only")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /switch to markdown/i }));
     await screen.findByText("Hello docs");
-    expect(screen.getByText("Read-only")).toBeInTheDocument();
-expect(screen.queryByText("Read-only")).not.toBeInTheDocument();
+    expect(screen.queryByText("Read-only")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /edit project file/i }));
     const editor = screen.getByLabelText("file editor");

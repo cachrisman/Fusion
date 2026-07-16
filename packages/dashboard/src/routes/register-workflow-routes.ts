@@ -736,20 +736,32 @@ export function registerWorkflowRoutes(ctx: ApiRoutesContext): void {
   });
 
   // POST /api/tasks/:taskId/workflow/input — submit the user's answer to an
-  // await-input node (records a steering comment and resumes the task).
+  // await-input node through the atomic core authority.
   router.post("/tasks/:taskId/workflow/input", async (req, res) => {
     try {
       const { store } = await getProjectContext(req);
       const text = (req.body?.text as string | undefined)?.trim();
+      const expectedInputMarker = req.body?.expected_input_marker;
       if (!text) throw badRequest("Input text is required");
-      await store.addSteeringComment(req.params.taskId, text);
-      // Do NOT clear pausedReason here: runAwaitInputNode checks
-      // (live.pausedReason ?? "").startsWith(marker) to confirm this specific
-      // node previously paused the task. Clearing it would make every re-run
-      // re-pause without ever consuming the answer. The node clears the marker
-      // itself once it consumes the input.
-      await store.updateTask(req.params.taskId, { status: null, paused: false });
-      res.json({ ok: true });
+      // Validate non-blankness without normalizing the opaque marker that is
+      // compared byte-for-byte by TaskStore.
+      if (typeof expectedInputMarker !== "string" || !expectedInputMarker.trim()) {
+        throw badRequest("Expected workflow-input marker is required");
+      }
+
+      const result = await store.submitWorkflowInput(req.params.taskId, text, expectedInputMarker);
+      if (result.ok) {
+        res.json({ ok: true, task: result.task });
+        return;
+      }
+      if (result.code === "not-found") {
+        throw notFound(`Task ${req.params.taskId} not found`);
+      }
+      throw conflict("Workflow input is no longer active", {
+        code: result.code,
+        task: result.task,
+        ...(result.code === "marker-mismatch" ? { current_workflow_input_marker: result.currentWorkflowInputMarker } : {}),
+      });
     } catch (err: unknown) {
       if (err instanceof ApiError) throw err;
       rethrowAsApiError(err);

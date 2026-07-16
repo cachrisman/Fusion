@@ -658,6 +658,8 @@ export {
   HandoffInvariantViolationError,
   TransitionRejectionError,
   type LegacyAutoMergeStampReconcileResult,
+  type WorkflowInputSubmissionResult,
+  type WorkflowInputSubmissionTaskState,
 } from "./store.js";
 export {
   STOPWORDS,

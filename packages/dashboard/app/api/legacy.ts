@@ -6005,11 +6005,11 @@ export function approveTaskWorkflowCli(taskId: string, projectId?: string): Prom
   });
 }
 
-/** Submit the user's answer to an await-input node and resume the task. */
-export function submitTaskWorkflowInput(taskId: string, text: string, projectId?: string): Promise<{ ok: true }> {
+/** Submit a reply for the exact opaque workflow-input marker currently rendered. */
+export function submitTaskWorkflowInput(taskId: string, text: string, expectedInputMarker: string, projectId?: string): Promise<{ ok: true }> {
   return api<{ ok: true }>(withProjectId(`/tasks/${encodeURIComponent(taskId)}/workflow/input`, projectId), {
     method: "POST",
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, expected_input_marker: expectedInputMarker }),
   });
 }
 

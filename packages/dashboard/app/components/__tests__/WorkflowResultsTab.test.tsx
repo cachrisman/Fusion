@@ -250,6 +250,25 @@ describe("WorkflowResultsTab", () => {
     expect(screen.getByTestId("workflow-state-summary-count")).toHaveTextContent("3 of 4 steps completed");
   });
 
+  it("submits the rendered opaque workflow-input marker unchanged", async () => {
+    const opaqueMarker = "workflow-input:approval@1737000000000: Confirm the production rollout?";
+    render(
+      <WorkflowResultsTab
+        taskId="FN-001"
+        task={{ ...baseTask, paused: true, status: "awaiting-user-input" } as Task}
+        taskStatus="awaiting-user-input"
+        taskPausedReason={opaqueMarker}
+        settings={mockSettings}
+        results={[]}
+      />,
+    );
+
+    fireEvent.change(screen.getByPlaceholderText("Type your reply…"), { target: { value: "Ship it" } });
+    fireEvent.click(screen.getByRole("button", { name: "Submit & resume" }));
+
+    await waitFor(() => expect(mockedSubmitTaskWorkflowInput).toHaveBeenCalledWith("FN-001", "Ship it", opaqueMarker, undefined));
+  });
+
   it.each([
     { name: "not started", task: { ...baseTask, status: "todo", column: "todo" } as Task, results: [] as WorkflowStepResult[], testId: "workflow-phase-badge-not-started", text: "Not started" },
     { name: "in progress", task: { ...baseTask, status: "in-progress", column: "in-progress" } as Task, results: [{ workflowStepId: "WS-004", workflowStepName: "Performance Check", phase: "pre-merge", status: "pending" }] as WorkflowStepResult[], testId: "workflow-phase-badge-pre-merge", text: "Pre-merge steps running" },

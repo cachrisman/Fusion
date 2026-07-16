@@ -251,6 +251,33 @@ describe("TaskStore concurrent writes", () => {
     expect(reloaded.title).toMatch(/^Race title \d+$/);
   });
 
+  it("allows exactly one disk-backed workflow-input submission across store instances", async () => {
+    const task = await primary.createTask({ description: "Cross-instance workflow input" });
+    const marker = "workflow-input:approval@1737000000000: Confirm the production rollout?";
+    await primary.updateTask(task.id, {
+      paused: true,
+      status: "awaiting-user-input",
+      pausedReason: marker,
+    });
+
+    const results = await Promise.all([
+      stores[1].submitWorkflowInput(task.id, "Reply from dashboard A", marker),
+      stores[2].submitWorkflowInput(task.id, "Reply from dashboard B", marker),
+    ]);
+
+    expect(results.filter((result) => result.ok)).toHaveLength(1);
+    const loser = results.find((result) => !result.ok);
+    expect(loser).toMatchObject({ ok: false, code: "not-paused" });
+
+    const updated = await primary.getTask(task.id);
+    expect(updated.paused).toBeFalsy();
+    expect(updated.pausedReason).toBe(marker);
+    expect(updated.comments).toHaveLength(1);
+    expect(updated.steeringComments).toHaveLength(1);
+    expect(updated.log.filter((entry) => entry.action === "Comment added by user")).toHaveLength(1);
+    expect(primary.getRunAuditEvents({ taskId: task.id, mutationType: "task:workflow-input-submitted" })).toHaveLength(1);
+  });
+
   it("moves different tasks concurrently without SQLITE_BUSY failures", async () => {
     const tasks: Task[] = await Promise.all(
       Array.from({ length: 10 }, (_, index) => primary.createTask({ description: `Move task ${index}` })),

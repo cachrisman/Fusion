@@ -17,7 +17,6 @@ import { NodeHealthDot } from "./NodeHealthDot";
 import { ProviderIcon } from "./ProviderIcon";
 import { WorkflowOptionalStepsDropdown } from "./WorkflowOptionalStepsDropdown";
 import { WorkflowIcon } from "./WorkflowIcon";
-import { getPriorityIcon, getPriorityLabel } from "../utils/priorityIndicator";
 import { getPriorityColorVar, getPriorityIcon, getPriorityLabel } from "../utils/priorityIndicator";
 
 

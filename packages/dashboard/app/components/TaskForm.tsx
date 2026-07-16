@@ -10,7 +10,6 @@ import { NodeHealthDot } from "./NodeHealthDot";
 import { LoadingSpinner } from "./LoadingSpinner";
 import { Sparkles, ChevronUp, ChevronDown, Maximize2, Minimize2, Paperclip, Zap, Brain, Server } from "lucide-react";
 import { REPO_OVERRIDE_RE, resolveEffectiveGithubRepoDefault } from "./githubTracking";
-import { getPriorityIcon, getPriorityLabel } from "../utils/priorityIndicator";
 import { getPriorityColorVar, getPriorityIcon, getPriorityLabel } from "../utils/priorityIndicator";
 
 import { ProviderIcon } from "./ProviderIcon";

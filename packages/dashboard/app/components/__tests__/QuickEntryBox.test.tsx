@@ -2162,19 +2162,15 @@ describe("QuickEntryBox", () => {
       expectQuickEntryPriorityButton("normal");
     });
 
-    it("renders the icon-only priority glyph and accessible label for every level", () => {
-it("renders urgency-colored priority glyphs in the trigger and picker for every level", () => {
-
+    it("renders urgency-colored priority glyphs in the trigger and picker for every level", () => {
       renderQuickEntryBox({});
       expandQuickEntry();
 
       for (const taskPriority of TASK_PRIORITIES) {
         openPriorityMenu();
-
-for (const optionPriority of TASK_PRIORITIES) {
+        for (const optionPriority of TASK_PRIORITIES) {
           expectPriorityOptionColor(optionPriority);
         }
-
         fireEvent.click(screen.getByTestId(`quick-entry-priority-option-${taskPriority}`));
         expectQuickEntryPriorityButton(taskPriority);
       }

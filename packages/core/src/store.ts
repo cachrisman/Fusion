@@ -48,6 +48,24 @@ export interface RepairOverlapBlockerResult {
   task?: Task;
 }
 
+/** Minimal, transport-safe state returned by workflow-input submission. */
+export interface WorkflowInputSubmissionTaskState {
+  id: string;
+  column: ColumnId;
+  status?: string;
+  paused: boolean;
+}
+
+/**
+ * Result of atomically accepting an executor-owned workflow-input marker.
+ * Only an active matching workflow-input pause may disclose its current marker.
+ */
+export type WorkflowInputSubmissionResult =
+  | { ok: true; task: WorkflowInputSubmissionTaskState }
+  | { ok: false; code: "not-found" }
+  | { ok: false; code: "not-paused" | "not-workflow-input"; task: WorkflowInputSubmissionTaskState }
+  | { ok: false; code: "marker-mismatch"; task: WorkflowInputSubmissionTaskState; currentWorkflowInputMarker: string };
+
 function isWorkflowColumnsCompatibilityFlagEnabled(settings: Pick<Settings, "experimentalFeatures"> | undefined): boolean {
   /*
   FNXC:WorkflowColumns 2026-06-22-00:00:
@@ -13775,6 +13793,113 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
   async addTaskComment(id: string, text: string, author: string): Promise<Task> {
     // Delegate to unified addComment method
     return this.addComment(id, text, author);
+  }
+
+  /**
+   * Atomically accept one user reply for the exact workflow-input marker that
+   * currently pauses a task. The executor remains the owner of marker parsing
+   * and consumption; this method only compares and retains the opaque marker.
+   */
+  async submitWorkflowInput(
+    id: string,
+    text: string,
+    expectedInputMarker: string,
+  ): Promise<WorkflowInputSubmissionResult> {
+    const reply = text.trim();
+    if (!reply) throw new Error("Workflow input text is required");
+    if (!expectedInputMarker) throw new Error("Expected workflow-input marker is required");
+
+    const project = (task: Task): WorkflowInputSubmissionTaskState => ({
+      id: task.id,
+      column: task.column,
+      status: task.status,
+      paused: task.paused === true,
+    });
+
+    return this.withTaskLock(id, async () => {
+      const dir = this.taskDir(id);
+      let outcome: WorkflowInputSubmissionResult = { ok: false, code: "not-found" };
+      let persistedTask: Task | undefined;
+
+      /*
+      FNXC:WorkflowInputSubmission 2026-07-16-00:00:
+      FUSI-115 requires the displayed executor-owned marker to be compared as an
+      opaque exact value inside one SQLite immediate transaction. That makes stale
+      and cross-process competing submits single-winner without parsing, clearing,
+      or otherwise taking ownership of the marker from the executor.
+      */
+      this.db.transactionImmediate(() => {
+        const task = this.readTaskFromDb(id);
+        if (!task) return;
+
+        const state = project(task);
+        if (!task.paused) {
+          outcome = { ok: false, code: "not-paused", task: state };
+          return;
+        }
+
+        const currentMarker = task.pausedReason;
+        if (!currentMarker?.startsWith("workflow-input:")) {
+          outcome = { ok: false, code: "not-workflow-input", task: state };
+          return;
+        }
+        if (currentMarker !== expectedInputMarker) {
+          outcome = { ok: false, code: "marker-mismatch", task: state, currentWorkflowInputMarker: currentMarker };
+          return;
+        }
+
+        const now = new Date().toISOString();
+        const commentId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const comment: import("./types.js").TaskComment = {
+          id: commentId,
+          text: reply,
+          author: "user",
+          createdAt: now,
+          updatedAt: now,
+        };
+        const steeringComment: import("./types.js").SteeringComment = {
+          id: commentId,
+          text: reply,
+          author: "user",
+          createdAt: now,
+        };
+
+        task.comments = [...(task.comments ?? []), comment];
+        task.steeringComments = [...(task.steeringComments ?? []), steeringComment];
+        task.log = [...(task.log ?? []), { timestamp: now, action: "Comment added by user" }];
+        task.paused = undefined;
+        task.status = undefined;
+        // Keep task.pausedReason exactly as-is for the executor's resume check.
+        task.updatedAt = now;
+
+        const existingRow = this.readTaskRowFromDb(id, { includeDeleted: true });
+        const changedColumns = existingRow && existingRow.deletedAt == null
+          ? this.getChangedTaskColumns(existingRow, task)
+          : new Set<keyof TaskRow>();
+        const writeResult = this.patchTaskRowInTransaction(id, task, changedColumns, existingRow);
+        if (writeResult.deletedAt) {
+          this.throwSoftDeletedWriteBlocked(id, writeResult.deletedAt, "submitWorkflowInput");
+        }
+        this.insertRunAuditEventRow({
+          taskId: id,
+          agentId: "user",
+          runId: `workflow-input:${id}`,
+          domain: "database",
+          mutationType: "task:workflow-input-submitted",
+          target: id,
+          metadata: { commentsAdded: 1, steeringCommentsAdded: 1, outcome: "resumed" },
+        });
+        persistedTask = writeResult.current ?? task;
+        outcome = { ok: true, task: project(persistedTask) };
+      });
+
+      if (!outcome.ok || !persistedTask) return outcome;
+
+      await this.writeTaskJsonFile(dir, persistedTask);
+      if (this.isWatching) this.taskCache.set(id, { ...persistedTask });
+      this.emitTaskLifecycleEventSafely("task:updated", [persistedTask]);
+      return outcome;
+    });
   }
 
   /**
