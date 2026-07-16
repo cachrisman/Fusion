@@ -999,3 +999,121 @@ describe("TaskStore", () => {
 
 
 });
+
+/*
+FNXC:TaskCreate 2026-07-16-15:20:
+FUSI-096 regression: every store-backed mutation (createTask and everything
+built on `createTaskWithDistributedReservation`) must resolve prefix,
+entry column, and write DB from the session store's OWN `rootDir`/`this.db`/
+settings — never from central-registry current/most-recent project state.
+
+Reproduction attempted per the FUSI-096 spec (Step 1): two independent
+TaskStore instances sharing only a `globalDir` (mirroring two concurrent
+`fn mcp serve --project <P>` processes against the same shared
+`~/.fusion/fusion-central.db`), with the OTHER project (CAB prefix, default
+"triage" entry column) constructed and given its first task BEFORE the
+target project (FUSI prefix, non-default "ideas" entry column via the
+builtin Coding (Ideas) workflow) — i.e. CAB is the "most-recently-created
+project" drift trigger from the original symptom report.
+
+Root-cause finding (pinned, no live seam found): every attribution step in
+`createTaskWithDistributedReservation` (store.ts) — `getSettingsFast()`
+(prefix), `getDistributedTaskIdAllocator()` (`this.db`),
+`resolveLocalNodeIdForTaskAllocation()` (CentralCore-resolved `nodeId`), and
+`createTaskWithReservedId` (entry-column resolution via
+`materializeDefaultWorkflowSteps`/`listWorkflowSteps`) — is unconditionally
+scoped to `this`, i.e. the session store's own rootDir/db/settings.
+`resolveLocalNodeIdForTaskAllocation()`'s `new CentralCore()` lookup produces
+ONLY an attribution tag written into `distributed_task_id_reservations.nodeId`
+(distributed-task-id.ts) — it is never used to select the write database, and
+`central-core.ts` has NO "current project" concept anywhere. The drift
+described in FUSI-096 does not reproduce against this code (see task
+document "notes" for the full investigation trail). This suite exists to
+PIN that invariant permanently so it cannot silently regress.
+*/
+describe("FUSI-096: session-bound create-path project targeting (no central-current drift)", () => {
+  let fusionRootDir: string;
+  let cabRootDir: string;
+  let globalDir: string;
+  let fusionStore: TaskStore;
+  let cabStore: TaskStore;
+
+  beforeEach(async () => {
+    globalDir = makeTmpDir();
+
+    // The OTHER project ("contentful-app-builder") is constructed and given
+    // its first task FIRST, simulating "most recently created project" — the
+    // exact drift trigger from the Symptom Verification repro.
+    cabRootDir = makeTmpDir();
+    cabStore = new TaskStore(cabRootDir, globalDir, { inMemoryDb: true });
+    await cabStore.init();
+    await cabStore.updateSettings({ taskPrefix: "CAB" });
+    // Default builtin workflow -> default "triage" entry column.
+
+    fusionRootDir = makeTmpDir();
+    fusionStore = new TaskStore(fusionRootDir, globalDir, { inMemoryDb: true });
+    await fusionStore.init();
+    await fusionStore.updateSettings({ taskPrefix: "FUSI" });
+    // Non-default entry column: Fusion's real project uses the Coding
+    // (Ideas) workflow, whose intake column is "ideas" (not "triage").
+    await fusionStore.setDefaultWorkflowId("builtin:coding-ideas");
+  });
+
+  afterEach(async () => {
+    await fusionStore.close();
+    await cabStore.close();
+    await rm(fusionRootDir, { recursive: true, force: true });
+    await rm(cabRootDir, { recursive: true, force: true });
+    await rm(globalDir, { recursive: true, force: true });
+  });
+
+  it("a P-bound store's createTask lands P's prefix + P's entry column in P's own DB, never CAB's, even though CAB was created first", async () => {
+    const task = await fusionStore.createTask({ description: "Fusion-bound mutation" });
+
+    expect(task.id.startsWith("FUSI-")).toBe(true);
+    expect(task.column).toBe("ideas");
+
+    // Landed in Fusion's own store...
+    const fusionTasks = await fusionStore.listTasks({ slim: true });
+    expect(fusionTasks.some((t) => t.id === task.id)).toBe(true);
+
+    // ...and NOT in CAB's store (the "most-recently-created" project).
+    const cabTasks = await cabStore.listTasks({ slim: true });
+    expect(cabTasks.some((t) => t.id === task.id)).toBe(false);
+    expect(cabTasks.some((t) => t.description === "Fusion-bound mutation")).toBe(false);
+  });
+
+  it("the reverse also holds: a CAB-bound store's createTask never lands FUSI's prefix or a FUSI row", async () => {
+    const task = await cabStore.createTask({ description: "CAB-bound mutation" });
+
+    expect(task.id.startsWith("CAB-")).toBe(true);
+    expect(task.column).toBe("triage");
+
+    const cabTasks = await cabStore.listTasks({ slim: true });
+    expect(cabTasks.some((t) => t.id === task.id)).toBe(true);
+
+    const fusionTasks = await fusionStore.listTasks({ slim: true });
+    expect(fusionTasks.some((t) => t.id === task.id)).toBe(false);
+  });
+
+  it("interleaved creates across both stores (simulating two concurrent fn mcp serve processes sharing one central registry) never cross-contaminate prefix or destination DB", async () => {
+    const fusionTask1 = await fusionStore.createTask({ description: "Fusion call 1" });
+    const cabTask1 = await cabStore.createTask({ description: "CAB call 1" });
+    const fusionTask2 = await fusionStore.createTask({ description: "Fusion call 2" });
+    const cabTask2 = await cabStore.createTask({ description: "CAB call 2" });
+
+    for (const t of [fusionTask1, fusionTask2]) {
+      expect(t.id.startsWith("FUSI-")).toBe(true);
+      expect(t.column).toBe("ideas");
+    }
+    for (const t of [cabTask1, cabTask2]) {
+      expect(t.id.startsWith("CAB-")).toBe(true);
+      expect(t.column).toBe("triage");
+    }
+
+    const fusionTasks = await fusionStore.listTasks({ slim: true });
+    const cabTasks = await cabStore.listTasks({ slim: true });
+    expect(fusionTasks.map((t) => t.id).sort()).toEqual([fusionTask1.id, fusionTask2.id].sort());
+    expect(cabTasks.map((t) => t.id).sort()).toEqual([cabTask1.id, cabTask2.id].sort());
+  });
+});

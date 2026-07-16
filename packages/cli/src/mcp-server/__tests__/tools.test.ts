@@ -2405,6 +2405,424 @@ describe("fn mcp serve — in-memory server smoke test", () => {
   });
 
   /*
+  FNXC:TaskCreate 2026-07-16-15:20:
+  FUSI-096 regression: reproduce the reported drift trigger at the MCP
+  dispatch layer — a session LAUNCH-BOUND to project P (no fn_project_use
+  call at all, matching the original "--project Fusion" report) must never
+  have its store-backed mutations land in a DIFFERENT, most-recently-created
+  project (CAB prefix, default "triage" entry column), even though that
+  other project is registered in the SAME shared central registry and its
+  own first task is created BEFORE any P-bound mutation runs. Every
+  store-backed mutation tool enumerated in the FUSI-096 Surface Enumeration
+  is covered here: fn_task_create, fn_delegate_task, fn_workflow_create,
+  fn_workflow_update, fn_agent_create, fn_task_update. Root-cause finding
+  (see task document "notes"): the dispatch seam (`active.store` in
+  server.ts), McpProjectSession, and every TaskStore create/mutation path are
+  already scoped strictly to the session-bound store with no central-current
+  lookup in the write path — this suite pins that invariant.
+  */
+  describe("FUSI-096: launch-bound-only mutation targeting (no fn_project_use call)", () => {
+    let cabDir: string;
+    let cabStore: TaskStore;
+
+    beforeEach(async () => {
+      await store.updateSettings({ taskPrefix: "FUSI" });
+      await store.setDefaultWorkflowId("builtin:coding-ideas");
+
+      cabDir = await mkdtemp(join(tmpdir(), "fn-fusi-096-cab-"));
+      await mkdir(join(cabDir, ".fusion"), { recursive: true });
+      cabStore = new TaskStore(cabDir);
+      await cabStore.init();
+      await cabStore.updateSettings({ taskPrefix: "CAB" });
+      // The "most-recently-created" distractor project: created (and given
+      // its own first task) BEFORE the P-bound mutation calls below run.
+      await cabStore.createTask({ description: "Pre-existing CAB task (created first)" });
+
+      fakeCentralRegistry.set("proj_fusion", {
+        id: "proj_fusion",
+        name: "Fusion",
+        path: tmpDir,
+        status: "active",
+        isolationMode: "in-process",
+        createdAt: "2020-01-01T00:00:00.000Z",
+        updatedAt: "2020-01-01T00:00:00.000Z",
+      });
+      fakeCentralRegistry.set("proj_cab", {
+        id: "proj_cab",
+        name: "contentful-app-builder",
+        path: cabDir,
+        status: "active",
+        isolationMode: "in-process",
+        createdAt: "2026-07-16T00:00:00.000Z",
+        updatedAt: "2026-07-16T00:00:00.000Z",
+      });
+    });
+
+    afterEach(async () => {
+      await cabStore.close();
+      await rm(cabDir, { recursive: true, force: true });
+    });
+
+    it("fn_task_create lands FUSI's prefix + ideas entry column in the launch-bound store only", async () => {
+      const { client, mcpServer } = await connectClient({ projectId: "proj_fusion", projectName: "Fusion" });
+      try {
+        const result = await client.callTool({ name: "fn_task_create", arguments: { description: "Launch-bound create" } });
+        expect(result.isError).not.toBe(true);
+        const structured = result.structuredContent as { taskId?: string } | undefined;
+
+        const fusionTasks = await store.listTasks({ slim: true });
+        const created = fusionTasks.find((t) => t.description === "Launch-bound create");
+        expect(created).toBeTruthy();
+        expect(created!.id.startsWith("FUSI-")).toBe(true);
+        expect(created!.column).toBe("ideas");
+        if (structured?.taskId) expect(structured.taskId).toBe(created!.id);
+
+        const cabTasks = await cabStore.listTasks({ slim: true });
+        expect(cabTasks.some((t) => t.description === "Launch-bound create")).toBe(false);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_delegate_task lands FUSI's prefix in the launch-bound store only", async () => {
+      const agentStore = new AgentStore({ rootDir: store.getFusionDir() });
+      await agentStore.init();
+      const agent = await agentStore.createAgent({ name: "Launch-bound delegate target", role: "executor" } as any);
+
+      const { client, mcpServer } = await connectClient({ projectId: "proj_fusion", projectName: "Fusion" });
+      try {
+        const result = await client.callTool({
+          name: "fn_delegate_task",
+          arguments: { agent_id: agent.id, description: "Launch-bound delegated task" },
+        });
+        expect(result.isError).not.toBe(true);
+
+        const fusionTasks = await store.listTasks({ slim: true });
+        const created = fusionTasks.find((t) => t.description === "Launch-bound delegated task");
+        expect(created).toBeTruthy();
+        expect(created!.id.startsWith("FUSI-")).toBe(true);
+
+        const cabTasks = await cabStore.listTasks({ slim: true });
+        expect(cabTasks.some((t) => t.description === "Launch-bound delegated task")).toBe(false);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_workflow_create and fn_workflow_update land in the launch-bound store's workflow table only", async () => {
+      const { client, mcpServer } = await connectClient({ projectId: "proj_fusion", projectName: "Fusion" });
+      try {
+        const createResult = await client.callTool({
+          name: "fn_workflow_create",
+          arguments: {
+            name: "Launch-bound workflow",
+            ir: {
+              version: "v2",
+              name: "Launch-bound workflow",
+              columns: [{ id: "todo", name: "Todo", traits: [] }],
+              nodes: [
+                { id: "start", kind: "start", column: "todo" },
+                { id: "end", kind: "end", column: "todo" },
+              ],
+              edges: [{ from: "start", to: "end", condition: "success" }],
+            },
+          },
+        });
+        expect(createResult.isError).not.toBe(true);
+        const created = createResult.structuredContent as { workflowId?: string; id?: string } | undefined;
+        const workflowId = created?.workflowId ?? created?.id;
+        expect(workflowId).toBeTruthy();
+
+        const fusionWorkflow = await store.getWorkflowDefinition(workflowId as string);
+        expect(fusionWorkflow).toBeTruthy();
+
+        const cabWorkflow = await cabStore.getWorkflowDefinition(workflowId as string).catch(() => undefined);
+        expect(cabWorkflow).toBeFalsy();
+
+        const updateResult = await client.callTool({
+          name: "fn_workflow_update",
+          arguments: { workflow_id: workflowId, name: "Launch-bound workflow (renamed)" },
+        });
+        expect(updateResult.isError).not.toBe(true);
+        const renamed = await store.getWorkflowDefinition(workflowId as string);
+        expect(renamed?.name).toBe("Launch-bound workflow (renamed)");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_agent_create lands in the launch-bound store's AgentStore only", async () => {
+      const { client, mcpServer } = await connectClient({ projectId: "proj_fusion", projectName: "Fusion" });
+      try {
+        const result = await client.callTool({
+          name: "fn_agent_create",
+          arguments: { name: "Launch-bound Agent", role: "executor" },
+        });
+        expect(result.isError).not.toBe(true);
+
+        const fusionAgentStore = new AgentStore({ rootDir: store.getFusionDir() });
+        await fusionAgentStore.init();
+        const fusionAgents = await fusionAgentStore.listAgents({});
+        expect(fusionAgents.some((a) => a.name === "Launch-bound Agent")).toBe(true);
+
+        const cabAgentStore = new AgentStore({ rootDir: cabStore.getFusionDir() });
+        await cabAgentStore.init();
+        const cabAgents = await cabAgentStore.listAgents({});
+        expect(cabAgents.some((a) => a.name === "Launch-bound Agent")).toBe(false);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_task_update mutates the launch-bound store's task only, never the CAB store", async () => {
+      const fusionTask = await store.createTask({ description: "Launch-bound updatable task", source: { sourceType: "api" } });
+      const [cabTaskBefore] = await cabStore.listTasks({ slim: true });
+      const { client, mcpServer } = await connectClient({ projectId: "proj_fusion", projectName: "Fusion" });
+      try {
+        const result = await client.callTool({
+          name: "fn_task_update",
+          arguments: { id: fusionTask.id, title: "Launch-bound updated title" },
+        });
+        expect(result.isError).not.toBe(true);
+
+        const updatedFusionTask = await store.getTask(fusionTask.id);
+        expect(updatedFusionTask.title).toBe("Launch-bound updated title");
+
+        // The pre-seeded CAB task (the "most-recently-created project" row) is untouched.
+        const cabTasksAfter = await cabStore.listTasks({ slim: true });
+        expect(cabTasksAfter.length).toBe(1);
+        expect(cabTasksAfter[0]!.id).toBe(cabTaskBefore!.id);
+        expect(cabTasksAfter[0]!.title).not.toBe("Launch-bound updated title");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+  });
+
+  /*
+  FNXC:TaskCreate 2026-07-16-17:52:
+  FUSI-096 regression (post-fn_project_use state): the launch-bound-only
+  suite above covers a session that never switches. This suite covers the
+  OTHER state named in the Surface Enumeration — a session that launches
+  bound to the INITIAL project (`store`/`tmpDir`), then explicitly switches
+  via `fn_project_use` to a SEPARATE target project P ("Fusion", FUSI prefix,
+  non-default "ideas" entry column), with a THIRD distractor project (CAB,
+  default "triage" entry column) registered in the same shared central
+  registry and given its own pre-existing task BEFORE the switch — i.e. CAB
+  remains the "most-recently-created project" drift trigger even though it
+  is neither the launch-bound nor the switched-to project. Every store-backed
+  mutation tool enumerated in the FUSI-096 Surface Enumeration is covered:
+  fn_task_create, fn_delegate_task, fn_workflow_create, fn_workflow_update,
+  fn_agent_create, fn_task_update. All must land in P's store post-switch,
+  never in the initial store nor CAB's store.
+  */
+  describe("FUSI-096: post-fn_project_use mutation targeting (switched session)", () => {
+    let fusionDir: string;
+    let fusionStore: TaskStore;
+    let cabDir: string;
+    let cabStore: TaskStore;
+
+    beforeEach(async () => {
+      fusionDir = await mkdtemp(join(tmpdir(), "fn-fusi-096-switch-fusion-"));
+      await mkdir(join(fusionDir, ".fusion"), { recursive: true });
+      fusionStore = new TaskStore(fusionDir);
+      await fusionStore.init();
+      await fusionStore.updateSettings({ taskPrefix: "FUSI" });
+      await fusionStore.setDefaultWorkflowId("builtin:coding-ideas");
+
+      cabDir = await mkdtemp(join(tmpdir(), "fn-fusi-096-switch-cab-"));
+      await mkdir(join(cabDir, ".fusion"), { recursive: true });
+      cabStore = new TaskStore(cabDir);
+      await cabStore.init();
+      await cabStore.updateSettings({ taskPrefix: "CAB" });
+      // The "most-recently-created" distractor project: created (and given its
+      // own first task) BEFORE the switch-and-mutate calls below run.
+      await cabStore.createTask({ description: "Pre-existing CAB task (created first)" });
+
+      fakeCentralRegistry.set("proj_fusion_switch", {
+        id: "proj_fusion_switch",
+        name: "Fusion",
+        path: fusionDir,
+        status: "active",
+        isolationMode: "in-process",
+        createdAt: "2020-01-01T00:00:00.000Z",
+        updatedAt: "2020-01-01T00:00:00.000Z",
+      });
+      fakeCentralRegistry.set("proj_cab_switch", {
+        id: "proj_cab_switch",
+        name: "contentful-app-builder",
+        path: cabDir,
+        status: "active",
+        isolationMode: "in-process",
+        createdAt: "2026-07-16T00:00:00.000Z",
+        updatedAt: "2026-07-16T00:00:00.000Z",
+      });
+    });
+
+    afterEach(async () => {
+      await fusionStore.close();
+      await cabStore.close();
+      await rm(fusionDir, { recursive: true, force: true });
+      await rm(cabDir, { recursive: true, force: true });
+    });
+
+    it("fn_task_create after fn_project_use lands FUSI's prefix + ideas entry column in the switched-to store only", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        const useResult = await client.callTool({ name: "fn_project_use", arguments: { id: "proj_fusion_switch" } });
+        expect(useResult.isError).not.toBe(true);
+
+        const result = await client.callTool({ name: "fn_task_create", arguments: { description: "Post-switch create" } });
+        expect(result.isError).not.toBe(true);
+
+        const fusionTasks = await fusionStore.listTasks({ slim: true });
+        const created = fusionTasks.find((t) => t.description === "Post-switch create");
+        expect(created).toBeTruthy();
+        expect(created!.id.startsWith("FUSI-")).toBe(true);
+        expect(created!.column).toBe("ideas");
+
+        const initialTasks = await store.listTasks({ slim: true });
+        expect(initialTasks.some((t) => t.description === "Post-switch create")).toBe(false);
+        const cabTasks = await cabStore.listTasks({ slim: true });
+        expect(cabTasks.some((t) => t.description === "Post-switch create")).toBe(false);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_delegate_task after fn_project_use lands FUSI's prefix in the switched-to store only", async () => {
+      const agentStore = new AgentStore({ rootDir: fusionStore.getFusionDir() });
+      await agentStore.init();
+      const agent = await agentStore.createAgent({ name: "Post-switch delegate target", role: "executor" } as any);
+
+      const { client, mcpServer } = await connectClient();
+      try {
+        await client.callTool({ name: "fn_project_use", arguments: { id: "proj_fusion_switch" } });
+
+        const result = await client.callTool({
+          name: "fn_delegate_task",
+          arguments: { agent_id: agent.id, description: "Post-switch delegated task" },
+        });
+        expect(result.isError).not.toBe(true);
+
+        const fusionTasks = await fusionStore.listTasks({ slim: true });
+        const created = fusionTasks.find((t) => t.description === "Post-switch delegated task");
+        expect(created).toBeTruthy();
+        expect(created!.id.startsWith("FUSI-")).toBe(true);
+
+        const cabTasks = await cabStore.listTasks({ slim: true });
+        expect(cabTasks.some((t) => t.description === "Post-switch delegated task")).toBe(false);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_workflow_create and fn_workflow_update after fn_project_use land in the switched-to store's workflow table only", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        await client.callTool({ name: "fn_project_use", arguments: { id: "proj_fusion_switch" } });
+
+        const createResult = await client.callTool({
+          name: "fn_workflow_create",
+          arguments: {
+            name: "Post-switch workflow",
+            ir: {
+              version: "v2",
+              name: "Post-switch workflow",
+              columns: [{ id: "todo", name: "Todo", traits: [] }],
+              nodes: [
+                { id: "start", kind: "start", column: "todo" },
+                { id: "end", kind: "end", column: "todo" },
+              ],
+              edges: [{ from: "start", to: "end", condition: "success" }],
+            },
+          },
+        });
+        expect(createResult.isError).not.toBe(true);
+        const created = createResult.structuredContent as { workflowId?: string; id?: string } | undefined;
+        const workflowId = created?.workflowId ?? created?.id;
+        expect(workflowId).toBeTruthy();
+
+        const fusionWorkflow = await fusionStore.getWorkflowDefinition(workflowId as string);
+        expect(fusionWorkflow).toBeTruthy();
+
+        const cabWorkflow = await cabStore.getWorkflowDefinition(workflowId as string).catch(() => undefined);
+        expect(cabWorkflow).toBeFalsy();
+
+        const updateResult = await client.callTool({
+          name: "fn_workflow_update",
+          arguments: { workflow_id: workflowId, name: "Post-switch workflow (renamed)" },
+        });
+        expect(updateResult.isError).not.toBe(true);
+        const renamed = await fusionStore.getWorkflowDefinition(workflowId as string);
+        expect(renamed?.name).toBe("Post-switch workflow (renamed)");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_agent_create after fn_project_use lands in the switched-to store's AgentStore only", async () => {
+      const { client, mcpServer } = await connectClient();
+      try {
+        await client.callTool({ name: "fn_project_use", arguments: { id: "proj_fusion_switch" } });
+
+        const result = await client.callTool({
+          name: "fn_agent_create",
+          arguments: { name: "Post-switch Agent", role: "executor" },
+        });
+        expect(result.isError).not.toBe(true);
+
+        const fusionAgentStore = new AgentStore({ rootDir: fusionStore.getFusionDir() });
+        await fusionAgentStore.init();
+        const fusionAgents = await fusionAgentStore.listAgents({});
+        expect(fusionAgents.some((a) => a.name === "Post-switch Agent")).toBe(true);
+
+        const cabAgentStore = new AgentStore({ rootDir: cabStore.getFusionDir() });
+        await cabAgentStore.init();
+        const cabAgents = await cabAgentStore.listAgents({});
+        expect(cabAgents.some((a) => a.name === "Post-switch Agent")).toBe(false);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("fn_task_update after fn_project_use mutates the switched-to store's task only, never CAB's", async () => {
+      const fusionTask = await fusionStore.createTask({ description: "Post-switch updatable task", source: { sourceType: "api" } });
+      const [cabTaskBefore] = await cabStore.listTasks({ slim: true });
+      const { client, mcpServer } = await connectClient();
+      try {
+        await client.callTool({ name: "fn_project_use", arguments: { id: "proj_fusion_switch" } });
+
+        const result = await client.callTool({
+          name: "fn_task_update",
+          arguments: { id: fusionTask.id, title: "Post-switch updated title" },
+        });
+        expect(result.isError).not.toBe(true);
+
+        const updatedFusionTask = await fusionStore.getTask(fusionTask.id);
+        expect(updatedFusionTask.title).toBe("Post-switch updated title");
+
+        const cabTasksAfter = await cabStore.listTasks({ slim: true });
+        expect(cabTasksAfter.length).toBe(1);
+        expect(cabTasksAfter[0]!.id).toBe(cabTaskBefore!.id);
+        expect(cabTasksAfter[0]!.title).not.toBe("Post-switch updated title");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+  });
+
+  /*
   FNXC:McpServer 2026-07-11-16:00:
   FUSI-052 dispatch coverage for the fifteen new base tools: task lifecycle
   (pause/unpause/retry/duplicate/refine/unarchive), agent edit

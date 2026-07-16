@@ -2596,6 +2596,19 @@ export class CentralCore extends EventEmitter<CentralCoreEvents> {
     return deletedCount;
   }
 
+  /*
+  FNXC:TaskCreate 2026-07-16-17:52:
+  FUSI-096: this is CentralCore's ONLY notion of a "default/current project",
+  and it is a purely explicit, human-driven opt-in (`fn project set-default`)
+  — it is never auto-set on project creation and never consulted by any
+  TaskStore create/mutation path (`store.ts`'s `createTaskWithDistributedReservation`
+  and friends never call `getDefaultProjectId()`). A `fn mcp serve --project P`
+  session's store-backed mutations must keep resolving prefix/entry-column/
+  write-DB strictly from the session-bound store's own `rootDir`/settings/`db`
+  (see `McpProjectSession`/`server.ts`'s per-call `active.store` dispatch
+  seam), never from this or any other central-registry "current project"
+  state.
+  */
   async getDefaultProjectId(): Promise<string | undefined> {
     this.ensureInitialized();
 

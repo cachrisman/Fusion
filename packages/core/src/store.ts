@@ -4549,6 +4549,18 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
     }
   }
 
+  /*
+  FNXC:TaskCreate 2026-07-16-17:52:
+  FUSI-096 investigation: this `new CentralCore()` lookup resolves ONLY an
+  attribution tag (`nodeId`) recorded on the reservation row for audit/replica
+  bookkeeping (see distributed-task-id.ts). It must never be used to select
+  WHICH project's database a task is written to — that is, and must remain,
+  entirely determined by `this.db` (the session store instance the caller
+  already holds). CentralCore has no "current project" concept for a create
+  path to accidentally consult (confirmed in central-core.ts); its only
+  project-selection knob, `defaultProjectId`, is an explicit opt-in
+  (`fn project set-default`) that this method does not read.
+  */
   async resolveLocalNodeIdForTaskAllocation(): Promise<string> {
     if (process.env.VITEST === "true") {
       return "local";
@@ -4565,6 +4577,27 @@ ${TASK_UPSERT_SQL_ASSIGNMENTS}
     }
   }
 
+  /*
+  FNXC:TaskCreate 2026-07-16-17:52:
+  FUSI-096: every store-backed mutation (this method underlies createTask and
+  its distributed-reservation-based siblings) must resolve prefix, entry
+  column, and write database from the session store's OWN `rootDir`/`this.db`/
+  settings — never from central-registry current/most-recent project state.
+  `settings` (prefix) comes from `this.getSettingsFast()`, `allocator` is
+  scoped to `this.db` via `getDistributedTaskIdAllocator()`, and `nodeId` is
+  an attribution-only tag (see resolveLocalNodeIdForTaskAllocation above) that
+  is never used to pick a database. `createTaskWithReservedId` below resolves
+  the entry column via `this.materializeDefaultWorkflowSteps()`/
+  `this.listWorkflowSteps()`, likewise scoped to `this`. Reproduced/pinned via
+  packages/core/src/__tests__/store-create.test.ts
+  ("FUSI-096: session-bound create-path project targeting") and
+  packages/cli/src/mcp-server/__tests__/tools.test.ts
+  ("FUSI-096: launch-bound-only mutation targeting"): the reported
+  --project-Fusion-created-in-contentful-app-builder drift does not
+  reproduce against this path in the current codebase (see task notes) —
+  these comments and tests exist to keep this invariant pinned so it cannot
+  silently regress.
+  */
   private async createTaskWithDistributedReservation(
     input: TaskCreateInput,
     options?: {

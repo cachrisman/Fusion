@@ -365,6 +365,19 @@ export function formatDistributedTaskId(prefix: string, sequence: number): strin
   return `${normalizedPrefix}-${String(sequence).padStart(3, "0")}`;
 }
 
+/*
+FNXC:TaskCreate 2026-07-16-17:52:
+FUSI-096: the allocator is always constructed against the CALLER's own
+`db` handle (store.ts's `getDistributedTaskIdAllocator()` passes `this.db`,
+i.e. the session-bound store's own database) — there is no global/shared
+allocator instance. `input.nodeId` (see `reserveDistributedTaskId` below) is
+persisted into `distributed_task_id_reservations.nodeId` purely as an
+attribution/audit tag identifying which cluster node made the reservation;
+it is never read back to choose a database. Which project's `.fusion/*.db`
+receives the write is determined solely by which `db` this allocator closes
+over, which is in turn solely determined by which `TaskStore` instance
+called `getDistributedTaskIdAllocator()`.
+*/
 export function createDistributedTaskIdAllocator(db: Database): DistributedTaskIdAllocator {
   let opLock: Promise<void> = Promise.resolve();
   const withLock = async <T>(fn: () => Promise<T>): Promise<T> => {
