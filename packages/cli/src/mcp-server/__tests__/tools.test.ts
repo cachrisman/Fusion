@@ -152,8 +152,9 @@ vi.mock("@fusion/engine", async () => {
 });
 
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { z } from "zod";
 import { MCP_TOOL_REGISTRY, DESTRUCTIVE_TOOL_TIER, buildMcpToolRegistry, redactSecretsDeep } from "../tools.js";
-import { buildMcpServer } from "../server.js";
+import { buildMcpServer, jsonSchemaToZodShape } from "../server.js";
 
 const EXPECTED_TOOL_NAMES = [
   "fn_task_create",
@@ -245,6 +246,20 @@ const EXPECTED_TOOL_NAMES = [
   "fn_usage_windows",
 ];
 
+const SAFE_OPERATOR_CORE_TOOL_NAMES = [
+  "fn_task_steer",
+  "fn_task_workflow_input",
+  "fn_task_comments_list",
+  "fn_task_comments_create",
+  "fn_task_show",
+  "fn_task_agent_logs",
+  "fn_task_documents_list",
+  "fn_task_document_get",
+  "fn_task_artifacts_list",
+  "fn_task_artifact_get",
+  "fn_workflow_validate",
+] as const;
+
 const EXPECTED_DESTRUCTIVE_TOOL_NAMES = [
   "fn_task_delete",
   "fn_agent_delete",
@@ -274,9 +289,45 @@ function workflowIr(name: string): WorkflowIr {
   } as WorkflowIr;
 }
 
+describe("jsonSchemaToZodShape", () => {
+  it("preserves required fields, nested structures, and declared text/numeric bounds", () => {
+    const parser = z.object(jsonSchemaToZodShape({
+      type: "object",
+      required: ["text", "pagination", "nested"],
+      properties: {
+        text: { type: "string", minLength: 1, maxLength: 2_000 },
+        pagination: { type: "number", minimum: 0, maximum: 100 },
+        nested: {
+          type: "array",
+          items: { type: "object", required: ["kind"], properties: { kind: { type: "string", enum: ["safe"] } } },
+        },
+      },
+    }));
+
+    expect(parser.safeParse({ text: "x", pagination: 0, nested: [{ kind: "safe" }] }).success).toBe(true);
+    for (const invalid of [
+      { text: "", pagination: 0, nested: [{ kind: "safe" }] },
+      { text: "x".repeat(2_001), pagination: 0, nested: [{ kind: "safe" }] },
+      { text: "x", pagination: -1, nested: [{ kind: "safe" }] },
+      { text: "x", pagination: 101, nested: [{ kind: "safe" }] },
+      { text: "x", pagination: 0, nested: [{ kind: "unsafe" }] },
+      { text: "x", pagination: 0 },
+    ]) expect(parser.safeParse(invalid).success).toBe(false);
+  });
+});
+
 describe("MCP_TOOL_REGISTRY (curated v1 allow-list)", () => {
   it("declares exactly the curated allow-list, no more, no less", () => {
     expect(MCP_TOOL_REGISTRY.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
+  });
+
+  it("keeps FUSI-118's eleven Safe Operator Core names exactly once in the 78-tool base tier", () => {
+    const names = MCP_TOOL_REGISTRY.map((tool) => tool.name);
+    expect(names).toHaveLength(78);
+    for (const name of SAFE_OPERATOR_CORE_TOOL_NAMES) {
+      expect(names.filter((candidate) => candidate === name), `${name} must be registered exactly once`).toHaveLength(1);
+    }
+    expect(DESTRUCTIVE_TOOL_TIER.map((tool) => tool.name).filter((name) => SAFE_OPERATOR_CORE_TOOL_NAMES.includes(name as never))).toEqual([]);
   });
 
   it("gives every tool a non-empty description and a valid object JSON-Schema inputSchema", () => {
@@ -310,6 +361,7 @@ describe("buildMcpToolRegistry (FUSI-002 destructive gate)", () => {
 
   it("adds exactly the eleven destructive tools (FUSI-002's three plus FUSI-005's four mission-hierarchy tools plus FUSI-019's fn_settings_update plus FUSI-020's three project tools), no more, no fewer, when allowDestructive is true", () => {
     const names = buildMcpToolRegistry({ allowDestructive: true }).map((t) => t.name).sort();
+    expect(names).toHaveLength(89);
     expect(names).toEqual([...EXPECTED_TOOL_NAMES, ...EXPECTED_DESTRUCTIVE_TOOL_NAMES].sort());
     expect(DESTRUCTIVE_TOOL_TIER.map((t) => t.name).sort()).toEqual([...EXPECTED_DESTRUCTIVE_TOOL_NAMES].sort());
   });
@@ -1061,6 +1113,27 @@ describe("fn mcp serve — in-memory server smoke test", () => {
         expect(serialized).not.toContain("description");
         expect(serialized).not.toContain("steeringComments");
         expect(serialized).not.toContain("log");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("redacts paths and data URLs from integration-authored comment projections", async () => {
+      const task = await store.createTask({ description: "Comment projection redaction", source: { sourceType: "api" } });
+      const unsafe = "Imported from /private/integration/comment.json data:application/octet-stream;base64,AAECAw==";
+      await store.addTaskComment(task.id, unsafe, "integration");
+      const { client, mcpServer } = await connectClient();
+      try {
+        const listed = await client.callTool({ name: "fn_task_comments_list", arguments: { task_id: task.id } });
+        const steered = await client.callTool({ name: "fn_task_steer", arguments: { task_id: task.id, text: unsafe } });
+        for (const result of [listed, steered]) {
+          const serialized = JSON.stringify(result);
+          expect(serialized).not.toContain("/private/integration/comment.json");
+          expect(serialized).not.toContain("data:application/octet-stream;base64,AAECAw==");
+          expect(serialized).toContain("[redacted-path]");
+          expect(serialized).toContain("[redacted-data-url]");
+        }
       } finally {
         await client.close();
         await mcpServer.close();

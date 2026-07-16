@@ -125,6 +125,34 @@ const repoRoot = resolvePath(__dirname, "../../../../..");
 
 const FORBIDDEN_NAME_PATTERNS = [/release/i, /publish/i, /version[-_]?tag/i, /changeset/i];
 
+const FUSI_118_BASE_TOOL_NAMES = [
+  "fn_task_steer",
+  "fn_task_workflow_input",
+  "fn_task_comments_list",
+  "fn_task_comments_create",
+  "fn_task_show",
+  "fn_task_agent_logs",
+  "fn_task_documents_list",
+  "fn_task_document_get",
+  "fn_task_artifacts_list",
+  "fn_task_artifact_get",
+  "fn_workflow_validate",
+] as const;
+
+const EXPECTED_DESTRUCTIVE_NAMES = [
+  "fn_task_delete",
+  "fn_agent_delete",
+  "fn_workflow_delete",
+  "fn_mission_delete",
+  "fn_milestone_delete",
+  "fn_slice_delete",
+  "fn_feature_delete",
+  "fn_settings_update",
+  "fn_project_create",
+  "fn_project_update",
+  "fn_project_remove",
+] as const;
+
 // The real outcome vocabulary `auditDestructiveInvocation` callers use across tools.ts (grep-verified).
 const KNOWN_OUTCOME_TOKENS = [
   "deleted",
@@ -182,6 +210,18 @@ describe("Invariant A — buildMcpToolRegistry is the single base+destructive co
     const destructiveNames = new Set(DESTRUCTIVE_TOOL_TIER.map((t) => t.name));
     const overlap = [...baseNames].filter((name) => destructiveNames.has(name));
     expect(overlap, "tool name(s) present in BOTH tiers").toEqual([]);
+  });
+
+  it("pins the FUSI-118 78 base / 11 destructive / 89 opt-in contract and tier membership", () => {
+    const baseNames = MCP_TOOL_REGISTRY.map((tool) => tool.name);
+    const destructiveNames = DESTRUCTIVE_TOOL_TIER.map((tool) => tool.name);
+    expect(baseNames).toHaveLength(78);
+    expect(destructiveNames).toEqual([...EXPECTED_DESTRUCTIVE_NAMES]);
+    expect(buildMcpToolRegistry({ allowDestructive: true })).toHaveLength(89);
+    for (const name of FUSI_118_BASE_TOOL_NAMES) {
+      expect(baseNames.filter((candidate) => candidate === name), `${name} must be base-tier exactly once`).toHaveLength(1);
+      expect(destructiveNames).not.toContain(name);
+    }
   });
 
   it("declares no duplicate tool name within either tier", () => {
@@ -340,6 +380,9 @@ describe("Invariant G — tool-count parity across surfaces stays source-derived
     // FNXC:McpProjectSession 2026-07-12-00:00: FUSI-083 adds two base tools
     // (fn_project_use, fn_project_current) — base 66 → 68, destructive
     // unchanged at 11, combined 77 → 79.
+    // FNXC:McpServer 2026-07-16-19:30: FUSI-118 reconciles FUSI-116/117's
+    // ten new base controls with the enriched existing fn_task_show: 68 → 78
+    // base, eleven destructive unchanged, and 79 → 89 opt-in.
     const numberWords: Record<number, string> = {
       43: "forty-three",
       49: "forty-nine",
@@ -351,6 +394,8 @@ describe("Invariant G — tool-count parity across surfaces stays source-derived
       75: "seventy-five",
       77: "seventy-seven",
       79: "seventy-nine",
+      78: "seventy-eight",
+      89: "eighty-nine",
       11: "eleven",
     };
     expect(numberWords[base], `no spelled-out word mapping recorded for base count ${base} — update this test's numberWords map`).toBeTruthy();

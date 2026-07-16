@@ -27,6 +27,26 @@ Both transports serve the exact same tool registry and the exact same
 guaranteed fetchable over either transport (see the automated coverage that
 proves this).
 
+## Safe operator sequence
+
+1. Inspect the task with `fn_task_show`. When more context is needed, use the
+   bounded `fn_task_agent_logs`, `fn_task_documents_list` / `fn_task_document_get`,
+   and `fn_task_artifacts_list` / `fn_task_artifact_get` evidence reads.
+2. If the diagnostic projection includes `expected_input_marker`, copy that
+   opaque value unchanged into `fn_task_workflow_input`; do not construct,
+   parse, or retain workflow markers yourself. A stale or replaced marker
+   returns a safe structured conflict without changing executor-owned state.
+3. Use `fn_task_comments_create` or `fn_task_steer` for operator input. The
+   server owns comment provenance, so callers cannot impersonate another author.
+4. Use `fn_workflow_validate` for dry-run validation before choosing a workflow
+   mutation. It validates through Fusion's shared workflow factory and does not
+   create or update a workflow.
+
+All operator projections are intentionally narrow: no filesystem paths,
+registry URIs, binary or data-URL payloads, download handles, secrets, raw
+prompts, session metadata, or stack traces are returned. Destructive tools
+remain opt-in under `--allow-destructive`.
+
 ## Curated tool surface
 
 The MCP curated surface is a **subset** of the full pi-extension `fn_*` tool

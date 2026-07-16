@@ -226,6 +226,7 @@ async function bootstrapIsolatedProject(projectDir) {
  * @param {object} options
  * @param {string} options.cliBin absolute path to `packages/cli/bin.mjs`
  * @param {string[]} options.expectedToolNames curated tool names to assert against
+ * @param {boolean} [options.allowDestructive] launch with the existing destructive opt-in flag
  * @param {string} [options.expectedSkillResourceUri] resource URI expected in resources/list + read (default "fusion://skill")
  * @param {number} [options.timeoutMs] bound on waiting for the tools/list response (default 30_000)
  * @param {number} [options.shutdownTimeoutMs] bound on graceful SIGTERM shutdown (default 10_000)
@@ -235,6 +236,7 @@ async function bootstrapIsolatedProject(projectDir) {
 export async function runMcpServeStdioSmoke({
   cliBin,
   expectedToolNames,
+  allowDestructive = false,
   expectedSkillResourceUri = "fusion://skill",
   timeoutMs = 30_000,
   shutdownTimeoutMs = 10_000,
@@ -268,7 +270,10 @@ export async function runMcpServeStdioSmoke({
     }
   };
 
-  const child = spawn(process.execPath, [cliBin, "mcp", "serve"], {
+  // FNXC:BootSmoke 2026-07-16-19:50: FUSI-118 proves both built registry
+  // modes through the same raw stdio parser; the flag only changes the
+  // existing registry gate and never relaxes stdout or resource assertions.
+  const child = spawn(process.execPath, [cliBin, "mcp", "serve", ...(allowDestructive ? ["--allow-destructive"] : [])], {
     cwd: isolatedProject,
     env: {
       ...process.env,

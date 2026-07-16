@@ -47,10 +47,21 @@ function jsonSchemaPropertyToZod(prop: Record<string, unknown>): ZodTypeAny {
   }
   const description = typeof prop.description === "string" ? prop.description : "";
   switch (prop.type) {
-    case "string":
-      return z.string().describe(description);
-    case "number":
-      return z.number().describe(description);
+    case "string": {
+      let schema = z.string();
+      if (typeof prop.minLength === "number" && Number.isFinite(prop.minLength)) schema = schema.min(prop.minLength);
+      if (typeof prop.maxLength === "number" && Number.isFinite(prop.maxLength)) schema = schema.max(prop.maxLength);
+      return schema.describe(description);
+    }
+    case "number": {
+      // FNXC:McpServer 2026-07-16-19:35: FUSI-118 keeps registry-declared
+      // text and pagination bounds at the shared Zod wire boundary for both
+      // transports. Domain factories still own semantic/integer validation.
+      let schema = z.number();
+      if (typeof prop.minimum === "number" && Number.isFinite(prop.minimum)) schema = schema.min(prop.minimum);
+      if (typeof prop.maximum === "number" && Number.isFinite(prop.maximum)) schema = schema.max(prop.maximum);
+      return schema.describe(description);
+    }
     case "boolean":
       return z.boolean().describe(description);
     case "array": {
@@ -205,8 +216,15 @@ export function buildMcpServer(options: BuildMcpServerOptions): FusionMcpServer 
         */
         const active = projectSession.current();
         const callCtx: McpToolRuntimeContext = { ...runtimeCtx, cwd: active.projectPath };
-        const result = await tool.handler(active.store, (args ?? {}) as Record<string, unknown>, callCtx);
-        return result as never;
+        try {
+          const result = await tool.handler(active.store, (args ?? {}) as Record<string, unknown>, callCtx);
+          return result as never;
+        } catch {
+          // FNXC:McpServer 2026-07-16-19:35: FUSI-118 requires the common
+          // registration loop to keep unexpected store/handler failures from
+          // exposing stacks, database paths, or transport-specific details.
+          return { content: [{ type: "text", text: "ERROR: Request could not be completed." }], isError: true } as never;
+        }
       },
     );
   }

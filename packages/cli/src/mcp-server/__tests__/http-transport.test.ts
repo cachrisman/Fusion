@@ -24,7 +24,8 @@ import { connect as netConnect } from "node:net";
 import { TaskStore } from "@fusion/core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { MCP_TOOL_REGISTRY } from "../tools.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { MCP_TOOL_REGISTRY, buildMcpToolRegistry } from "../tools.js";
 import { buildMcpServer, type FusionMcpServer } from "../server.js";
 import { startHttpMcpTransport, type HttpMcpTransportHandle } from "../http-transport.js";
 
@@ -65,8 +66,8 @@ describe("startHttpMcpTransport (FUSI-003)", () => {
     stderrLines.push(message);
   }
 
-  async function startServer(options: { token?: string; host?: string } = {}): Promise<HttpMcpTransportHandle> {
-    mcpServer = buildMcpServer({ cwd: tmpDir, store, version: "test" });
+  async function startServer(options: { token?: string; host?: string; allowDestructive?: boolean } = {}): Promise<HttpMcpTransportHandle> {
+    mcpServer = buildMcpServer({ cwd: tmpDir, store, version: "test", allowDestructive: options.allowDestructive });
     handle = await startHttpMcpTransport({
       server: mcpServer,
       host: options.host ?? "127.0.0.1",
@@ -174,6 +175,77 @@ describe("startHttpMcpTransport (FUSI-003)", () => {
         expect(names.some((name) => pattern.test(name))).toBe(false);
       }
       expect(names.some((name) => /_delete$/i.test(name))).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("matches in-memory tool names and normalized input schemas for both registry flags", async () => {
+    async function listInMemory(allowDestructive: boolean) {
+      const inMemoryServer = buildMcpServer({ cwd: tmpDir, store, version: "test", allowDestructive });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "test-in-memory-client", version: "1.0.0" });
+      await Promise.all([client.connect(clientTransport), inMemoryServer.connect(serverTransport)]);
+      try {
+        return (await client.listTools()).tools ?? [];
+      } finally {
+        await client.close();
+        await inMemoryServer.close();
+      }
+    }
+
+    for (const allowDestructive of [false, true]) {
+      const h = await startServer({ token: TEST_TOKEN, allowDestructive });
+      const client = await connectAuthedClient(h, TEST_TOKEN);
+      try {
+        const httpTools = (await client.listTools()).tools ?? [];
+        const inMemoryTools = await listInMemory(allowDestructive);
+        const normalize = (tools: Array<{ name: string; inputSchema: unknown }>) => tools
+          .map(({ name, inputSchema }) => ({ name, inputSchema }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        expect(normalize(httpTools)).toEqual(normalize(inMemoryTools));
+        expect(httpTools).toHaveLength(allowDestructive ? 89 : 78);
+        expect(httpTools.map((tool) => tool.name).sort()).toEqual(buildMcpToolRegistry({ allowDestructive }).map((tool) => tool.name).sort());
+      } finally {
+        await client.close();
+        await h.close();
+        handle = undefined;
+        mcpServer = undefined;
+      }
+    }
+  });
+
+  it("enforces bounded schemas and returns safe workflow conflicts before HTTP dispatch can expose internals", async () => {
+    const marker = "workflow-input:sk-live-marker-secret@1: private executor state";
+    const task = await store.createTask({ description: "HTTP contract task", source: { sourceType: "api" } });
+    await store.updateTask(task.id, { paused: true, status: "awaiting-user-input", pausedReason: `${marker}-replaced` });
+    const h = await startServer({ token: TEST_TOKEN });
+    const client = await connectAuthedClient(h, TEST_TOKEN);
+    try {
+      const call = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args });
+      for (const args of [
+        { task_id: task.id, expected_input_marker: marker },
+        { task_id: task.id, text: "", expected_input_marker: marker },
+        { task_id: task.id, text: "x".repeat(2_001), expected_input_marker: marker },
+        { task_id: task.id, text: 7, expected_input_marker: marker },
+      ]) {
+        const result = await call("fn_task_workflow_input", args);
+        expect(result.isError).toBe(true);
+        const serialized = JSON.stringify(result);
+        expect(serialized).not.toContain("sk-live-marker-secret");
+        expect(serialized).not.toMatch(/stack|\/private\//i);
+      }
+
+      for (const args of [{ task_id: task.id, limit: -1 }, { task_id: task.id, limit: 101 }, { task_id: task.id, offset: -1 }, { task_id: task.id, offset: 10_001 }]) {
+        expect((await call("fn_task_comments_list", args)).isError).toBe(true);
+      }
+      expect((await call("fn_task_comments_list", { task_id: task.id, limit: 100, offset: 0 })).isError).not.toBe(true);
+      expect((await call("fn_task_comments_create", { task_id: task.id, text: "x" })).isError).not.toBe(true);
+      expect((await call("fn_task_comments_create", { task_id: task.id, text: "x".repeat(2_000) })).isError).not.toBe(true);
+      expect((await call("fn_task_workflow_input", { task_id: task.id, text: "x", expected_input_marker: marker })).isError).toBe(true);
+      const invalidWorkflow = await call("fn_workflow_validate", { ir: { version: "v2", nodes: "not-an-array" } });
+      expect((invalidWorkflow.structuredContent as { valid?: boolean }).valid).toBe(false);
+      expect(JSON.stringify(invalidWorkflow)).not.toMatch(/stack|\/private\//i);
     } finally {
       await client.close();
     }

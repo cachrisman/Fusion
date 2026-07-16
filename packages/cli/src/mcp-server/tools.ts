@@ -406,10 +406,17 @@ function validateMcpCommentPagination(
 }
 
 function projectSafeMcpComment(comment: TaskComment): SafeMcpComment {
+  /*
+  FNXC:McpConversationControls 2026-07-16-20:15:
+  FUSI-118's operator response contract applies to comment projections too:
+  comments can be authored by integrations, not just the caller, so redact
+  path- and data-URL-shaped text before returning either ordinary or steering
+  comments over MCP.
+  */
   return redactSecretsDeep({
     id: comment.id,
-    text: redactSecrets(comment.text).slice(0, MCP_COMMENT_TEXT_RESULT_MAX_LENGTH),
-    author: redactSecrets(comment.author).slice(0, 128),
+    text: safeEvidenceText(comment.text, MCP_COMMENT_TEXT_RESULT_MAX_LENGTH) ?? "",
+    author: safeEvidenceText(comment.author, 128) ?? "",
     createdAt: comment.createdAt,
     ...(comment.updatedAt ? { updatedAt: comment.updatedAt } : {}),
   });
@@ -666,10 +673,15 @@ contain absolute paths. Redact path-shaped text after secret redaction so an
 MCP evidence read cannot become filesystem-discovery authority.
 */
 const MCP_FILESYSTEM_PATH_PATTERN = /(?:file:\/\/[^\s"'<>]+|(?:[A-Za-z]:[\\/]|\/|~[\\/]|\\\\)(?:[^\s"'`<>(){}\\,;]+[\\/])*[^\s"'`<>(){}\\,;]+)/g;
+const MCP_DATA_URL_PATTERN = /\bdata:[a-z]+\/[a-z0-9.+-]+(?:;[a-z0-9=._-]+)*,[^\s"'<>]*/gi;
 
 function safeEvidenceText(value: unknown, maxBytes = MCP_EVIDENCE_TEXT_MAX_BYTES): string | undefined {
   if (typeof value !== "string") return undefined;
-  return redactSecrets(capUtf8Text(value, maxBytes).text).replace(MCP_FILESYSTEM_PATH_PATTERN, "[redacted-path]");
+  return redactSecrets(capUtf8Text(value, maxBytes).text)
+    // FNXC:McpEvidence 2026-07-16-20:15: Data URLs can contain slash-separated
+    // MIME types, so remove them before path matching mistakes the suffix for a path.
+    .replace(MCP_DATA_URL_PATTERN, "[redacted-data-url]")
+    .replace(MCP_FILESYSTEM_PATH_PATTERN, "[redacted-path]");
 }
 
 function requireMcpEvidenceKey(value: unknown, label: "key" = "key"): { ok: true; value: string } | { ok: false; error: string } {
@@ -3782,6 +3794,13 @@ const fnProjectCurrent: McpToolDefinition = {
   },
 };
 
+/*
+FNXC:McpServer 2026-07-16-19:25:
+FUSI-118 reconciles the operator contract only: FUSI-116/117 controls remain
+base-tier entries owned by their shared factories, while the existing eleven
+DESTRUCTIVE entries and their audit gate stay unchanged. Do not add domain
+behavior or a transport-specific registry path at this integration boundary.
+*/
 export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnTaskCreate,
   fnTaskList,

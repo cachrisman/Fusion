@@ -140,20 +140,21 @@ describe("shared task read tools", () => {
     }
   });
 
-  it("keeps FUSI-117 MCP evidence reads out of every runtime-agent read surface", () => {
+  it("keeps FUSI-116/117 MCP-only controls out of every runtime-agent read surface", () => {
     /*
-    FNXC:McpEvidence 2026-07-16-20:30:
-    fn_workflow_validate is deliberately pre-existing in createWorkflowAuthoringTools;
-    FUSI-117 only registers that shared validator at the external MCP boundary.
+    FNXC:McpEvidence 2026-07-16-19:45:
+    FUSI-118 keeps external conversation and evidence controls out of shared,
+    heartbeat, and task-scoped runtime factories. fn_workflow_validate remains
+    deliberately pre-existing in createWorkflowAuthoringTools, not MCP-only.
     */
-    const mcpOnlyEvidenceReads = ["fn_task_agent_logs", "fn_task_documents_list", "fn_task_document_get", "fn_task_artifacts_list", "fn_task_artifact_get"];
+    const mcpOnlyOperatorTools = ["fn_task_steer", "fn_task_workflow_input", "fn_task_comments_list", "fn_task_comments_create", "fn_task_agent_logs", "fn_task_documents_list", "fn_task_document_get", "fn_task_artifacts_list", "fn_task_artifact_get"];
     const monitor = new HeartbeatMonitor({ store: {} as never, taskStore: createStore(), rootDir: "/tmp/fn-test" });
     const surfaces = [
       toolNames(createTaskReadTools(createStore())),
       toolNames((monitor as unknown as { createSharedHeartbeatWorkTools: (store: TaskStore) => Array<{ name: string }> }).createSharedHeartbeatWorkTools(createStore())),
       toolNames(monitor.createHeartbeatTools("agent-1", createStore(), "FN-001")),
     ];
-    for (const names of surfaces) for (const name of mcpOnlyEvidenceReads) expect(names).not.toContain(name);
+    for (const names of surfaces) for (const name of mcpOnlyOperatorTools) expect(names).not.toContain(name);
   });
 
   it("pins per-surface task-read tool name parity on canonical fn_task_show", () => {

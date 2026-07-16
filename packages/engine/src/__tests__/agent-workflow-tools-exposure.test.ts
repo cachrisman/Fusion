@@ -38,6 +38,13 @@ const REQUIRED_WORKFLOW_TOOLS = [
   "fn_workflow_update",
   "fn_workflow_delete",
   "fn_workflow_settings",
+  // FNXC:WorkflowToolExposure 2026-07-16-19:20: Preserve the pre-existing
+  // granular workflow graph factories while FUSI-118 only reconciles the
+  // external MCP contract; this is not an operator-only capability addition.
+  "fn_workflow_add_node",
+  "fn_workflow_remove_node",
+  "fn_workflow_add_edge",
+  "fn_workflow_remove_edge",
   "fn_trait_list",
 ] as const;
 

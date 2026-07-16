@@ -98,9 +98,15 @@ describe("fusion://skill MCP resource (FUSI-045)", () => {
       }
     });
 
-    it("mentions the MCP-connection section heading and the pre-existing SKILL body signal", () => {
+    it("serves the regenerated Safe Operator guidance without the obsolete comments/steering fallback", () => {
       const markdown = buildServedMcpSkillMarkdown();
       expect(markdown).toContain("# MCP Connection");
+      expect(markdown).toContain("## Safe operator sequence");
+      expect(markdown).toContain("expected_input_marker");
+      expect(markdown).toContain("fn_task_comments_create");
+      expect(markdown).toContain("fn_task_steer");
+      expect(markdown).toContain("fn_workflow_validate");
+      expect(markdown).not.toContain("Adding comments or steering guidance requires CLI");
       // SKILL.md body signal — present before any MCP-specific content was ever added.
       expect(markdown).toContain("Fusion is an AI-orchestrated task board");
     });
