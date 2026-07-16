@@ -101,19 +101,28 @@ on the live server when the operator passes `--allow-destructive`.
 | `fn_slice_delete` | DESTRUCTIVE: delete a slice and its features. Rejects deletion when a child feature is linked to a live task unless force=true. Only registered when `fn mcp serve` is started with --allow-destructive. | destructive — `--allow-destructive`-gated |
 | `fn_slice_list` | List the slices under a given milestoneId. | base |
 | `fn_slice_show` | Show full details for a single slice by ID. | base |
+| `fn_task_agent_logs` | List a bounded, redacted page of persisted agent-log evidence for one task. | base |
 | `fn_task_archive` | Archive a task from any live column (move to archived). This is a REVERSIBLE soft-move, not a deletion — archived tasks are preserved for historical reference and restorable via fn_task_unarchive. If the task is still referenced as a lineage parent by another task, archiving is rejected unless removeLineageReferences:true is passed. | base |
+| `fn_task_artifact_get` | Read a capped inline text artifact only for the supplied task-scoped opaque key and safe MIME types. | base |
+| `fn_task_artifacts_list` | List metadata-only task artifacts; returned keys are opaque and task-scoped. | base |
+| `fn_task_comments_create` | Create an ordinary task comment with fixed server-owned MCP operator provenance. | base |
+| `fn_task_comments_list` | List a task's ordinary comments using deterministic oldest-first pagination. | base |
 | `fn_task_create` | Create a new task on the Fusion task board. The task enters the planning column where the AI planning agent will plan it into a full prompt with steps, file scope, and acceptance criteria. Optionally pass workflow_id to select a workflow at creation time; use fn_workflow_list to discover valid IDs. | base |
 | `fn_task_delete` | DESTRUCTIVE: soft-delete a task from active Fusion board views. The task row and artifacts are preserved; optional allowResurrection marks the ID for intentional recreation. If the task is still referenced as a lineage parent by another task, deletion is rejected unless removeLineageReferences:true is passed. Only registered when `fn mcp serve` is started with --allow-destructive. | destructive — `--allow-destructive`-gated |
+| `fn_task_document_get` | Read capped, redacted inline text for one explicit task document key. | base |
+| `fn_task_documents_list` | List metadata-only task documents in deterministic key order. | base |
 | `fn_task_duplicate` | Duplicate an existing task, creating a fresh copy in planning. Copies the title and description but resets all execution state. The AI planning agent will replan the new task. | base |
 | `fn_task_list` | List all tasks on the Fusion board, grouped by column. `column` accepts any of the six default columns (todo, triage, in-progress, in-review, done, archived) PLUS any workflow-specific column defined by a custom workflow (e.g. an 'ideas' backlog column) — workflow-specific columns are also shown unfiltered. | base |
 | `fn_task_pause` | Pause a task for explicit user-requested manual control — stops all automated agent and scheduler interaction. Agents should not pause tasks to handle failures or blockers; use retry, create/delegate follow-up work, or let the task surface as failed instead. | base |
 | `fn_task_refine` | Request a refinement of a completed or in-review task. Creates a new follow-up task in planning that references the original task as a dependency. Use this when a done or in-review task needs additional work, improvements, or follow-up changes. | base |
 | `fn_task_retry` | Retry a failed task — clears the error state. Non-review failures move to todo; in-review execution failures move to todo preserving progress; in-review merge failures stay in-place for auto-merge retry. | base |
 | `fn_task_search` | Search Fusion tasks by title, description, comments, and ID across all columns (full-text search). | base |
-| `fn_task_show` | Show full details for a task including steps, progress, and log entries. | base |
+| `fn_task_show` | Show a bounded, redacted diagnostic projection for a task and its available evidence. | base |
+| `fn_task_steer` | Send an operator steering comment to a task through Fusion's shared executor-facing steering channel. | base |
 | `fn_task_unarchive` | Unarchive an archived task (move from archived → its restore column). Restores to the pre-archive column when available, with active execution columns downgraded to todo. | base |
 | `fn_task_unpause` | Unpause a task — resumes automated agent and scheduler interaction. | base |
 | `fn_task_update` | Update fields on an existing task. Supports modifying the title, description, dependencies, assigned agent, priority, and workflow_id after task creation. Set workflow_id to a workflow ID to select it, or null to clear the workflow selection. At least one field must be provided. | base |
+| `fn_task_workflow_input` | Submit one operator reply for the exact workflow-input marker currently awaiting executor-owned input. | base |
 | `fn_token_usage` | Read token-consumption analytics (input/output/cache-read/cache-write token counts, task/chat-message counts, and derived USD cost) over an inclusive ISO-8601 [from, to] date range, optionally grouped by model, provider, or task. Wraps the SAME rollup that backs the dashboard 'TOKENS BY MODEL' widget — no new aggregation logic. Base-tier read — does not require --allow-destructive. | base |
 | `fn_trait_list` | List the available column traits (the behavior building blocks for workflow columns): id, name, description, and behavior flags. Use when authoring or updating a workflow IR. | base |
 | `fn_usage_windows` | Read the current live rate-limit usage windows (typically 'Session (5h)' and 'Weekly') for every authenticated AI provider, including percentUsed, resetAt/resetText, windowDurationMs, and pace. Wraps the SAME fetchAllProviderUsage() the dashboard Usage dropdown calls (reuses its 30s cache — no added provider API pressure). Base-tier read — does not require --allow-destructive. | base |
@@ -128,6 +137,7 @@ on the live server when the operator passes `--allow-destructive`.
 | `fn_workflow_select` | Assign a custom workflow to a task by its workflow ID. task_id is required when called from the MCP operator server (no ambient task context). | base |
 | `fn_workflow_settings` | Read or write a workflow's setting VALUES (the per-(workflow, project) policy knobs: step timeouts, review/approval gates, per-phase model lanes). action='get' returns both the raw `stored` values and the engine `effective` values (declaration defaults filled in, orphaned values dropped). action='set' writes `values` against the NAMED workflow's declared settings; a `null` value clears an override. Built-in workflow VALUES are writable, but built-in DECLARATIONS are not — declarations are authored in the workflow IR's `settings` array via fn_workflow_create/fn_workflow_update. An invalid value returns the typed rejection list and persists nothing. | base |
 | `fn_workflow_update` | Update a custom workflow definition (name/description/ir/layout). Built-ins cannot be edited. | base |
+| `fn_workflow_validate` | Dry-run validate a workflow IR by workflow_id or inline ir without creating or mutating any workflow. | base |
 <!-- END: mcp-curated-tools -->
 
 ## Tool-invocation conventions

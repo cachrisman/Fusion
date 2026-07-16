@@ -221,6 +221,10 @@ import {
   redactSecrets,
   type Task,
   type TaskComment,
+  type AgentLogEntry,
+  type TaskDocument,
+  type Artifact,
+  type TaskLogEntry,
   type ColumnId,
   type TaskPriority,
   type RegisteredProject,
@@ -232,9 +236,11 @@ import {
 } from "@fusion/core";
 import { scaffoldFusionProject } from "../commands/init.js";
 import { existsSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { isAbsolute, join, resolve } from "node:path";
 import {
   workflowDeleteParams,
+  workflowValidateParams,
   isInReviewMissingWorktreeSessionStartFailure,
   traitListParams,
   createFusionAuthStorage,
@@ -259,8 +265,6 @@ import {
   getFusionDir,
   validateAssignableAgentId,
   normalizeNullableStringInput,
-  getTaskSourceLabel,
-  formatDuplicateLineageLine,
   columnLabel,
   formatTaskLine,
   getResearchAvailability,
@@ -624,63 +628,274 @@ const fnTaskList: McpToolDefinition = {
   },
 };
 
+/*
+FNXC:McpEvidence 2026-07-16-20:30:
+FUSI-117 makes fn_task_show the operator MCP server's primary bounded diagnostic
+endpoint. Its projection intentionally excludes prompts, filesystem/session paths,
+and evidence bodies: those values would turn a task-status read into prompt or
+filesystem authority instead of the operational diagnosis capability it provides.
+*/
+const MCP_EVIDENCE_PAGE_DEFAULT_LIMIT = 20;
+const MCP_EVIDENCE_PAGE_MAX_LIMIT = 50;
+const MCP_EVIDENCE_MAX_OFFSET = 100_000;
+const MCP_RECENT_ACTIVITY_LIMIT = 10;
+const MCP_TASK_SHOW_STEPS_MAX = 50;
+const MCP_EVIDENCE_TEXT_MAX_BYTES = 2_048;
+const MCP_DOCUMENT_CONTENT_MAX_BYTES = 16 * 1024;
+const MCP_ARTIFACT_CONTENT_MAX_BYTES = 16 * 1024;
+const MCP_SAFE_ARTIFACT_INLINE_MIME_TYPES = new Set(["text/plain", "text/markdown", "application/json"]);
+
+function capUtf8Text(value: string, maxBytes: number): { text: string; truncated: boolean; byteSize: number } {
+  const byteSize = Buffer.byteLength(value, "utf8");
+  if (byteSize <= maxBytes) return { text: value, truncated: false, byteSize };
+  let used = 0;
+  let end = 0;
+  for (const char of value) {
+    const charBytes = Buffer.byteLength(char, "utf8");
+    if (used + charBytes > maxBytes) break;
+    used += charBytes;
+    end += char.length;
+  }
+  return { text: value.slice(0, end), truncated: true, byteSize };
+}
+
+/*
+FNXC:McpEvidence 2026-07-16-19:05:
+FUSI-117 evidence text can originate in tool-result details, which commonly
+contain absolute paths. Redact path-shaped text after secret redaction so an
+MCP evidence read cannot become filesystem-discovery authority.
+*/
+const MCP_FILESYSTEM_PATH_PATTERN = /(?:file:\/\/[^\s"'<>]+|(?:[A-Za-z]:[\\/]|\/|~[\\/]|\\\\)(?:[^\s"'`<>(){}\\,;]+[\\/])*[^\s"'`<>(){}\\,;]+)/g;
+
+function safeEvidenceText(value: unknown, maxBytes = MCP_EVIDENCE_TEXT_MAX_BYTES): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return redactSecrets(capUtf8Text(value, maxBytes).text).replace(MCP_FILESYSTEM_PATH_PATTERN, "[redacted-path]");
+}
+
+function requireMcpEvidenceKey(value: unknown, label: "key" = "key"): { ok: true; value: string } | { ok: false; error: string } {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(value)) return { ok: false, error: `${label} must be an opaque non-empty identifier.` };
+  return { ok: true, value };
+}
+
+function normalizeMcpEvidencePagination(value: unknown, label: "limit" | "offset"): { ok: true; value: number } | { ok: false; error: string } {
+  if (value === undefined) return { ok: true, value: label === "limit" ? MCP_EVIDENCE_PAGE_DEFAULT_LIMIT : 0 };
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) return { ok: false, error: `${label} must be a finite non-negative integer.` };
+  if (label === "limit") {
+    if (value === 0) return { ok: false, error: "limit must be greater than zero." };
+    return { ok: true, value: Math.min(value, MCP_EVIDENCE_PAGE_MAX_LIMIT) };
+  }
+  if (value > MCP_EVIDENCE_MAX_OFFSET) return { ok: false, error: `offset must be at most ${MCP_EVIDENCE_MAX_OFFSET}.` };
+  return { ok: true, value };
+}
+
+function projectSafeTaskActivity(entry: TaskLogEntry): Record<string, unknown> {
+  return redactSecretsDeep({
+    timestamp: entry.timestamp,
+    ...(safeEvidenceText(entry.action, 512) ? { action: safeEvidenceText(entry.action, 512) } : {}),
+    ...(safeEvidenceText(entry.outcome, 512) ? { outcome: safeEvidenceText(entry.outcome, 512) } : {}),
+  });
+}
+
+function projectSafeAgentLog(entry: AgentLogEntry): Record<string, unknown> {
+  return redactSecretsDeep({
+    timestamp: entry.timestamp,
+    type: entry.type,
+    ...(entry.agent ? { agent: entry.agent } : {}),
+    ...(safeEvidenceText(entry.text) ? { text: safeEvidenceText(entry.text) } : {}),
+    ...(safeEvidenceText(entry.detail) ? { detail: safeEvidenceText(entry.detail) } : {}),
+    ...(typeof entry.durationMs === "number" ? { duration_ms: entry.durationMs } : {}),
+    ...(typeof entry.timeToFirstTokenMs === "number" ? { time_to_first_token_ms: entry.timeToFirstTokenMs } : {}),
+  });
+}
+
+function projectSafeTaskDocumentMetadata(document: TaskDocument): Record<string, unknown> {
+  return redactSecretsDeep({
+    key: document.key,
+    revision: document.revision,
+    author: safeEvidenceText(document.author, 128),
+    created_at: document.createdAt,
+    updated_at: document.updatedAt,
+    content_bytes: Buffer.byteLength(document.content, "utf8"),
+    inline_content_available: document.content.length > 0,
+  });
+}
+
+function projectSafeArtifactMetadata(artifact: Artifact): Record<string, unknown> {
+  return redactSecretsDeep({
+    key: artifact.id,
+    type: artifact.type,
+    title: safeEvidenceText(artifact.title, 512),
+    ...(safeEvidenceText(artifact.description) ? { description: safeEvidenceText(artifact.description) } : {}),
+    ...(artifact.mimeType ? { mime_type: safeEvidenceText(artifact.mimeType, 128) } : {}),
+    ...(typeof artifact.sizeBytes === "number" ? { byte_size: artifact.sizeBytes } : {}),
+    actor_type: artifact.authorType,
+    created_at: artifact.createdAt,
+    updated_at: artifact.updatedAt,
+    inline_content_available: typeof artifact.content === "string" && !artifact.uri && !!artifact.mimeType && MCP_SAFE_ARTIFACT_INLINE_MIME_TYPES.has(artifact.mimeType),
+  });
+}
+
+function activeWorkflowInputMarker(task: Pick<Task, "paused" | "status" | "pausedReason">): string | undefined {
+  // The stored marker remains executor-owned and is deliberately returned byte-for-byte only while it is actively awaited.
+  return task.paused === true && task.status === "awaiting-user-input" && task.pausedReason?.startsWith("workflow-input:")
+    ? task.pausedReason
+    : undefined;
+}
+
+async function requireMcpEvidenceTask(store: TaskStore, taskId: string): Promise<Task | null> {
+  try {
+    return await store.getTask(taskId);
+  } catch {
+    return null;
+  }
+}
+
 const fnTaskShow: McpToolDefinition = {
   name: "fn_task_show",
-  description: "Show full details for a task including steps, progress, and log entries.",
+  description: "Show a bounded, redacted diagnostic projection for a task and its available evidence.",
   inputSchema: {
     type: "object",
-    properties: { id: { type: "string", description: "Task ID (e.g. FN-001)" } },
+    properties: { id: { type: "string", minLength: 1, description: "Task ID (e.g. FN-001)" } },
     required: ["id"],
   },
   async handler(store, args) {
-    const id = String(args.id ?? "").trim();
-    if (!id) return errorResult("id is required.");
-    const task = await store.getTask(id);
+    const id = requireMcpTaskId(args.id);
+    if (!id.ok) return errorResult("id is required.");
+    const task = await requireMcpEvidenceTask(store, id.value);
+    if (!task) return errorResult("Task not found.", { structuredContent: redactSecretsDeep({ outcome: "task-not-found", task_id: id.value }) });
+    const [agentLogCount, documents, artifacts] = await Promise.all([
+      store.getAgentLogCount(task.id),
+      store.getTaskDocuments(task.id),
+      store.getArtifacts(task.id),
+    ]);
+    const selection = store.getTaskWorkflowSelection(task.id);
+    const marker = activeWorkflowInputMarker(task);
+    const completedSteps = task.steps.filter((step) => step.status === "done" || step.status === "skipped").length;
+    const activity = task.log.slice(-MCP_RECENT_ACTIVITY_LIMIT).map(projectSafeTaskActivity);
+    const projection = redactSecretsDeep({
+      task: {
+        id: task.id,
+        ...(safeEvidenceText(task.title, 512) ? { title: safeEvidenceText(task.title, 512) } : {}),
+        column: task.column,
+        ...(task.status ? { status: safeEvidenceText(task.status, 128) } : {}),
+        ...(task.priority ? { priority: task.priority } : {}),
+        created_at: task.createdAt,
+        updated_at: task.updatedAt,
+        workflow: selection ? { id: selection.workflowId, enabled_step_ids: selection.stepIds } : { id: null },
+        pause: { paused: task.paused === true, ...(task.pausedReason ? { reason_kind: task.pausedReason.startsWith("workflow-input:") ? "workflow-input" : "other" } : {}) },
+        ...(safeEvidenceText(task.error, 1_024) ? { error: safeEvidenceText(task.error, 1_024) } : {}),
+        blockers: {
+          ...(task.blockedBy ? { dependency_task_id: task.blockedBy } : {}),
+          ...(task.overlapBlockedBy ? { overlap_task_id: task.overlapBlockedBy } : {}),
+        },
+        // FNXC:McpEvidence 2026-07-16-19:20: Preserve worktree diagnostic availability without exposing its filesystem path.
+        worktree: { available: Boolean(task.worktree) },
+        branch: {
+          ...(task.branch ? { name: safeEvidenceText(task.branch, 256) } : {}),
+          ...(task.baseBranch ? { base_name: safeEvidenceText(task.baseBranch, 256) } : {}),
+        },
+        session: {
+          ...(task.checkedOutBy ? { checkout_agent_id: task.checkedOutBy } : {}),
+          ...(task.checkoutRunId ? { run_id: task.checkoutRunId } : {}),
+        },
+        progress: {
+          current_step: task.currentStep,
+          total_steps: task.steps.length,
+          completed_steps: completedSteps,
+          steps: task.steps.slice(0, MCP_TASK_SHOW_STEPS_MAX).map((step, index) => ({ index, name: safeEvidenceText(step.name, 256), status: step.status })),
+          steps_truncated: task.steps.length > MCP_TASK_SHOW_STEPS_MAX,
+        },
+        recent_activity: activity,
+      },
+      evidence: {
+        agent_logs: { total_count: agentLogCount },
+        comments: { total_count: task.comments?.length ?? 0 },
+        documents: { total_count: documents.length },
+        artifacts: { total_count: artifacts.length },
+      },
+    }) as Record<string, unknown>;
+    /*
+    FNXC:McpEvidence 2026-07-16-19:25:
+    The active workflow marker is an exact, executor-owned compare-and-submit
+    token. It is intentionally appended after generic secret redaction: changing
+    even a secret-shaped substring would make the only displayed marker unusable
+    for `fn_task_workflow_input`.
+    */
+    if (marker) projection.expected_input_marker = marker;
+    return textResult(`Task ${task.id} diagnostic projection.`, { structuredContent: projection });
+  },
+};
 
-    const lines: string[] = [];
-    lines.push(`${task.id}: ${task.title || task.description}`);
-    lines.push(
-      `Column: ${columnLabel(task.column)}` +
-        (task.size ? ` · Size: ${task.size}` : "") +
-        (task.reviewLevel !== undefined ? ` · Review: ${task.reviewLevel}` : ""),
-    );
-    if (task.dependencies.length) lines.push(`Dependencies: ${task.dependencies.join(", ")}`);
-    const sourceLabel = getTaskSourceLabel(task);
-    if (sourceLabel) lines.push(`Created via: ${sourceLabel}`);
-    const duplicateLineage = await formatDuplicateLineageLine(task, store);
-    if (duplicateLineage) lines.push(duplicateLineage);
-    if (task.paused) lines.push("Status: PAUSED");
-    lines.push("");
+const fnTaskAgentLogs: McpToolDefinition = {
+  name: "fn_task_agent_logs",
+  description: "List a bounded, redacted page of persisted agent-log evidence for one task.",
+  inputSchema: { type: "object", properties: { task_id: { type: "string", minLength: 1 }, limit: { type: "number", minimum: 1 }, offset: { type: "number", minimum: 0 } }, required: ["task_id"] },
+  async handler(store, args) {
+    const taskId = requireMcpTaskId(args.task_id); const limit = normalizeMcpEvidencePagination(args.limit, "limit"); const offset = normalizeMcpEvidencePagination(args.offset, "offset");
+    if (!taskId.ok) return errorResult(taskId.error); if (!limit.ok) return errorResult(limit.error); if (!offset.ok) return errorResult(offset.error);
+    if (!await requireMcpEvidenceTask(store, taskId.value)) return errorResult("Task not found.");
+    const [totalCount, entries] = await Promise.all([store.getAgentLogCount(taskId.value), store.getAgentLogs(taskId.value, { limit: limit.value, offset: offset.value })]);
+    return textResult(`Agent-log evidence for ${taskId.value}.`, { structuredContent: redactSecretsDeep({ task_id: taskId.value, total_count: totalCount, limit: limit.value, offset: offset.value, entries: entries.map(projectSafeAgentLog) }) });
+  },
+};
 
-    if (task.steps.length > 0) {
-      const done = task.steps.filter((s) => s.status === "done").length;
-      lines.push(`Steps (${done}/${task.steps.length}):`);
-      for (let i = 0; i < task.steps.length; i++) {
-        const s = task.steps[i];
-        const icon = s.status === "done" ? "✓" : s.status === "in-progress" ? "▸" : s.status === "skipped" ? "–" : " ";
-        const marker = i === task.currentStep && s.status !== "done" ? " ◀" : "";
-        lines.push(`  [${icon}] ${i}: ${s.name}${marker}`);
-      }
-      lines.push("");
+const fnTaskDocumentsList: McpToolDefinition = {
+  name: "fn_task_documents_list",
+  description: "List metadata-only task documents in deterministic key order.",
+  inputSchema: { type: "object", properties: { task_id: { type: "string", minLength: 1 }, limit: { type: "number", minimum: 1 }, offset: { type: "number", minimum: 0 } }, required: ["task_id"] },
+  async handler(store, args) {
+    const taskId = requireMcpTaskId(args.task_id); const limit = normalizeMcpEvidencePagination(args.limit, "limit"); const offset = normalizeMcpEvidencePagination(args.offset, "offset");
+    if (!taskId.ok) return errorResult(taskId.error); if (!limit.ok) return errorResult(limit.error); if (!offset.ok) return errorResult(offset.error);
+    if (!await requireMcpEvidenceTask(store, taskId.value)) return errorResult("Task not found.");
+    const documents = await store.getTaskDocuments(taskId.value);
+    return textResult(`Document metadata for ${taskId.value}.`, { structuredContent: redactSecretsDeep({ task_id: taskId.value, total_count: documents.length, limit: limit.value, offset: offset.value, documents: documents.slice(offset.value, offset.value + limit.value).map(projectSafeTaskDocumentMetadata) }) });
+  },
+};
+
+const fnTaskDocumentGet: McpToolDefinition = {
+  name: "fn_task_document_get",
+  description: "Read capped, redacted inline text for one explicit task document key.",
+  inputSchema: { type: "object", properties: { task_id: { type: "string", minLength: 1 }, key: { type: "string", minLength: 1, maxLength: 64 } }, required: ["task_id", "key"] },
+  async handler(store, args) {
+    const taskId = requireMcpTaskId(args.task_id); const key = requireMcpEvidenceKey(args.key);
+    if (!taskId.ok) return errorResult(taskId.error); if (!key.ok) return errorResult(key.error);
+    if (!await requireMcpEvidenceTask(store, taskId.value)) return errorResult("Task not found.");
+    const document = await store.getTaskDocument(taskId.value, key.value);
+    if (!document) return errorResult("Document not found for task.");
+    const content = capUtf8Text(document.content, MCP_DOCUMENT_CONTENT_MAX_BYTES);
+    return textResult(`Document ${document.key} for ${taskId.value}.`, { structuredContent: redactSecretsDeep({ task_id: taskId.value, document: { ...projectSafeTaskDocumentMetadata(document), content: safeEvidenceText(content.text, MCP_DOCUMENT_CONTENT_MAX_BYTES) ?? "", content_truncated: content.truncated, original_byte_size: content.byteSize } }) });
+  },
+};
+
+const fnTaskArtifactsList: McpToolDefinition = {
+  name: "fn_task_artifacts_list",
+  description: "List metadata-only task artifacts; returned keys are opaque and task-scoped.",
+  inputSchema: { type: "object", properties: { task_id: { type: "string", minLength: 1 }, limit: { type: "number", minimum: 1 }, offset: { type: "number", minimum: 0 } }, required: ["task_id"] },
+  async handler(store, args) {
+    const taskId = requireMcpTaskId(args.task_id); const limit = normalizeMcpEvidencePagination(args.limit, "limit"); const offset = normalizeMcpEvidencePagination(args.offset, "offset");
+    if (!taskId.ok) return errorResult(taskId.error); if (!limit.ok) return errorResult(limit.error); if (!offset.ok) return errorResult(offset.error);
+    if (!await requireMcpEvidenceTask(store, taskId.value)) return errorResult("Task not found.");
+    const artifacts = await store.getArtifacts(taskId.value);
+    return textResult(`Artifact metadata for ${taskId.value}.`, { structuredContent: redactSecretsDeep({ task_id: taskId.value, total_count: artifacts.length, limit: limit.value, offset: offset.value, artifacts: artifacts.slice(offset.value, offset.value + limit.value).map(projectSafeArtifactMetadata) }) });
+  },
+};
+
+const fnTaskArtifactGet: McpToolDefinition = {
+  name: "fn_task_artifact_get",
+  description: "Read a capped inline text artifact only for the supplied task-scoped opaque key and safe MIME types.",
+  inputSchema: { type: "object", properties: { task_id: { type: "string", minLength: 1 }, key: { type: "string", minLength: 1, maxLength: 64 } }, required: ["task_id", "key"] },
+  async handler(store, args) {
+    const taskId = requireMcpTaskId(args.task_id); const key = requireMcpEvidenceKey(args.key);
+    if (!taskId.ok) return errorResult(taskId.error); if (!key.ok) return errorResult(key.error);
+    if (!await requireMcpEvidenceTask(store, taskId.value)) return errorResult("Task not found.");
+    const artifact = await store.getArtifact(key.value);
+    if (!artifact || artifact.taskId !== taskId.value) return errorResult("Artifact not found for task.");
+    const metadata = projectSafeArtifactMetadata(artifact);
+    if (artifact.uri || typeof artifact.content !== "string" || !artifact.mimeType || !MCP_SAFE_ARTIFACT_INLINE_MIME_TYPES.has(artifact.mimeType)) {
+      return textResult(`Artifact ${artifact.id} metadata only.`, { structuredContent: redactSecretsDeep({ task_id: taskId.value, artifact: metadata, inline_content_returned: false }) });
     }
-
-    if (task.prompt) {
-      const promptPreview = task.prompt.length > 500 ? task.prompt.slice(0, 500) + "\n... (truncated)" : task.prompt;
-      lines.push("Prompt:");
-      lines.push(promptPreview);
-      lines.push("");
-    }
-
-    if (task.log.length > 0) {
-      const recent = task.log.slice(-5);
-      lines.push(`Log (last ${recent.length}):`);
-      for (const l of recent) {
-        const ts = new Date(l.timestamp).toLocaleTimeString();
-        lines.push(`  ${ts}  ${l.action}${l.outcome ? ` → ${l.outcome}` : ""}`);
-      }
-    }
-
-    return textResult(lines.join("\n").trimEnd(), { structuredContent: redactSecretsDeep({ taskId: task.id, column: task.column }) });
+    const content = capUtf8Text(artifact.content, MCP_ARTIFACT_CONTENT_MAX_BYTES);
+    return textResult(`Inline artifact ${artifact.id} for ${taskId.value}.`, { structuredContent: redactSecretsDeep({ task_id: taskId.value, artifact: { ...metadata, content: safeEvidenceText(content.text, MCP_ARTIFACT_CONTENT_MAX_BYTES) ?? "", content_truncated: content.truncated, original_byte_size: content.byteSize, content_sha256: createHash("sha256").update(artifact.content, "utf8").digest("hex") }, inline_content_returned: true }) });
   },
 };
 
@@ -1757,7 +1972,7 @@ protects built-in workflows and re-homes occupants, so the destructive tier
 below does not re-implement any of that; it only gates registration of the
 name behind `allowDestructive` and adds a stderr audit line.
 */
-function bindWorkflowTool(name: "fn_workflow_list" | "fn_workflow_get" | "fn_workflow_create" | "fn_workflow_update" | "fn_workflow_select" | "fn_workflow_delete" | "fn_workflow_settings" | "fn_workflow_add_node" | "fn_workflow_remove_node" | "fn_workflow_add_edge" | "fn_workflow_remove_edge" | "fn_trait_list", description: string, inputSchema: McpJsonSchema): McpToolDefinition {
+function bindWorkflowTool(name: "fn_workflow_list" | "fn_workflow_get" | "fn_workflow_create" | "fn_workflow_update" | "fn_workflow_select" | "fn_workflow_delete" | "fn_workflow_settings" | "fn_workflow_add_node" | "fn_workflow_remove_node" | "fn_workflow_add_edge" | "fn_workflow_remove_edge" | "fn_trait_list" | "fn_workflow_validate", description: string, inputSchema: McpJsonSchema): McpToolDefinition {
   return {
     name,
     description,
@@ -1806,6 +2021,18 @@ const jsonSchemaOf = (schema: { properties?: Record<string, unknown>; required?:
   properties: schema.properties ?? {},
   required: schema.required,
 });
+
+/*
+FNXC:McpEvidence 2026-07-16-20:30:
+FUSI-117 binds dry-run workflow validation only through the engine-owned
+createWorkflowAuthoringTools factory. The operator MCP read capability must not
+fork IR, code-node, trait, or column-agent policy validation authority.
+*/
+const fnWorkflowValidate = bindWorkflowTool(
+  "fn_workflow_validate",
+  "Dry-run validate a workflow IR by workflow_id or inline ir without creating or mutating any workflow.",
+  jsonSchemaOf(workflowValidateParams),
+);
 
 const fnWorkflowList = bindWorkflowTool(
   "fn_workflow_list",
@@ -3559,6 +3786,11 @@ export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnTaskCreate,
   fnTaskList,
   fnTaskShow,
+  fnTaskAgentLogs,
+  fnTaskDocumentsList,
+  fnTaskDocumentGet,
+  fnTaskArtifactsList,
+  fnTaskArtifactGet,
   fnTaskSearch,
   fnTaskSteer,
   fnTaskWorkflowInput,
@@ -3588,6 +3820,7 @@ export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnResearchRetry,
   fnWorkflowList,
   fnWorkflowGet,
+  fnWorkflowValidate,
   fnWorkflowCreate,
   fnWorkflowUpdate,
   fnWorkflowSelect,

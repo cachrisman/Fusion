@@ -140,6 +140,22 @@ describe("shared task read tools", () => {
     }
   });
 
+  it("keeps FUSI-117 MCP evidence reads out of every runtime-agent read surface", () => {
+    /*
+    FNXC:McpEvidence 2026-07-16-20:30:
+    fn_workflow_validate is deliberately pre-existing in createWorkflowAuthoringTools;
+    FUSI-117 only registers that shared validator at the external MCP boundary.
+    */
+    const mcpOnlyEvidenceReads = ["fn_task_agent_logs", "fn_task_documents_list", "fn_task_document_get", "fn_task_artifacts_list", "fn_task_artifact_get"];
+    const monitor = new HeartbeatMonitor({ store: {} as never, taskStore: createStore(), rootDir: "/tmp/fn-test" });
+    const surfaces = [
+      toolNames(createTaskReadTools(createStore())),
+      toolNames((monitor as unknown as { createSharedHeartbeatWorkTools: (store: TaskStore) => Array<{ name: string }> }).createSharedHeartbeatWorkTools(createStore())),
+      toolNames(monitor.createHeartbeatTools("agent-1", createStore(), "FN-001")),
+    ];
+    for (const names of surfaces) for (const name of mcpOnlyEvidenceReads) expect(names).not.toContain(name);
+  });
+
   it("pins per-surface task-read tool name parity on canonical fn_task_show", () => {
     const triageProcessor = new TriageProcessor(createStore() as never, "/tmp/fn-test");
     const triageNames = toolNames((triageProcessor as unknown as { createTriageTools: (opts: unknown) => Array<{ name: string }> }).createTriageTools({

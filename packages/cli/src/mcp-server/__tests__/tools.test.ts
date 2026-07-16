@@ -159,6 +159,12 @@ const EXPECTED_TOOL_NAMES = [
   "fn_task_create",
   "fn_task_list",
   "fn_task_show",
+  // FUSI-117: bounded evidence reads (operator MCP only).
+  "fn_task_agent_logs",
+  "fn_task_documents_list",
+  "fn_task_document_get",
+  "fn_task_artifacts_list",
+  "fn_task_artifact_get",
   "fn_task_search",
   "fn_task_archive",
   // FUSI-116: external operator conversation controls (never executor runtime tools).
@@ -174,6 +180,7 @@ const EXPECTED_TOOL_NAMES = [
   "fn_agent_stop",
   "fn_workflow_list",
   "fn_workflow_get",
+  "fn_workflow_validate",
   "fn_workflow_create",
   "fn_workflow_update",
   "fn_workflow_select",
@@ -1172,6 +1179,125 @@ describe("fn mcp serve — in-memory server smoke test", () => {
       }
       expect(MCP_TOOL_REGISTRY.some((tool) => /comments_(update|delete)/.test(tool.name))).toBe(false);
       expect(DESTRUCTIVE_TOOL_TIER.some((tool) => /comments_(update|delete)/.test(tool.name))).toBe(false);
+    });
+  });
+
+  /*
+  FNXC:McpEvidence 2026-07-16-20:30:
+  FUSI-117 regression coverage exercises the operator MCP boundary with a real
+  TaskStore. Evidence keys are never paths, list responses stay metadata-only,
+  and inline bytes are allowed only for explicitly safe text MIME types.
+  */
+  describe("FUSI-117 bounded evidence and workflow validation", () => {
+    it("projects task diagnostics without prompt, paths, or inactive workflow markers", async () => {
+      const task = await store.createTask({ title: "Diagnostic token=top-secret", description: "Do not disclose prompt", source: { sourceType: "api" } });
+      await store.updateTask(task.id, {
+        paused: true,
+        status: "awaiting-user-input",
+        pausedReason: "workflow-input:token=opaque-marker@1: secret question body",
+        worktree: "/private/worktree",
+        sessionFile: "/private/session.json",
+        error: "token=diagnostic-secret",
+        steps: Array.from({ length: 51 }, (_, index) => ({ name: `Step ${index}`, status: "pending" as const })),
+        currentStep: 50,
+      });
+      await store.appendAgentLog(task.id, "agent evidence", "text", "detail token=log-secret", "executor");
+      await store.upsertTaskDocument(task.id, { key: "plan", content: "plan token=document-secret", author: "agent" });
+      await store.registerArtifact({ taskId: task.id, type: "document", title: "Evidence", mimeType: "text/plain", content: "artifact token=artifact-secret", authorId: "agent-1", authorType: "agent" });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const active = await client.callTool({ name: "fn_task_show", arguments: { id: task.id } });
+        const structured = active.structuredContent as { expected_input_marker?: string; task?: { worktree?: { available?: boolean } }; evidence?: { agent_logs?: { total_count: number }; documents?: { total_count: number }; artifacts?: { total_count: number } } };
+        expect(structured.expected_input_marker).toBe("workflow-input:token=opaque-marker@1: secret question body");
+        expect(structured.task?.worktree).toEqual({ available: true });
+        expect(structured.evidence).toMatchObject({ agent_logs: { total_count: 1 }, documents: { total_count: 1 }, artifacts: { total_count: 1 } });
+        expect((structured as { task?: { progress?: { steps?: unknown[]; steps_truncated?: boolean } } }).task?.progress).toMatchObject({ steps_truncated: true });
+        expect((structured as { task?: { progress?: { steps?: unknown[] } } }).task?.progress?.steps).toHaveLength(50);
+        const serialized = JSON.stringify(active);
+        for (const forbidden of ["Do not disclose prompt", "/private/worktree", "/private/session.json", "sessionFile", "top-secret", "diagnostic-secret", "document-secret", "artifact-secret"]) expect(serialized).not.toContain(forbidden);
+        await store.updateTask(task.id, { paused: false, status: "todo", pausedReason: "workflow-input:token=opaque-marker@1: secret question body" });
+        const inactive = await client.callTool({ name: "fn_task_show", arguments: { id: task.id } });
+        expect(JSON.stringify(inactive)).not.toContain("expected_input_marker");
+      } finally { await client.close(); await mcpServer.close(); }
+    });
+
+    it("pages redacted logs and metadata-first documents without path escape hatches", async () => {
+      const task = await store.createTask({ description: "Evidence pagination", source: { sourceType: "api" } });
+      await store.appendAgentLog(task.id, "old token=old-secret at /private/agent.log", "text", "detail-1", "executor");
+      await store.appendAgentLog(task.id, "new at \\\\server\\share\\agent.log", "tool", "detail token=new-secret at C:\\private\\agent.log", "reviewer");
+      await store.upsertTaskDocument(task.id, { key: "zeta", content: "z".repeat(17_000), author: "agent" });
+      await store.upsertTaskDocument(task.id, { key: "alpha", content: "alpha token=doc-secret", author: "user" });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const logs = await client.callTool({ name: "fn_task_agent_logs", arguments: { task_id: task.id, limit: 999, offset: 0 } });
+        const logProjection = logs.structuredContent as { total_count: number; limit: number; entries: Array<{ text?: string; detail?: string }> };
+        expect(logProjection).toMatchObject({ total_count: 2, limit: 50 });
+        expect(JSON.stringify(logs)).not.toContain("old-secret");
+        expect(JSON.stringify(logs)).not.toContain("new-secret");
+        expect(JSON.stringify(logs)).not.toContain("/private/agent.log");
+        expect(logProjection.entries[1]?.detail).not.toContain("C:\\private\\agent.log");
+        expect(logProjection.entries[1]?.text).not.toContain("\\\\server\\share\\agent.log");
+        const docs = await client.callTool({ name: "fn_task_documents_list", arguments: { task_id: task.id, limit: 1, offset: 0 } });
+        const docProjection = docs.structuredContent as { total_count: number; documents: Array<{ key: string }> };
+        expect(docProjection.total_count).toBe(2);
+        expect(docProjection.documents[0]?.key).toBe("alpha");
+        expect(JSON.stringify(docs)).not.toContain("doc-secret");
+        const doc = await client.callTool({ name: "fn_task_document_get", arguments: { task_id: task.id, key: "zeta" } });
+        const fetched = doc.structuredContent as { document: { content: string; content_truncated: boolean; original_byte_size: number } };
+        expect(fetched.document).toMatchObject({ content_truncated: true, original_byte_size: 17_000 });
+        expect(Buffer.byteLength(fetched.document.content, "utf8")).toBeLessThanOrEqual(16 * 1024);
+        for (const args of [{ task_id: task.id, key: "../PROMPT.md" }, { task_id: "missing", key: "alpha" }]) {
+          expect((await client.callTool({ name: "fn_task_document_get", arguments: args })).isError).toBe(true);
+        }
+      } finally { await client.close(); await mcpServer.close(); }
+    });
+
+    it("allows only safe inline artifact MIME types and validates workflow dry runs through the shared factory", async () => {
+      const task = await store.createTask({ description: "Artifact evidence", source: { sourceType: "api" } });
+      const plainContent = "/private/artifact.txt " + "é".repeat(10_000);
+      const plain = await store.registerArtifact({ taskId: task.id, type: "document", title: "Plain", mimeType: "text/plain", content: plainContent, authorId: "agent-1", authorType: "agent" });
+      const uri = await store.registerArtifact({ taskId: task.id, type: "document", title: "URI", mimeType: "text/plain", uri: "file:///private/secret", authorId: "agent-1", authorType: "agent" });
+      const html = await store.registerArtifact({ taskId: task.id, type: "document", title: "HTML", mimeType: "text/html", content: "<secret>", authorId: "agent-1", authorType: "agent" });
+      const other = await store.createTask({ description: "Other task", source: { sourceType: "api" } });
+      const foreign = await store.registerArtifact({ taskId: other.id, type: "document", title: "Foreign", mimeType: "text/plain", content: "no", authorId: "agent-1", authorType: "agent" });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const list = await client.callTool({ name: "fn_task_artifacts_list", arguments: { task_id: task.id, limit: 99 } });
+        const listed = JSON.stringify(list);
+        expect(listed).not.toContain("file:///private/secret");
+        expect(listed).not.toContain("authorId");
+        const readPlain = await client.callTool({ name: "fn_task_artifact_get", arguments: { task_id: task.id, key: plain.id } });
+        const plainProjection = readPlain.structuredContent as { artifact: { content: string; content_truncated: boolean; original_byte_size: number; content_sha256: string } };
+        expect(plainProjection.artifact.content_truncated).toBe(true);
+        expect(plainProjection.artifact.original_byte_size).toBe(Buffer.byteLength(plainContent, "utf8"));
+        expect(plainProjection.artifact.content_sha256).toMatch(/^[a-f0-9]{64}$/);
+        expect(Buffer.byteLength(plainProjection.artifact.content, "utf8")).toBeLessThanOrEqual(16 * 1024);
+        expect(plainProjection.artifact.content).not.toContain("/private/artifact.txt");
+        for (const artifact of [uri, html]) {
+          const metadataOnly = await client.callTool({ name: "fn_task_artifact_get", arguments: { task_id: task.id, key: artifact.id } });
+          expect((metadataOnly.structuredContent as { inline_content_returned?: boolean }).inline_content_returned).toBe(false);
+          expect(JSON.stringify(metadataOnly)).not.toContain("file:///private/secret");
+          expect(JSON.stringify(metadataOnly)).not.toContain("<secret>");
+        }
+        expect((await client.callTool({ name: "fn_task_artifact_get", arguments: { task_id: task.id, key: foreign.id } })).isError).toBe(true);
+        const valid = await client.callTool({ name: "fn_workflow_validate", arguments: { ir: workflowIr("Dry run") } });
+        expect((valid.structuredContent as { valid?: boolean }).valid).toBe(true);
+        const malformed = await client.callTool({ name: "fn_workflow_validate", arguments: { ir: { version: "v2", nodes: [] } } });
+        expect((malformed.structuredContent as { valid?: boolean }).valid).toBe(false);
+        const missing = await client.callTool({ name: "fn_workflow_validate", arguments: { workflow_id: "WF-missing" } });
+        expect(missing.isError).toBe(true);
+        const invalidCodeIr = {
+          ...workflowIr("Code failure"),
+          nodes: [
+            { id: "start", kind: "start", column: "todo" },
+            { id: "code", kind: "code", column: "todo", config: { source: "return (((" } },
+            { id: "end", kind: "end", column: "todo" },
+          ],
+          edges: [{ from: "start", to: "code" }, { from: "code", to: "end" }],
+        } as any;
+        const codeFailure = await client.callTool({ name: "fn_workflow_validate", arguments: { ir: invalidCodeIr } });
+        expect((codeFailure.structuredContent as { valid?: boolean }).valid).toBe(false);
+      } finally { await client.close(); await mcpServer.close(); }
     });
   });
 
