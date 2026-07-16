@@ -624,6 +624,10 @@ describe("fast mode workflow/runtime invariants", () => {
     const tools = mockedCreateFnAgent.mock.calls[0][0].customTools.map((tool: any) => tool.name);
     expect(tools).toContain("fn_task_done");
     expect(tools).not.toContain("fn_review_step");
+    expect(tools).not.toContain("fn_task_steer");
+    expect(tools).not.toContain("fn_task_workflow_input");
+    expect(tools).not.toContain("fn_task_comments_list");
+    expect(tools).not.toContain("fn_task_comments_create");
   });
 
   it("includes fn_review_step in standard mode", async () => {
@@ -648,6 +652,10 @@ describe("fast mode workflow/runtime invariants", () => {
 
     const tools = mockedCreateFnAgent.mock.calls[0][0].customTools.map((tool: any) => tool.name);
     expect(tools).toContain("fn_review_step");
+    expect(tools).not.toContain("fn_task_steer");
+    expect(tools).not.toContain("fn_task_workflow_input");
+    expect(tools).not.toContain("fn_task_comments_list");
+    expect(tools).not.toContain("fn_task_comments_create");
   });
 
   it("omits legacy fn_review_step in graph-owned standard execution sessions", async () => {

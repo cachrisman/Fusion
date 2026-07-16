@@ -218,7 +218,9 @@ import {
   isEphemeralAgent,
   RESEARCH_RUN_STATUSES,
   aggregateTokenAnalytics,
+  redactSecrets,
   type Task,
+  type TaskComment,
   type ColumnId,
   type TaskPriority,
   type RegisteredProject,
@@ -330,6 +332,91 @@ function textResult(text: string, extra?: Record<string, unknown>): McpToolCallR
 
 function errorResult(text: string, extra?: Record<string, unknown>): McpToolCallResult {
   return { content: [{ type: "text", text: `ERROR: ${text}` }], isError: true, ...(extra ?? {}) };
+}
+
+/*
+FNXC:McpConversationControls 2026-07-16-19:15:
+FUSI-116 exposes only narrow external-operator conversation controls. The
+workflow-input handler delegates opaque marker comparison exclusively to
+TaskStore.submitWorkflowInput; it must never parse or consume executor-owned
+markers. Comment edits and deletes are intentionally absent because those
+store paths do not maintain the executor steering mirror.
+*/
+const MCP_OPERATOR_COMMENT_AUTHOR = "mcp-operator";
+const MCP_COMMENT_TEXT_MAX_LENGTH = 2_000;
+const MCP_COMMENT_TEXT_RESULT_MAX_LENGTH = 2_000;
+const MCP_COMMENT_LIST_DEFAULT_LIMIT = 50;
+const MCP_COMMENT_LIST_MIN_LIMIT = 1;
+const MCP_COMMENT_LIST_MAX_LIMIT = 100;
+const MCP_COMMENT_LIST_MIN_OFFSET = 0;
+const MCP_COMMENT_LIST_MAX_OFFSET = 10_000;
+
+type SafeMcpComment = {
+  id: string;
+  text: string;
+  author: string;
+  createdAt: string;
+  updatedAt?: string;
+};
+
+type SafeWorkflowInputTask = {
+  taskId: string;
+  column: string;
+  status?: string;
+  paused: boolean;
+};
+
+function requireMcpTaskId(value: unknown): { ok: true; value: string } | { ok: false; error: string } {
+  if (typeof value !== "string" || !value.trim()) return { ok: false, error: "task_id is required." };
+  return { ok: true, value: value.trim() };
+}
+
+function normalizeMcpCommentText(value: unknown): { ok: true; value: string } | { ok: false; error: string } {
+  if (typeof value !== "string") return { ok: false, error: "text must be a string." };
+  const text = value.trim();
+  if (!text) return { ok: false, error: "text is required." };
+  if (text.length > MCP_COMMENT_TEXT_MAX_LENGTH) {
+    return { ok: false, error: `text must be at most ${MCP_COMMENT_TEXT_MAX_LENGTH} characters.` };
+  }
+  return { ok: true, value: text };
+}
+
+function requireOpaqueWorkflowInputMarker(value: unknown): { ok: true; value: string } | { ok: false; error: string } {
+  // Deliberately do not trim or parse this executor-owned opaque value.
+  if (typeof value !== "string" || value.length === 0) return { ok: false, error: "expected_input_marker is required." };
+  return { ok: true, value };
+}
+
+function validateMcpCommentPagination(
+  value: unknown,
+  label: "limit" | "offset",
+  defaultValue: number,
+  minimum: number,
+  maximum: number,
+): { ok: true; value: number } | { ok: false; error: string } {
+  if (value === undefined) return { ok: true, value: defaultValue };
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < minimum || value > maximum) {
+    return { ok: false, error: `${label} must be an integer between ${minimum} and ${maximum}.` };
+  }
+  return { ok: true, value };
+}
+
+function projectSafeMcpComment(comment: TaskComment): SafeMcpComment {
+  return redactSecretsDeep({
+    id: comment.id,
+    text: redactSecrets(comment.text).slice(0, MCP_COMMENT_TEXT_RESULT_MAX_LENGTH),
+    author: redactSecrets(comment.author).slice(0, 128),
+    createdAt: comment.createdAt,
+    ...(comment.updatedAt ? { updatedAt: comment.updatedAt } : {}),
+  });
+}
+
+function projectSafeWorkflowInputTask(task: { id: string; column: string; status?: string; paused: boolean }): SafeWorkflowInputTask {
+  return redactSecretsDeep({ taskId: task.id, column: task.column, ...(task.status ? { status: task.status } : {}), paused: task.paused });
+}
+
+function sortMcpCommentsOldestFirst(comments: readonly TaskComment[]): TaskComment[] {
+  return [...comments].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
 }
 
 /*
@@ -594,6 +681,132 @@ const fnTaskShow: McpToolDefinition = {
     }
 
     return textResult(lines.join("\n").trimEnd(), { structuredContent: redactSecretsDeep({ taskId: task.id, column: task.column }) });
+  },
+};
+
+const fnTaskSteer: McpToolDefinition = {
+  name: "fn_task_steer",
+  description: "Send an operator steering comment to a task through Fusion's shared executor-facing steering channel.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      task_id: { type: "string", description: "Task ID (e.g. FN-001)" },
+      text: { type: "string", minLength: 1, maxLength: 2000, description: "Steering text (1–2000 characters)" },
+    },
+    required: ["task_id", "text"],
+  },
+  async handler(store, args) {
+    const taskId = requireMcpTaskId(args.task_id);
+    if (!taskId.ok) return errorResult(taskId.error);
+    const text = normalizeMcpCommentText(args.text);
+    if (!text.ok) return errorResult(text.error);
+
+    try {
+      const task = await store.addSteeringComment(taskId.value, text.value, "user");
+      const comment = task.comments?.at(-1);
+      if (!comment) return errorResult("Steering comment was not recorded.");
+      const projection = redactSecretsDeep({ outcome: "submitted", taskId: task.id, comment: projectSafeMcpComment(comment) });
+      return textResult(`Submitted steering comment for ${task.id}.`, { structuredContent: projection });
+    } catch {
+      return errorResult("Task not found.", { structuredContent: redactSecretsDeep({ outcome: "task-not-found", taskId: taskId.value }) });
+    }
+  },
+};
+
+const fnTaskWorkflowInput: McpToolDefinition = {
+  name: "fn_task_workflow_input",
+  description: "Submit one operator reply for the exact workflow-input marker currently awaiting executor-owned input.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      task_id: { type: "string", description: "Task ID (e.g. FN-001)" },
+      text: { type: "string", minLength: 1, maxLength: 2000, description: "Workflow reply text (1–2000 characters)" },
+      expected_input_marker: { type: "string", description: "Exact opaque workflow-input marker previously shown by Fusion" },
+    },
+    required: ["task_id", "text", "expected_input_marker"],
+  },
+  async handler(store, args) {
+    const taskId = requireMcpTaskId(args.task_id);
+    if (!taskId.ok) return errorResult(taskId.error);
+    const text = normalizeMcpCommentText(args.text);
+    if (!text.ok) return errorResult(text.error);
+    const marker = requireOpaqueWorkflowInputMarker(args.expected_input_marker);
+    if (!marker.ok) return errorResult(marker.error);
+
+    // One delegation only: TaskStore owns all workflow-input state and marker checks.
+    const result = await store.submitWorkflowInput(taskId.value, text.value, marker.value);
+    if (result.ok) {
+      return textResult(`Submitted workflow input for ${result.task.id}.`, {
+        structuredContent: redactSecretsDeep({ outcome: "submitted", task: projectSafeWorkflowInputTask(result.task) }),
+      });
+    }
+
+    const structuredContent = redactSecretsDeep({
+      outcome: result.code,
+      ...("task" in result ? { task: projectSafeWorkflowInputTask(result.task) } : {}),
+    });
+    return errorResult(`Workflow input was not submitted: ${result.code}.`, { structuredContent });
+  },
+};
+
+const fnTaskCommentsList: McpToolDefinition = {
+  name: "fn_task_comments_list",
+  description: "List a task's ordinary comments using deterministic oldest-first pagination.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      task_id: { type: "string", description: "Task ID (e.g. FN-001)" },
+      limit: { type: "number", minimum: MCP_COMMENT_LIST_MIN_LIMIT, maximum: MCP_COMMENT_LIST_MAX_LIMIT, description: "Comments per page (default 50, maximum 100)" },
+      offset: { type: "number", minimum: MCP_COMMENT_LIST_MIN_OFFSET, maximum: MCP_COMMENT_LIST_MAX_OFFSET, description: "Zero-based oldest-first offset (maximum 10000)" },
+    },
+    required: ["task_id"],
+  },
+  async handler(store, args) {
+    const taskId = requireMcpTaskId(args.task_id);
+    if (!taskId.ok) return errorResult(taskId.error);
+    const limit = validateMcpCommentPagination(args.limit, "limit", MCP_COMMENT_LIST_DEFAULT_LIMIT, MCP_COMMENT_LIST_MIN_LIMIT, MCP_COMMENT_LIST_MAX_LIMIT);
+    if (!limit.ok) return errorResult(limit.error);
+    const offset = validateMcpCommentPagination(args.offset, "offset", MCP_COMMENT_LIST_MIN_OFFSET, MCP_COMMENT_LIST_MIN_OFFSET, MCP_COMMENT_LIST_MAX_OFFSET);
+    if (!offset.ok) return errorResult(offset.error);
+
+    try {
+      const task = await store.getTask(taskId.value);
+      const comments = sortMcpCommentsOldestFirst(task.comments ?? []);
+      const page = comments.slice(offset.value, offset.value + limit.value).map(projectSafeMcpComment);
+      const projection = redactSecretsDeep({ outcome: "listed", taskId: task.id, comments: page, limit: limit.value, offset: offset.value, total: comments.length });
+      return textResult(`Listed ${page.length} comment${page.length === 1 ? "" : "s"} for ${task.id}.`, { structuredContent: projection });
+    } catch {
+      return errorResult("Task not found.", { structuredContent: redactSecretsDeep({ outcome: "task-not-found", taskId: taskId.value }) });
+    }
+  },
+};
+
+const fnTaskCommentsCreate: McpToolDefinition = {
+  name: "fn_task_comments_create",
+  description: "Create an ordinary task comment with fixed server-owned MCP operator provenance.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      task_id: { type: "string", description: "Task ID (e.g. FN-001)" },
+      text: { type: "string", minLength: 1, maxLength: 2000, description: "Comment text (1–2000 characters)" },
+    },
+    required: ["task_id", "text"],
+  },
+  async handler(store, args) {
+    const taskId = requireMcpTaskId(args.task_id);
+    if (!taskId.ok) return errorResult(taskId.error);
+    const text = normalizeMcpCommentText(args.text);
+    if (!text.ok) return errorResult(text.error);
+
+    try {
+      const task = await store.addTaskComment(taskId.value, text.value, MCP_OPERATOR_COMMENT_AUTHOR);
+      const comment = task.comments?.at(-1);
+      if (!comment) return errorResult("Comment was not recorded.");
+      const projection = redactSecretsDeep({ outcome: "created", taskId: task.id, comment: projectSafeMcpComment(comment) });
+      return textResult(`Created comment ${comment.id} for ${task.id}.`, { structuredContent: projection });
+    } catch {
+      return errorResult("Task not found.", { structuredContent: redactSecretsDeep({ outcome: "task-not-found", taskId: taskId.value }) });
+    }
   },
 };
 
@@ -3347,6 +3560,10 @@ export const MCP_TOOL_REGISTRY: McpToolDefinition[] = [
   fnTaskList,
   fnTaskShow,
   fnTaskSearch,
+  fnTaskSteer,
+  fnTaskWorkflowInput,
+  fnTaskCommentsList,
+  fnTaskCommentsCreate,
   fnTaskArchive,
   fnTaskUpdate,
   fnTaskPause,

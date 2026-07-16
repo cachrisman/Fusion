@@ -161,6 +161,11 @@ const EXPECTED_TOOL_NAMES = [
   "fn_task_show",
   "fn_task_search",
   "fn_task_archive",
+  // FUSI-116: external operator conversation controls (never executor runtime tools).
+  "fn_task_steer",
+  "fn_task_workflow_input",
+  "fn_task_comments_list",
+  "fn_task_comments_create",
   "fn_delegate_task",
   "fn_list_agents",
   "fn_agent_show",
@@ -976,6 +981,198 @@ describe("fn mcp serve — in-memory server smoke test", () => {
       await client.close();
       await mcpServer.close();
     }
+  });
+
+  /*
+  FNXC:McpConversationControls 2026-07-16-19:15:
+  FUSI-116's local operator MCP controls must remain a thin boundary over
+  shared TaskStore paths: all invalid external inputs are no-mutation, opaque
+  workflow markers stay executor-owned, and comment reads never expose raw
+  task state or comment metadata.
+  */
+  describe("FUSI-116 operator conversation controls", () => {
+    const marker = "workflow-input:approval@1737000000000: Confirm rollout?";
+
+    it("rejects required/wrong-type schemas and handler-level invalid text without mutations", async () => {
+      const task = await store.createTask({ description: "Validate MCP conversation inputs", source: { sourceType: "api" } });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const textTools = [
+          { name: "fn_task_steer", base: { task_id: task.id } },
+          { name: "fn_task_workflow_input", base: { task_id: task.id, expected_input_marker: marker } },
+          { name: "fn_task_comments_create", base: { task_id: task.id } },
+        ] as const;
+        const before = await store.getTask(task.id);
+
+        for (const tool of textTools) {
+          const missing = await client.callTool({ name: tool.name, arguments: tool.base });
+          expect(missing.isError, `${tool.name} required text`).toBe(true);
+          const wrongType = await client.callTool({ name: tool.name, arguments: { ...tool.base, text: 7 } });
+          expect(wrongType.isError, `${tool.name} text type`).toBe(true);
+
+          for (const text of ["", "   ", "x".repeat(2_001)]) {
+            const invalid = await client.callTool({ name: tool.name, arguments: { ...tool.base, text } });
+            expect(invalid.isError, `${tool.name} invalid text`).toBe(true);
+          }
+        }
+
+        const listedMissing = await client.callTool({ name: "fn_task_comments_list", arguments: {} });
+        expect(listedMissing.isError).toBe(true);
+        const listedWrongType = await client.callTool({ name: "fn_task_comments_list", arguments: { task_id: 7 } });
+        expect(listedWrongType.isError).toBe(true);
+        for (const pagination of [{ limit: 1.5 }, { limit: Infinity }, { offset: -1 }, { offset: 10_001 }]) {
+          const invalid = await client.callTool({ name: "fn_task_comments_list", arguments: { task_id: task.id, ...pagination } });
+          expect(invalid.isError).toBe(true);
+        }
+
+        const after = await store.getTask(task.id);
+        expect(after.comments ?? []).toEqual(before.comments ?? []);
+        expect(after.steeringComments ?? []).toEqual(before.steeringComments ?? []);
+        expect(after.paused).toBe(before.paused);
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("steers through the shared comment and executor mirror without exposing raw task state", async () => {
+      const task = await store.createTask({ description: "Steering secret token=raw-steering-secret", source: { sourceType: "api" } });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const result = await client.callTool({ name: "fn_task_steer", arguments: { task_id: task.id, text: "Proceed with token=raw-steering-secret" } });
+        expect(result.isError).not.toBe(true);
+        const updated = await store.getTask(task.id);
+        expect(updated.comments).toHaveLength(1);
+        expect(updated.comments?.[0]).toMatchObject({ text: "Proceed with token=raw-steering-secret", author: "user" });
+        expect(updated.steeringComments).toHaveLength(1);
+        expect(updated.steeringComments?.[0]).toMatchObject({ id: updated.comments?.[0]?.id, text: "Proceed with token=raw-steering-secret", author: "user" });
+        expect(updated.log.some((entry) => entry.action === "Comment added by user")).toBe(true);
+
+        const serialized = JSON.stringify(result);
+        expect(serialized).not.toContain("raw-steering-secret");
+        expect(serialized).toContain("[REDACTED]");
+        expect(serialized).not.toContain("description");
+        expect(serialized).not.toContain("steeringComments");
+        expect(serialized).not.toContain("log");
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("delegates matching workflow input once and returns typed no-mutation conflicts", async () => {
+      const matching = await store.createTask({ description: "Await exact marker", source: { sourceType: "api" } });
+      await store.updateTask(matching.id, { paused: true, status: "awaiting-user-input", pausedReason: marker });
+      const wrong = await store.createTask({ description: "Reject stale marker", source: { sourceType: "api" } });
+      await store.updateTask(wrong.id, { paused: true, status: "awaiting-user-input", pausedReason: marker });
+      const replaced = await store.createTask({ description: "Reject replaced marker", source: { sourceType: "api" } });
+      await store.updateTask(replaced.id, { paused: true, status: "awaiting-user-input", pausedReason: "workflow-input:replacement@2: Revised prompt" });
+      const nonWorkflow = await store.createTask({ description: "Operator pause", source: { sourceType: "api" } });
+      await store.updateTask(nonWorkflow.id, { paused: true, status: "awaiting-user-input", pausedReason: "operator-requested-pause" });
+      const notPaused = await store.createTask({ description: "Already resumed", source: { sourceType: "api" } });
+      const { client, mcpServer } = await connectClient();
+      try {
+        const submitted = await client.callTool({ name: "fn_task_workflow_input", arguments: { task_id: matching.id, text: "Ship it", expected_input_marker: marker } });
+        expect(submitted.isError).not.toBe(true);
+        expect((submitted.structuredContent as { outcome?: string }).outcome).toBe("submitted");
+        const resumed = await store.getTask(matching.id);
+        expect(resumed.paused).toBeFalsy();
+        expect(resumed.pausedReason).toBe(marker);
+        expect(resumed.comments?.filter((comment) => comment.text === "Ship it")).toHaveLength(1);
+        expect(resumed.steeringComments?.filter((comment) => comment.text === "Ship it")).toHaveLength(1);
+
+        const missing = await client.callTool({ name: "fn_task_workflow_input", arguments: { task_id: "FN-MISSING", text: "Do not append", expected_input_marker: marker } });
+        expect(missing.isError).toBe(true);
+        expect((missing.structuredContent as { outcome?: string }).outcome).toBe("not-found");
+
+        for (const [task, expected, expectedInputMarker] of [[wrong, "marker-mismatch", `${marker} stale`], [replaced, "marker-mismatch", marker], [nonWorkflow, "not-workflow-input", marker], [notPaused, "not-paused", marker]] as const) {
+          const before = await store.getTask(task.id);
+          const result = await client.callTool({ name: "fn_task_workflow_input", arguments: { task_id: task.id, text: "Do not append", expected_input_marker: expectedInputMarker } });
+          expect(result.isError).toBe(true);
+          expect((result.structuredContent as { outcome?: string }).outcome).toBe(expected);
+          if (before.pausedReason) expect(JSON.stringify(result)).not.toContain(before.pausedReason);
+          const after = await store.getTask(task.id);
+          expect(after.paused).toBe(before.paused);
+          expect(after.pausedReason).toBe(before.pausedReason);
+          expect(after.comments ?? []).toEqual(before.comments ?? []);
+          expect(after.steeringComments ?? []).toEqual(before.steeringComments ?? []);
+        }
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("creates server-authored ordinary comments and pages redacted comment projections deterministically", async () => {
+      const task = await store.createTask({ description: "Comment pagination", source: { sourceType: "api" } });
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-07-16T19:15:00.000Z"));
+      try {
+        await store.addTaskComment(task.id, "first token=first-secret", "existing-author");
+        await store.addTaskComment(task.id, "second", "existing-author");
+        await store.addComment(task.id, "third", "github", { source: "github-review", externalId: "token=metadata-secret" });
+      } finally {
+        vi.useRealTimers();
+      }
+
+      const seeded = await store.getTask(task.id);
+      const expectedIds = [...(seeded.comments ?? [])]
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+        .map((comment) => comment.id);
+      const { client, mcpServer } = await connectClient();
+      try {
+        const created = await client.callTool({ name: "fn_task_comments_create", arguments: { task_id: task.id, text: "MCP comment", author: "spoofed-author" } });
+        expect(created.isError).not.toBe(true);
+        const afterCreate = await store.getTask(task.id);
+        const mcpComment = afterCreate.comments?.at(-1);
+        expect(mcpComment).toMatchObject({ text: "MCP comment", author: "mcp-operator" });
+        expect(afterCreate.steeringComments ?? []).toEqual([]);
+
+        const defaultPage = await client.callTool({ name: "fn_task_comments_list", arguments: { task_id: task.id } });
+        expect(defaultPage.isError).not.toBe(true);
+        const defaultStructured = defaultPage.structuredContent as { comments: Array<{ id: string; text: string; author: string }>; limit: number; offset: number; total: number };
+        expect(defaultStructured.limit).toBe(50);
+        expect(defaultStructured.offset).toBe(0);
+        expect(defaultStructured.total).toBe(4);
+        expect(defaultStructured.comments.map((comment) => comment.id)).toEqual([...expectedIds, mcpComment!.id].sort((a, b) => {
+          const aComment = afterCreate.comments!.find((comment) => comment.id === a)!;
+          const bComment = afterCreate.comments!.find((comment) => comment.id === b)!;
+          return aComment.createdAt.localeCompare(bComment.createdAt) || a.localeCompare(b);
+        }));
+        expect(JSON.stringify(defaultPage)).not.toContain("first-secret");
+        expect(JSON.stringify(defaultPage)).not.toContain("metadata-secret");
+        expect(JSON.stringify(defaultPage)).toContain("[REDACTED]");
+        expect(JSON.stringify(defaultStructured.comments[2])).not.toContain("externalId");
+        expect(JSON.stringify(defaultStructured.comments[2])).not.toContain("source");
+
+        const pageOne = await client.callTool({ name: "fn_task_comments_list", arguments: { task_id: task.id, limit: 1, offset: 0 } });
+        const pageTwo = await client.callTool({ name: "fn_task_comments_list", arguments: { task_id: task.id, limit: 1, offset: 1 } });
+        const maxPage = await client.callTool({ name: "fn_task_comments_list", arguments: { task_id: task.id, limit: 100, offset: 0 } });
+        const firstId = (pageOne.structuredContent as { comments: Array<{ id: string }> }).comments[0]?.id;
+        const secondId = (pageTwo.structuredContent as { comments: Array<{ id: string }> }).comments[0]?.id;
+        expect(firstId).not.toBe(secondId);
+        const allSingleCommentPages = await Promise.all(defaultStructured.comments.map((_, offset) =>
+          client.callTool({ name: "fn_task_comments_list", arguments: { task_id: task.id, limit: 1, offset } }),
+        ));
+        expect(allSingleCommentPages.map((page) => (page.structuredContent as { comments: Array<{ id: string }> }).comments[0]?.id))
+          .toEqual(defaultStructured.comments.map((comment) => comment.id));
+        expect((maxPage.structuredContent as { comments: Array<{ id: string }>; limit: number }).limit).toBe(100);
+        expect((maxPage.structuredContent as { comments: Array<{ id: string }> }).comments.map((comment) => comment.id)).toEqual(defaultStructured.comments.map((comment) => comment.id));
+      } finally {
+        await client.close();
+        await mcpServer.close();
+      }
+    });
+
+    it("never registers comment edit or delete controls in either resolved registry", () => {
+      const forbidden = ["fn_task_comments_update", "fn_task_comments_delete"];
+      for (const registry of [buildMcpToolRegistry({}), buildMcpToolRegistry({ allowDestructive: true })]) {
+        const names = registry.map((tool) => tool.name);
+        for (const name of forbidden) expect(names).not.toContain(name);
+      }
+      expect(MCP_TOOL_REGISTRY.some((tool) => /comments_(update|delete)/.test(tool.name))).toBe(false);
+      expect(DESTRUCTIVE_TOOL_TIER.some((tool) => /comments_(update|delete)/.test(tool.name))).toBe(false);
+    });
   });
 
   describe("destructive tier dispatch (allowDestructive: true)", () => {
